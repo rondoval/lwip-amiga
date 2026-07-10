@@ -1,0 +1,5 @@
+build*/
+*.o
+*.uaem
+compile_commands.json
+.cache/
