@@ -30,12 +30,14 @@ struct NdRxWrap
 #define NDIF_MAX_STACK_SEGS 16
 #define NDIF_MIN_WRAPS      64
 
-static BOOL ndif_rx_csum_ok(const struct NetDevRxDesc *d);
+static BOOL ndif_rx_csum_ok(const struct NetDevRxDesc *d, ULONG raw);
+static UWORD ndif_sum_range(const UBYTE *data, ULONG len);
 
 /* ---------------------------------------------------------------- RX --- */
 
 static void ndif_rx_pbuf_freed(struct pbuf *p)
 {
+    // KprintfH("[netdevif] %s: pbuf 0x%08lx\n", __func__, (ULONG)p);
     struct NdRxWrap *w = (struct NdRxWrap *)p;
     struct NetdevIf *ndi = w->nrw_If;
 
@@ -47,6 +49,7 @@ static void ndif_rx_pbuf_freed(struct pbuf *p)
 
 static ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULONG count)
 {
+    // KprintfH("[netdevif] %s: count %lu\n", __func__, count);
     struct NetdevIf *ndi = stackctx;
     ULONG consumed = 0;
 
@@ -60,12 +63,24 @@ static ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULON
          * frames without the VALID verdict get their RAW sum folded here.
          * A bad frame is consumed and its buffer released immediately. */
         if (ndi->ndi_RxOffload && !(d->nrd_Flags & NDRF_CSUM_VALID) &&
-            (d->nrd_Flags & NDRF_CSUM_RAW) && !ndif_rx_csum_ok(d))
+            (d->nrd_Flags & NDRF_CSUM_RAW) && !ndif_rx_csum_ok(d, d->nrd_CsumRaw))
         {
-            ndi->ndi_RxCsumBad++;
-            ndi->ndi_Ops->ndo_RxRelease(ndi->ndi_Drv, d->nrd_Cookie);
-            consumed++;
-            continue;
+            /* The HW raw sum disagreed: verify in software before dropping,
+             * and log the pair — live traffic maps the RXCHK coverage and
+             * byte order while the hardware decode is still in question. */
+            UWORD sw = ndif_sum_range(d->nrd_Data + SIZEOF_ETH_HDR,
+                                      d->nrd_Len - SIZEOF_ETH_HDR);
+            BOOL ok = ndif_rx_csum_ok(d, sw);
+            Kprintf("[netdevif] RX csum: hw 0x%04lx sw 0x%04lx len %lu %s\n",
+                    (ULONG)d->nrd_CsumRaw, (ULONG)sw, (ULONG)d->nrd_Len,
+                    (ULONG)(ok ? "pass(sw)" : "DROP"));
+            if (!ok)
+            {
+                ndi->ndi_RxCsumBad++;
+                ndi->ndi_Ops->ndo_RxRelease(ndi->ndi_Drv, d->nrd_Cookie);
+                consumed++;
+                continue;
+            }
         }
 
         struct NdRxWrap *w = ndi->ndi_FreeWraps;
@@ -96,6 +111,7 @@ static ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULON
 
 static void ndif_tx_done(APTR stackctx, APTR const *cookies, ULONG count)
 {
+    // KprintfH("[netdevif] %s: count %lu\n", __func__, count);
     (void)stackctx;
 
     netstack_lock();
@@ -108,6 +124,7 @@ static void ndif_tx_done(APTR stackctx, APTR const *cookies, ULONG count)
  * L4 length), folded. */
 static UWORD ndif_pseudo_sum(const struct ip_hdr *ip, ULONG start)
 {
+    // KprintfH("[netdevif] %s: start 0x%08lx\n", __func__, start);
     ULONG sum = start;
     const UWORD *addr = (const UWORD *)&ip->src;
     for (int i = 0; i < 4; i++)
@@ -125,6 +142,7 @@ static UWORD ndif_pseudo_sum(const struct ip_hdr *ip, ULONG start)
  * offloadable (non-IP, fragments, other protocols). */
 static ULONG ndif_l4_offsets(struct pbuf *p, UWORD *csum_start, UWORD *csum_offset)
 {
+    // KprintfH("[netdevif] %s: len %lu\n", __func__, (ULONG)p->len);
     if (p->len < SIZEOF_ETH_HDR + sizeof(struct ip_hdr))
         return 0xFFFF; /* headers must be contiguous in the first pbuf */
 
@@ -161,15 +179,34 @@ static ULONG ndif_l4_offsets(struct pbuf *p, UWORD *csum_start, UWORD *csum_offs
     return proto;
 }
 
+/* 1's-complement sum over a byte range, network order, odd tail
+ * zero-padded, folded to 16 bits. */
+static UWORD ndif_sum_range(const UBYTE *data, ULONG len)
+{
+    ULONG sum = 0;
+    while (len > 1)
+    {
+        sum += ((ULONG)data[0] << 8) | data[1];
+        data += 2;
+        len -= 2;
+    }
+    if (len != 0)
+        sum += (ULONG)data[0] << 8;
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    return (UWORD)sum;
+}
+
 /* RX verification for frames the driver reported only a RAW checksum for.
- * The raw value is the 1's-complement sum over the frame past the Ethernet
+ * `raw` is the 1's-complement sum over the frame past the Ethernet
  * header (IP header + payload). A valid IP header folds to -0, so for a
  * valid TCP/UDP checksum fold(raw + pseudo-header) == 0xFFFF. Non-IP,
  * non-TCP/UDP and checksum-less UDP pass through; fragments pass and are
  * validated only by the reassembled IP checksum (documented gap — the
  * Ethernet FCS already covered the wire). */
-static BOOL ndif_rx_csum_ok(const struct NetDevRxDesc *d)
+static BOOL ndif_rx_csum_ok(const struct NetDevRxDesc *d, ULONG raw)
 {
+    // KprintfH("[netdevif] %s: len %lu\n", __func__, (ULONG)d->nrd_Len);
     if (d->nrd_Len < SIZEOF_ETH_HDR + sizeof(struct ip_hdr))
         return TRUE;
 
@@ -194,12 +231,31 @@ static BOOL ndif_rx_csum_ok(const struct NetDevRxDesc *d)
             return TRUE; /* UDP without checksum is legal on IPv4 */
     }
 
-    return ndif_pseudo_sum(ip, d->nrd_CsumRaw) == 0xFFFF;
+    return ndif_pseudo_sum(ip, raw) == 0xFFFF;
 }
 
 static err_t ndif_linkoutput(struct netif *nif, struct pbuf *p)
 {
+    // KprintfH("[netdevif] %s: pbuf 0x%08lx tot_len %lu\n", __func__, (ULONG)p, (ULONG)p->tot_len);
     struct NetdevIf *ndi = nif->state;
+
+#ifdef DEBUG
+    /* 2026-07-14 corruption hunt: the observed wild 2-byte writes match
+     * ndif_l4_offsets' checksum seed going through a trashed pbuf payload.
+     * Refuse implausible chains here — a dropped frame beats a wild write —
+     * and log the moment the stack hands us garbage. */
+    for (struct pbuf *q = p; q != NULL; q = q->next)
+    {
+        if ((ULONG)q->payload < 0x1000 || (ULONG)q->payload >= 0xF0000000UL ||
+            q->len > 2048)
+        {
+            Kprintf("[netdevif] BAD TX PBUF: p=0x%08lx q=0x%08lx payload=0x%08lx len=%lu ref=%lu — frame dropped\n",
+                    (ULONG)p, (ULONG)q, (ULONG)q->payload, (ULONG)q->len, (ULONG)q->ref);
+            ndi->ndi_TxOversize++;
+            return ERR_IF;
+        }
+    }
+#endif
 
     /* Bound the scatter list; coalesce pathological chains. */
     ULONG max_segs = ndi->ndi_Caps.ndc_TxMaxSegs;
@@ -264,6 +320,7 @@ static err_t ndif_linkoutput(struct netif *nif, struct pbuf *p)
 
 static void ndif_link_change(APTR stackctx, const struct NetDevLinkState *state)
 {
+    Kprintf("[netdevif] %s: flags 0x%08lx\n", __func__, (ULONG)state->ndls_Flags);
     struct NetdevIf *ndi = stackctx;
 
     netstack_lock();
@@ -284,16 +341,19 @@ static const struct NetDevStackOps ndif_stack_ops = {
 
 const struct NetDevStackOps *netdevif_stack_ops(void)
 {
+    KprintfH("[netdevif] %s\n", __func__);
     return &ndif_stack_ops;
 }
 
 APTR netdevif_dma_alloc(struct NetdevIf *ndi, ULONG size)
 {
+    // KprintfH("[netdevif] %s: size %lu\n", __func__, size);
     return ndi->ndi_Ops->ndo_DmaAlloc(ndi->ndi_Drv, size, MEM_ALIGNMENT);
 }
 
 void netdevif_dma_free(struct NetdevIf *ndi, APTR ptr, ULONG size)
 {
+    // KprintfH("[netdevif] %s: ptr 0x%08lx size %lu\n", __func__, (ULONG)ptr, size);
     if (ndi == NULL)
     {
         Kprintf("[netdevif] DMA free after detach — leaked %lu bytes\n", size);
@@ -304,6 +364,7 @@ void netdevif_dma_free(struct NetdevIf *ndi, APTR ptr, ULONG size)
 
 static err_t ndif_netif_init(struct netif *nif)
 {
+    Kprintf("[netdevif] %s: nif 0x%08lx\n", __func__, (ULONG)nif);
     struct NetdevIf *ndi = nif->state;
 
     nif->name[0] = 'n';
@@ -345,8 +406,13 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
     ndi->ndi_RxNoWrap = 0;
     ndi->ndi_TxOversize = 0;
 
-    /* RX wrappers: enough for the ring plus what sockets may hold. */
-    ULONG count = (ULONG)caps->ndc_RxRingSlots * 2;
+    /* RX wrappers: one per buffer the stack can possibly hold. The driver
+     * advertises its pool size; a wrap count below it silently re-imposes
+     * the old limit as ndi_RxNoWrap backpressure. Ring*2 is the fallback
+     * for drivers that predate ndc_RxPoolBufs (field reads 0). */
+    ULONG count = caps->ndc_RxPoolBufs;
+    if (count < (ULONG)caps->ndc_RxRingSlots * 2)
+        count = (ULONG)caps->ndc_RxRingSlots * 2;
     if (count < NDIF_MIN_WRAPS)
         count = NDIF_MIN_WRAPS;
     ndi->ndi_WrapStorageSize = count * sizeof(struct NdRxWrap);
@@ -383,6 +449,7 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
 
 void netdevif_destroy(struct NetdevIf *ndi)
 {
+    Kprintf("[netdevif] %s: ndi 0x%08lx\n", __func__, (ULONG)ndi);
     netstack_lock();
     netif_remove(&ndi->ndi_Netif);
     if (netstack.ns_ActiveNetdev == ndi)

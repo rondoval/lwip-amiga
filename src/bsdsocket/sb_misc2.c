@@ -25,6 +25,7 @@
 LONG bsd_Dup2Socket(LONG oldSock asm("d0"), LONG newSock asm("d1"),
                     struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: old=%ld new=%ld\n", __func__, oldSock, newSock);
     struct SbSocket *s = sb_fd_get(base, oldSock);
     if (s == NULL)
     {
@@ -70,6 +71,7 @@ LONG bsd_Dup2Socket(LONG oldSock asm("d0"), LONG newSock asm("d1"),
 LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
                  struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: sock=%ld flags=%ld\n", __func__, sock, flags);
     const struct sb_msghdr *mh = msg;
     struct SbSocket *s = sb_fd_get(base, sock);
 
@@ -164,6 +166,7 @@ LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
 LONG bsd_recvmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
                  struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: sock=%ld flags=%ld\n", __func__, sock, flags);
     struct sb_msghdr *mh = msg;
     struct SbSocket *s = sb_fd_get(base, sock);
 
@@ -232,6 +235,7 @@ LONG bsd_recvmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
  * pointer. Anything else is copied through. */
 static ULONG sb_vformat(char *dst, ULONG max, const char *fmt, const ULONG *args)
 {
+    KprintfH("[bsdsocket] %s: fmt=%s\n", __func__, (ULONG)fmt);
     ULONG o = 0;
     ULONG ai = 0;
 
@@ -321,6 +325,7 @@ VOID bsd_vsyslog(LONG pri asm("d0"), STRPTR msg asm("a0"), APTR args asm("a1"),
                  struct SocketBase *base asm("a6"))
 {
     (void)base;
+    (void)pri;
     char buf[256];
 
     if (msg == NULL)
@@ -333,6 +338,7 @@ VOID bsd_vsyslog(LONG pri asm("d0"), STRPTR msg asm("a0"), APTR args asm("a1"),
 
 static struct SbReleased *sb_released_find(struct SocketBase *root, LONG id)
 {
+    KprintfH("[bsdsocket] %s: id=%ld\n", __func__, id);
     for (struct MinNode *n = root->releasedSockets.mlh_Head; n->mln_Succ != NULL; n = n->mln_Succ)
     {
         struct SbReleased *r = (struct SbReleased *)n;
@@ -344,6 +350,7 @@ static struct SbReleased *sb_released_find(struct SocketBase *root, LONG id)
 
 static LONG sb_release_common(struct SocketBase *base, LONG sock, LONG id, BOOL copy)
 {
+    KprintfH("[bsdsocket] %s: sock=%ld id=%ld\n", __func__, sock, id);
     struct SocketBase *root = SB_ROOT(base);
     struct SbSocket *s = sb_fd_get(base, sock);
 
@@ -397,18 +404,21 @@ static LONG sb_release_common(struct SocketBase *base, LONG sock, LONG id, BOOL 
 LONG bsd_ReleaseSocket(LONG sock asm("d0"), LONG id asm("d1"),
                        struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: sock=%ld id=%ld\n", __func__, sock, id);
     return sb_release_common(base, sock, id, FALSE);
 }
 
 LONG bsd_ReleaseCopyOfSocket(LONG sock asm("d0"), LONG id asm("d1"),
                              struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: sock=%ld id=%ld\n", __func__, sock, id);
     return sb_release_common(base, sock, id, TRUE);
 }
 
 LONG bsd_ObtainSocket(LONG id asm("d0"), LONG domain asm("d1"), LONG type asm("d2"),
                       LONG protocol asm("d3"), struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: id=%ld type=%ld\n", __func__, id, type);
     struct SocketBase *root = SB_ROOT(base);
     (void)domain;
     (void)protocol;
@@ -469,6 +479,7 @@ static const struct
 
 static BOOL sb_streq_nocase(const char *a, const char *b)
 {
+    KprintfH("[bsdsocket] %s\n", __func__);
     while (*a != '\0' && *b != '\0')
     {
         char ca = *a, cb = *b;
@@ -484,8 +495,39 @@ static BOOL sb_streq_nocase(const char *a, const char *b)
     return *a == *b;
 }
 
+/* getaddrinfo/getnameinfo service lookups (sb_gai.c) — same table, no
+ * per-base servent involved */
+LONG sb_serv_port_by_name(const char *name, const char *proto)
+{
+    KprintfH("[bsdsocket] %s: name=%s\n", __func__, (ULONG)name);
+    for (ULONG i = 0; sb_services[i].name != NULL; i++)
+    {
+        if (!sb_streq_nocase(name, sb_services[i].name))
+            continue;
+        if (proto != NULL && !sb_streq_nocase(proto, sb_services[i].proto))
+            continue;
+        return sb_services[i].port;
+    }
+    return -1;
+}
+
+const char *sb_serv_name_by_port(UWORD port, const char *proto)
+{
+    KprintfH("[bsdsocket] %s: port=%lu\n", __func__, (ULONG)port);
+    for (ULONG i = 0; sb_services[i].name != NULL; i++)
+    {
+        if (sb_services[i].port != port)
+            continue;
+        if (proto != NULL && !sb_streq_nocase(proto, sb_services[i].proto))
+            continue;
+        return sb_services[i].name;
+    }
+    return NULL;
+}
+
 static struct sb_servent *sb_serv_fill(struct SocketBase *base, ULONG idx)
 {
+    KprintfH("[bsdsocket] %s: name=%s port=%lu\n", __func__, (ULONG)sb_services[idx].name, (ULONG)sb_services[idx].port);
     base->serv.s_name = (char *)sb_services[idx].name;
     base->servAliases[0] = NULL;
     base->serv.s_aliases = base->servAliases;
@@ -497,6 +539,7 @@ static struct sb_servent *sb_serv_fill(struct SocketBase *base, ULONG idx)
 APTR bsd_getservbyname(STRPTR name asm("a0"), STRPTR proto asm("a1"),
                        struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: name=%s\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)");
     if (name == NULL)
         return NULL;
     for (ULONG i = 0; sb_services[i].name != NULL; i++)
@@ -513,6 +556,7 @@ APTR bsd_getservbyname(STRPTR name asm("a0"), STRPTR proto asm("a1"),
 APTR bsd_getservbyport(LONG port asm("d0"), STRPTR proto asm("a0"),
                        struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: port=%lu\n", __func__, (ULONG)port);
     for (ULONG i = 0; sb_services[i].name != NULL; i++)
     {
         if (sb_services[i].port != (UWORD)port)
@@ -526,6 +570,7 @@ APTR bsd_getservbyport(LONG port asm("d0"), STRPTR proto asm("a0"),
 
 APTR bsd_getnetbyname(STRPTR name asm("a0"), struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s\n", __func__);
     (void)name;
     (void)base;
     return NULL; /* no networks database */
@@ -534,6 +579,7 @@ APTR bsd_getnetbyname(STRPTR name asm("a0"), struct SocketBase *base asm("a6"))
 APTR bsd_getnetbyaddr(ULONG net asm("d0"), LONG type asm("d1"),
                       struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: net=0x%08lx\n", __func__, net);
     (void)net;
     (void)type;
     (void)base;
@@ -542,34 +588,40 @@ APTR bsd_getnetbyaddr(ULONG net asm("d0"), LONG type asm("d1"),
 
 VOID bsd_setnetent(LONG stayOpen asm("d0"), struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s\n", __func__);
     (void)stayOpen;
     (void)base;
 }
 
 VOID bsd_endnetent(struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s\n", __func__);
     (void)base;
 }
 
 APTR bsd_getnetent(struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s\n", __func__);
     (void)base;
     return NULL;
 }
 
 VOID bsd_setprotoent(LONG stayOpen asm("d0"), struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s\n", __func__);
     (void)stayOpen;
     base->protoIdx = 0;
 }
 
 VOID bsd_endprotoent(struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s\n", __func__);
     base->protoIdx = 0;
 }
 
 APTR bsd_getprotoent(struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: idx=%lu\n", __func__, (ULONG)base->protoIdx);
     /* iterate the same table getprotobynumber uses (0/1/6/17/255) */
     static const LONG protos[] = {0, 1, 6, 17, 255};
     if (base->protoIdx >= sizeof(protos) / sizeof(protos[0]))
@@ -579,17 +631,20 @@ APTR bsd_getprotoent(struct SocketBase *base asm("a6"))
 
 VOID bsd_setservent(LONG stayOpen asm("d0"), struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s\n", __func__);
     (void)stayOpen;
     base->servIdx = 0;
 }
 
 VOID bsd_endservent(struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s\n", __func__);
     base->servIdx = 0;
 }
 
 APTR bsd_getservent(struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: idx=%lu\n", __func__, (ULONG)base->servIdx);
     if (sb_services[base->servIdx].name == NULL)
         return NULL;
     return sb_serv_fill(base, base->servIdx++);
@@ -600,6 +655,7 @@ APTR bsd_getservent(struct SocketBase *base asm("a6"))
 static struct sb_hostent *sb_host_to_caller(struct sb_hostent *src, struct sb_hostent *hp,
                                             char *buf, ULONG buflen)
 {
+    KprintfH("[bsdsocket] %s: buflen=%lu\n", __func__, buflen);
     /* layout in the caller's buffer: addr (4) + addr_list (8) + aliases (4)
      * + name string */
     ULONG need = 4 + 2 * sizeof(char *) + sizeof(char *) + 1;
@@ -634,6 +690,7 @@ APTR bsd_gethostbyname_r(STRPTR name asm("a0"), APTR hp asm("a1"), APTR buf asm(
                          ULONG buflen asm("d0"), LONG *he asm("a3"),
                          struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: name=%s buflen=%lu\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)", buflen);
     LONG herr = 0;
     struct sb_hostent *res = sb_host_resolve(base, (const char *)name, NULL, &herr);
 
@@ -648,6 +705,7 @@ APTR bsd_gethostbyaddr_r(STRPTR addr asm("a0"), LONG len asm("d0"), LONG type as
                          APTR hp asm("a1"), APTR buf asm("a2"), ULONG buflen asm("d2"),
                          LONG *he asm("a3"), struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: len=%ld type=%ld\n", __func__, len, type);
     struct sb_hostent *res = (struct sb_hostent *)bsd_gethostbyaddr(addr, len, type, base);
 
     if (he != NULL)
@@ -661,6 +719,7 @@ APTR bsd_gethostbyaddr_r(STRPTR addr asm("a0"), LONG len asm("d0"), LONG type as
 
 LONG bsd_In_LocalAddr(ULONG address asm("d0"), struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: addr=0x%08lx\n", __func__, address);
     (void)base;
     LONG local = 0;
 
@@ -682,6 +741,7 @@ LONG bsd_In_LocalAddr(ULONG address asm("d0"), struct SocketBase *base asm("a6")
 
 LONG bsd_In_CanForward(ULONG address asm("d0"), struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: addr=0x%08lx\n", __func__, address);
     (void)address;
     (void)base;
     return 0; /* this stack does not forward */
@@ -691,6 +751,7 @@ LONG bsd_In_CanForward(ULONG address asm("d0"), struct SocketBase *base asm("a6"
 
 LONG bsd_AddDomainNameServer(STRPTR address asm("a0"), struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: address=%s\n", __func__, address != NULL ? (ULONG)address : (ULONG)"(null)");
     ip_addr_t ip;
 
     if (address == NULL || ip4addr_aton((const char *)address, ip_2_ip4(&ip)) == 0)
@@ -726,6 +787,7 @@ LONG bsd_AddDomainNameServer(STRPTR address asm("a0"), struct SocketBase *base a
 
 LONG bsd_RemoveDomainNameServer(STRPTR address asm("a0"), struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: address=%s\n", __func__, address != NULL ? (ULONG)address : (ULONG)"(null)");
     ip_addr_t ip;
 
     if (address == NULL || ip4addr_aton((const char *)address, ip_2_ip4(&ip)) == 0)
@@ -760,6 +822,7 @@ struct sb_dns_list
 
 APTR bsd_ObtainDomainNameServerList(struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s\n", __func__);
     struct sb_dns_list *l = AllocVec(sizeof(struct sb_dns_list), MEMF_PUBLIC);
     if (l == NULL)
     {
@@ -791,6 +854,7 @@ APTR bsd_ObtainDomainNameServerList(struct SocketBase *base asm("a6"))
 
 VOID bsd_ReleaseDomainNameServerList(APTR list asm("a0"), struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: list=0x%08lx\n", __func__, (ULONG)list);
     struct sb_dns_list *l = list;
     (void)base;
 
@@ -808,6 +872,7 @@ VOID bsd_ReleaseDomainNameServerList(APTR list asm("a0"), struct SocketBase *bas
 LONG bsd_GetDefaultDomainName(STRPTR buffer asm("a0"), LONG bufferSize asm("d0"),
                               struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: bufferSize=%ld\n", __func__, bufferSize);
     struct SocketBase *root = SB_ROOT(base);
 
     if (buffer == NULL || bufferSize <= 0 || root->defaultDomain[0] == '\0')
@@ -822,6 +887,7 @@ LONG bsd_GetDefaultDomainName(STRPTR buffer asm("a0"), LONG bufferSize asm("d0")
 
 VOID bsd_SetDefaultDomainName(STRPTR buffer asm("a0"), struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: name=%s\n", __func__, buffer != NULL ? (ULONG)buffer : (ULONG)"(null)");
     struct SocketBase *root = SB_ROOT(base);
 
     if (buffer == NULL)

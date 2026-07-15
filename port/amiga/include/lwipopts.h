@@ -54,6 +54,14 @@
 #define MEM_CUSTOM_FREE                 netstack_free
 
 #define MEMP_NUM_PBUF                   512  /* PBUF_REF/ROM headers (TX) */
+#if defined(DEBUG) && defined(DEBUG_HIGH)
+/* 2026-07-14 corruption hunt: tcp_seg/pcb pools are static arrays outside
+ * the guarded netstack heap — let lwIP police them too. DEBUG_HIGH tier:
+ * OVERFLOW_CHECK pads every memp element, changing pool layout (see the
+ * heap-guard note in netstack.c). */
+#define MEMP_OVERFLOW_CHECK             1
+#define MEMP_SANITY_CHECK               1
+#endif
 #define MEMP_NUM_TCP_PCB                64
 #define MEMP_NUM_TCP_PCB_LISTEN         16
 #define MEMP_NUM_UDP_PCB                32
@@ -81,6 +89,13 @@
 #define TCP_LISTEN_BACKLOG              1
 #define LWIP_TCP_KEEPALIVE              1
 #define SO_REUSE                        1
+/* Initial RTO 500 ms (lwIP default 3000). Mitigation for a router-side
+ * quirk: the first inbound packet of a fresh NAT flow after idle gets
+ * dropped upstream (MIB-verified 2026-07-13 — frame never reaches the
+ * MAC), so the first SYN retransmit must beat the 1 s connect timeout
+ * common in apps. Harmless on the LAN (RTT ~15 ms); reconsider if the
+ * router's flow-offload behavior ever gets fixed. */
+#define LWIP_TCP_RTO_TIME               500
 
 /* --- checksums: everything on at compile time, disabled per netif when
  * the driver's capabilities cover it (netdev_if.c) --- */
@@ -96,7 +111,23 @@ void netstack_platform_diag(const char *msg);
 
 #define LWIP_RAND()                     ((u32_t)netstack_lwip_rand())
 #define LWIP_PLATFORM_ASSERT(x)         netstack_platform_diag(x)
-/* LWIP_DEBUG stays off: lwIP diag format strings use 32-bit %d/%u, which
- * RawDoFmt-based output would misread as 16-bit (fleet gotcha). */
+
+/* --- lwIP debug output ---
+ * lwIP diag format strings use 32-bit %d/%u, which RawDoFmt-based output
+ * would misread as 16-bit (fleet gotcha) — so LWIP_PLATFORM_DIAG goes
+ * through netstack_diag_printf, which formats with C argument promotion
+ * and hands the backend a finished string. Follows the stack-wide DEBUG;
+ * toggle modules below as the hunt moves. */
+#ifdef DEBUG
+#define LWIP_DEBUG
+void netstack_diag_printf(const char *fmt, ...);
+#define LWIP_PLATFORM_DIAG(x)           netstack_diag_printf x
+#define DHCP_DEBUG                      LWIP_DBG_ON
+/* UDP/IP debug print PER PACKET — each Kprintf char is a trap, so under
+ * load the logging throttles the very traffic being debugged. Flip on only
+ * for connectivity hunts, never for throughput work. */
+#define UDP_DEBUG                       LWIP_DBG_OFF
+#define IP_DEBUG                        LWIP_DBG_OFF
+#endif
 
 #endif /* LWIPAMIGA_PORT_LWIPOPTS_H */

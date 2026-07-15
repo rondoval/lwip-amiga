@@ -125,7 +125,10 @@ struct NetDevCaps
                                    always satisfies it; this matters when the
                                    stack points segments INTO such a buffer */
     UWORD   ndc_Pad;
-    ULONG   ndc_Reserved[4];    /* 0 until a future ABI version claims them */
+    ULONG   ndc_RxPoolBufs;     /* total driver RX buffers (ring + spares);
+                                   bounds how many the stack may hold — it
+                                   sizes its wrap storage from this */
+    ULONG   ndc_Reserved[3];    /* 0 until a future ABI version claims them */
 };
 
 #define NDCF_TX_L4CSUM      (1UL << 0)  /* TX checksum insertion (NDTF_L4CSUM) */
@@ -330,11 +333,20 @@ struct NetDevStats
     struct NetDevU64 nds_RxPackets;
     struct NetDevU64 nds_RxBytes;
     struct NetDevU64 nds_RxErrors;      /* CRC/length/DMA errors, driver-dropped */
-    struct NetDevU64 nds_RxDropped;     /* refused by nso_RxInput backpressure */
+    struct NetDevU64 nds_RxDropped;     /* all software RX drops (pool dry + backpressure) */
     struct NetDevU64 nds_TxPackets;
     struct NetDevU64 nds_TxBytes;
     struct NetDevU64 nds_TxErrors;
     struct NetDevU64 nds_TxDropped;     /* completed-unsent on STOP */
+    /* Loss-point split, each naming a distinct bottleneck: */
+    ULONG   nds_RxOverruns;     /* ring full, HW discarded (drain too slow) */
+    ULONG   nds_RxFifoOvfl;     /* RBUF FIFO overflow (ring not absorbing bursts) */
+    ULONG   nds_RxPoolDry;      /* free pool empty (stack holding too many buffers) */
+    ULONG   nds_RxBackpressure; /* nso_RxInput refused delivery */
+    ULONG   nds_TxRejected;     /* TxSubmit accepted nothing (ring full) */
+    ULONG   nds_TxBad;          /* descriptors dropped by the TX sanity gate */
+    ULONG   nds_IrqRx;          /* RX-DONE interrupt count */
+    ULONG   nds_RxPoolFree;     /* instantaneous free-pool gauge (NOT monotonic) */
     ULONG   nds_Reserved[8];
 };
 
@@ -348,7 +360,7 @@ NETDEV_ABI_ASSERT(sizeof(struct NetDevAttach) == 60);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevRxFilter) == 8);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevCoalesce) == 8);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevLinkState) == 4);
-NETDEV_ABI_ASSERT(sizeof(struct NetDevStats) == 96);
+NETDEV_ABI_ASSERT(sizeof(struct NetDevStats) == 128);
 
 #if defined(__GNUC__)
 #pragma pack()

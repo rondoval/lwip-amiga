@@ -12,17 +12,21 @@
 
 #include "sb_base.h"
 
+#include <debug.h>
+
 #include "netstack.h"
 
 #define SB_FD_WORDS ((SB_FD_COUNT + 31) / 32)
 
 static BOOL sb_fd_bit(const ULONG *set, LONG fd)
 {
+    // KprintfH("[bsdsocket] %s: fd %ld\n", __func__, fd);
     return set != NULL && (set[fd >> 5] & (1UL << (fd & 31))) != 0;
 }
 
 static void sb_fd_setbit(ULONG *set, LONG fd)
 {
+    // KprintfH("[bsdsocket] %s: fd %ld\n", __func__, fd);
     set[fd >> 5] |= 1UL << (fd & 31);
 }
 
@@ -31,6 +35,7 @@ static LONG sb_select_scan(struct SocketBase *base, LONG nfds,
                            const ULONG *r_in, const ULONG *w_in, const ULONG *e_in,
                            ULONG *r_out, ULONG *w_out, ULONG *e_out)
 {
+    KprintfH("[bsdsocket] %s: nfds %ld\n", __func__, nfds);
     LONG hits = 0;
     (void)e_out; /* no exceptional conditions defined (no OOB) */
 
@@ -65,6 +70,7 @@ LONG bsd_WaitSelect(LONG nfds asm("d0"), APTR readfds asm("a0"), APTR writefds a
                     APTR exceptfds asm("a2"), APTR timeout asm("a3"), ULONG *signals asm("d1"),
                     struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: nfds %ld, timeout 0x%08lx, sigmask 0x%08lx\n", __func__, nfds, (ULONG)timeout, signals != NULL ? *signals : 0UL);
     const struct sb_timeval *tv = timeout;
     ULONG userMask = signals != NULL ? *signals : 0;
 
@@ -144,6 +150,10 @@ LONG bsd_WaitSelect(LONG nfds asm("d0"), APTR readfds asm("a0"), APTR writefds a
             {
                 AbortIO(&base->timerReq->tr_node);
                 WaitIO(&base->timerReq->tr_node);
+                /* the reply may have landed after Wait(): a stale port
+                 * signal would fake an instant timeout on the next timed
+                 * wait using this port */
+                SetSignal(0UL, 1UL << base->timerPort->mp_SigBit);
             }
             /* the break stays posted; the sets stay unmodified */
             Signal(base->task, sigs & base->breakMask);
@@ -165,6 +175,7 @@ LONG bsd_WaitSelect(LONG nfds asm("d0"), APTR readfds asm("a0"), APTR writefds a
     {
         AbortIO(&base->timerReq->tr_node);
         WaitIO(&base->timerReq->tr_node);
+        SetSignal(0UL, 1UL << base->timerPort->mp_SigBit);
     }
 
     if (hits < 0)

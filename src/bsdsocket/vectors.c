@@ -62,7 +62,7 @@ const APTR bsdsocket_functable[] = {
     (APTR)bsd_gethostname, /* -282  gethostname */
     (APTR)bsd_gethostid, /* -288  gethostid */
     (APTR)bsd_SocketBaseTagList, /* -294  SocketBaseTagList */
-    (APTR)LibStub, /* -300  GetSocketEvents */
+    (APTR)bsd_GetSocketEvents, /* -300  GetSocketEvents */
     (APTR)LibStub, /* -306  (reserved) */
     (APTR)LibStub, /* -312  (reserved) */
     (APTR)LibStub, /* -318  (reserved) */
@@ -146,10 +146,10 @@ const APTR bsdsocket_functable[] = {
     (APTR)LibStub, /* -786  ipf_log_data_waiting */
     (APTR)LibStub, /* -792  ipf_set_notify_mask */
     (APTR)LibStub, /* -798  ipf_set_interrupt_mask */
-    (APTR)LibStub, /* -804  freeaddrinfo */
-    (APTR)LibStub, /* -810  getaddrinfo */
-    (APTR)LibStubNull, /* -816  gai_strerror */
-    (APTR)LibStub, /* -822  getnameinfo */
+    (APTR)bsd_freeaddrinfo, /* -804  freeaddrinfo */
+    (APTR)bsd_getaddrinfo, /* -810  getaddrinfo */
+    (APTR)bsd_gai_strerror, /* -816  gai_strerror */
+    (APTR)bsd_getnameinfo, /* -822  getnameinfo */
     (APTR)LibStub, /* -828  (reserved) */
     (APTR)LibStub, /* -834  (reserved) */
     (APTR)LibStub, /* -840  (reserved) */

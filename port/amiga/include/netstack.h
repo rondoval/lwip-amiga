@@ -37,6 +37,18 @@ struct NetStack
     struct NetdevIf *ns_ActiveNetdev;
 
     ULONG ns_MemInUse;  /* diagnostic */
+
+    /* Core-lock profiling — written under DEBUG only, but the fields are
+     * unconditional so DEBUG and release share one struct layout (the
+     * 2026-07-14 Heisenbug lesson). Outermost holds only (ss_NestCount);
+     * timestamps from the BCM 1 MHz system timer. netstack_tick prints
+     * and zeroes the counters every ~2 s. */
+    ULONG ns_LockT0;
+    ULONG ns_LockHolds;
+    ULONG ns_LockWaitUs;
+    ULONG ns_LockHoldUs;
+    ULONG ns_LockHoldMaxUs;
+    ULONG ns_LockProfTicks;
 };
 
 /* The singleton (defined in netstack.c). */

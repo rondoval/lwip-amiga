@@ -23,6 +23,7 @@
 LONG __attribute__((used, no_reorder)) doNotExecute(void);
 LONG __attribute__((used, no_reorder)) doNotExecute(void)
 {
+    Kprintf("[bsdsocket] %s: entry stub executed\n", __func__);
     return -1;
 }
 
@@ -46,6 +47,7 @@ const struct Resident bsdsocketResident __attribute__((used)) = {
 
 ULONG LibExpunge(struct SocketBase *base asm("a6"))
 {
+    Kprintf("[bsdsocket] %s: base 0x%08lx\n", __func__, (ULONG)base);
     struct SocketBase *root = SB_ROOT(base);
 
     if (root->libNode.lib_OpenCnt > 0)
@@ -99,6 +101,7 @@ static struct Library *LibInit(struct Library *base asm("d0"), ULONG seglist asm
 
 static void child_cleanup(struct SocketBase *b)
 {
+    KprintfH("[bsdsocket] %s: base 0x%08lx\n", __func__, (ULONG)b);
     if (b->fd != NULL)
     {
         /* orphaned sockets die with the base */
@@ -140,6 +143,8 @@ static void child_cleanup(struct SocketBase *b)
 
 struct SocketBase *LibOpen(ULONG version asm("d0"), struct SocketBase *base asm("a6"))
 {
+    /* exec 3.2 does the version check itself; D0 here is leftover junk */
+    Kprintf("[bsdsocket] %s: task %s\n", __func__, (ULONG)FindTask(NULL)->tc_Node.ln_Name);
     struct SocketBase *root = SB_ROOT(base);
     (void)version;
 
@@ -178,6 +183,7 @@ struct SocketBase *LibOpen(ULONG version asm("d0"), struct SocketBase *base asm(
     b->breakMask = SIGBREAKF_CTRL_C;
     b->sigIoMask = 0;
     b->sigUrgMask = 0;
+    b->sigEventMask = 0;
     b->internalErrno = 0;
     b->errnoPtr = &b->internalErrno;
     b->errnoSize = sizeof(LONG);
@@ -211,6 +217,7 @@ struct SocketBase *LibOpen(ULONG version asm("d0"), struct SocketBase *base asm(
 
 ULONG LibClose(struct SocketBase *base asm("a6"))
 {
+    Kprintf("[bsdsocket] %s: base 0x%08lx, task %s\n", __func__, (ULONG)base, (ULONG)FindTask(NULL)->tc_Node.ln_Name);
     struct SocketBase *root = SB_ROOT(base);
 
     if (base->root == NULL)
@@ -238,6 +245,7 @@ ULONG LibClose(struct SocketBase *base asm("a6"))
 
 ULONG LibNull(void)
 {
+    Kprintf("[bsdsocket] %s called\n", __func__);
     return 0;
 }
 
@@ -246,11 +254,13 @@ ULONG LibNull(void)
  * must not be handed -1). */
 LONG LibStub(void)
 {
+    Kprintf("[bsdsocket] %s: unimplemented LVO called\n", __func__);
     return -1;
 }
 
 APTR LibStubNull(void)
 {
+    Kprintf("[bsdsocket] %s: unimplemented LVO called\n", __func__);
     return NULL;
 }
 

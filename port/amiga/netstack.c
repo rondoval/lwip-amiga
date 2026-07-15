@@ -10,6 +10,7 @@
 #endif
 
 #include <debug.h>
+#include <timing.h> /* get_time(): BCM 1 MHz system timer, lock profiling */
 
 #include <lwip/init.h>
 #include <lwip/sys.h>
@@ -44,16 +45,39 @@ void netstack_init(struct Device *timerBase)
 
 void netstack_lock(void)
 {
+#ifdef DEBUG
+    /* wait/hold split for the CPU-ceiling hunt; outermost holds only */
+    u32 t0 = get_time();
     ObtainSemaphore(&netstack.ns_Core);
+    if (netstack.ns_Core.ss_NestCount == 1)
+    {
+        u32 t1 = get_time();
+        netstack.ns_LockWaitUs += t1 - t0;
+        netstack.ns_LockT0 = t1;
+        netstack.ns_LockHolds++;
+    }
+#else
+    ObtainSemaphore(&netstack.ns_Core);
+#endif
 }
 
 void netstack_unlock(void)
 {
+#ifdef DEBUG
+    if (netstack.ns_Core.ss_NestCount == 1)
+    {
+        u32 dt = get_time() - netstack.ns_LockT0;
+        netstack.ns_LockHoldUs += dt;
+        if (dt > netstack.ns_LockHoldMaxUs)
+            netstack.ns_LockHoldMaxUs = dt;
+    }
+#endif
     ReleaseSemaphore(&netstack.ns_Core);
 }
 
 void netstack_assert_locked(void)
 {
+    // KprintfH("[netstack] %s\n", __func__);
 #ifdef DEBUG
     if (netstack.ns_Core.ss_Owner != FindTask(NULL))
         Kprintf("[netstack] core lock NOT held by caller!\n");
@@ -62,8 +86,26 @@ void netstack_assert_locked(void)
 
 void netstack_tick(void)
 {
+    // KprintfH("[netstack] %s\n", __func__);
     netstack_lock();
     sys_check_timeouts();
+#ifdef DEBUG
+    /* lock-profile line every ~2 s (20 × 100 ms ticks) when anything held */
+    if (++netstack.ns_LockProfTicks >= 20)
+    {
+        netstack.ns_LockProfTicks = 0;
+        if (netstack.ns_LockHolds != 0)
+        {
+            Kprintf("[netstack] lock: %lu holds, wait %lu us, hold %lu us, maxhold %lu us\n",
+                    (ULONG)netstack.ns_LockHolds, (ULONG)netstack.ns_LockWaitUs,
+                    (ULONG)netstack.ns_LockHoldUs, (ULONG)netstack.ns_LockHoldMaxUs);
+            netstack.ns_LockHolds = 0;
+            netstack.ns_LockWaitUs = 0;
+            netstack.ns_LockHoldUs = 0;
+            netstack.ns_LockHoldMaxUs = 0;
+        }
+    }
+#endif
     netstack_unlock();
 }
 
@@ -72,6 +114,7 @@ void netstack_tick(void)
  * successive calls are < ~1.6 h apart — the stack task ticks every 100 ms. */
 ULONG netstack_now_ms(void)
 {
+    // KprintfH("[netstack] %s: ms %lu\n", __func__, netstack.ns_Ms);
     if (TimerBase == NULL)
         return 0;
 
@@ -91,11 +134,13 @@ ULONG netstack_now_ms(void)
 /* lwIP's clock */
 u32_t sys_now(void)
 {
+    // KprintfH("[netstack] %s\n", __func__);
     return netstack_now_ms();
 }
 
 unsigned int netstack_lwip_rand(void)
 {
+    // KprintfH("[netstack] %s\n", __func__);
     ULONG x = netstack.ns_RandState;
     x ^= x << 13;
     x ^= x >> 17;
@@ -104,10 +149,148 @@ unsigned int netstack_lwip_rand(void)
     return x;
 }
 
+/* LWIP_PLATFORM_ASSERT. lwIP's LWIP_ASSERT assumes this never returns —
+ * returning lets the core continue into state it has declared impossible
+ * (observed 2026-07-14: "mss_local is too small" followed by a wild write
+ * and a wedged stack). Freezing the calling task keeps the failed state
+ * intact for post-mortem; other tasks then park on ns_Core, which is a
+ * deterministic stall instead of corruption. The message is latched for
+ * release builds, where Kprintf compiles out. */
+const char *netstack_assert_msg;
+
 void netstack_platform_diag(const char *msg)
 {
-    Kprintf("[lwip] ASSERT: %s\n", (ULONG)msg);
+    netstack_assert_msg = msg;
+    Kprintf("[lwip] ASSERT: %s — task '%s' halted\n", (ULONG)msg,
+            (ULONG)FindTask(NULL)->tc_Node.ln_Name);
+    for (;;)
+        Wait(0UL);
 }
+
+#ifdef DEBUG
+/* lwIP debug output (LWIP_PLATFORM_DIAG). lwIP's format strings pass 32-bit
+ * values as plain %d/%u/%x, which RawDoFmt would read as 16-bit — so the
+ * formatting happens here with C argument promotion and only the finished
+ * string reaches the backend. Covers the conversions lwIP uses (c s p d i
+ * u x X, with -/0/width/h/l/z); anything else prints literally. */
+#define NS_DIAG_BUF 256
+
+static void ns_diag_putc(char *buf, ULONG *pos, char c)
+{
+    if (*pos < NS_DIAG_BUF - 1)
+        buf[(*pos)++] = c;
+}
+
+void netstack_diag_printf(const char *fmt, ...)
+{
+    char buf[NS_DIAG_BUF];
+    ULONG pos = 0;
+    va_list ap;
+
+    va_start(ap, fmt);
+    for (; *fmt != '\0'; fmt++)
+    {
+        if (*fmt != '%')
+        {
+            ns_diag_putc(buf, &pos, *fmt);
+            continue;
+        }
+
+        fmt++;
+        char pad = ' ';
+        if (*fmt == '-')
+            fmt++; /* left-align: not worth honoring in a log */
+        if (*fmt == '0')
+        {
+            pad = '0';
+            fmt++;
+        }
+        ULONG width = 0;
+        while (*fmt >= '0' && *fmt <= '9')
+            width = width * 10 + (ULONG)(*fmt++ - '0');
+        while (*fmt == 'h' || *fmt == 'l' || *fmt == 'z')
+            fmt++; /* every integer arrives 32-bit after promotion */
+
+        char conv = *fmt;
+        if (conv == '\0')
+            break;
+        if (conv == '%')
+        {
+            ns_diag_putc(buf, &pos, '%');
+            continue;
+        }
+        if (conv == 'c')
+        {
+            ns_diag_putc(buf, &pos, (char)va_arg(ap, int));
+            continue;
+        }
+        if (conv == 's')
+        {
+            const char *s = va_arg(ap, const char *);
+            if (s == NULL)
+                s = "(null)";
+            for (; *s != '\0'; s++)
+                ns_diag_putc(buf, &pos, *s);
+            continue;
+        }
+
+        ULONG val;
+        ULONG base;
+        const char *dig = (conv == 'X') ? "0123456789ABCDEF" : "0123456789abcdef";
+        BOOL negative = FALSE;
+        switch (conv)
+        {
+        case 'd':
+        case 'i':
+        {
+            LONG sv = va_arg(ap, LONG);
+            negative = sv < 0;
+            val = negative ? (ULONG)0 - (ULONG)sv : (ULONG)sv;
+            base = 10;
+            break;
+        }
+        case 'u':
+            val = va_arg(ap, ULONG);
+            base = 10;
+            break;
+        case 'x':
+        case 'X':
+            val = va_arg(ap, ULONG);
+            base = 16;
+            break;
+        case 'p':
+            val = (ULONG)va_arg(ap, void *);
+            base = 16;
+            pad = '0';
+            width = 8;
+            break;
+        default:
+            /* unknown conversion: emit literally, don't touch the va_list */
+            ns_diag_putc(buf, &pos, '%');
+            ns_diag_putc(buf, &pos, conv);
+            continue;
+        }
+
+        char tmp[11]; /* 32-bit decimal maxes at 10 digits, +1 for '-' */
+        ULONG n = 0;
+        do
+        {
+            tmp[n++] = dig[val % base];
+            val /= base;
+        } while (val != 0);
+        if (negative)
+            tmp[n++] = '-';
+        for (; width > n; width--)
+            ns_diag_putc(buf, &pos, pad);
+        while (n > 0)
+            ns_diag_putc(buf, &pos, tmp[--n]);
+    }
+    va_end(ap);
+
+    buf[pos] = '\0';
+    Kprintf("%s", buf);
+}
+#endif /* DEBUG (netstack_diag_printf) */
 
 /*
  * The lwIP heap. Every PBUF_RAM payload (= every TX frame) comes through
@@ -127,9 +310,37 @@ struct NsMemHeader
     ULONG nsm_Origin;
 };
 
+#if defined(DEBUG) && defined(DEBUG_HIGH)
+/* Heap guards for the 2026-07-14 upload corruption hunt: a tail canary
+ * catches overruns out of the block, poison-on-free makes use-after-free
+ * loud (a poisoned origin also catches double-free), and DMA reads of
+ * freed TX buffers put the pattern on the wire where a pcap can see it.
+ * Guard hits report and freeze the caller — same policy as lwIP asserts.
+ * DEBUG_HIGH tier only: the extra bytes and poison change heap layout and
+ * demonstrably hide the corrupter (21:37 run passed, same speed without
+ * guards wedged) — the no-HIGH debug build stays layout-faithful for
+ * repro while the non-layout probes (pbuf gate, TCPGUARD) keep printing. */
+#define NSMEM_TAIL_CANARY 0x4E534D54UL /* 'NSMT' */
+#define NSMEM_POISON 0xDD
+
+static void nsmem_dead(const char *what, struct NsMemHeader *h)
+{
+    Kprintf("[netstack] HEAP GUARD: %s block 0x%08lx (size %lu origin 0x%08lx) — task '%s' halted\n",
+            (ULONG)what, (ULONG)h, h->nsm_Size, h->nsm_Origin,
+            (ULONG)FindTask(NULL)->tc_Node.ln_Name);
+    for (;;)
+        Wait(0UL);
+}
+#endif
+
 void *netstack_malloc(unsigned int size)
 {
-    ULONG total = (ULONG)size + sizeof(struct NsMemHeader);
+    // KprintfH("[netstack] %s: size %lu\n", __func__, (ULONG)size);
+    ULONG asize = ((ULONG)size + 3) & ~3UL;
+    ULONG total = asize + sizeof(struct NsMemHeader);
+#if defined(DEBUG) && defined(DEBUG_HIGH)
+    total += 4; /* tail canary */
+#endif
     struct NetdevIf *nd = netstack.ns_ActiveNetdev;
     struct NsMemHeader *h;
 
@@ -149,12 +360,16 @@ void *netstack_malloc(unsigned int size)
     }
 
     h->nsm_Size = total;
+#if defined(DEBUG) && defined(DEBUG_HIGH)
+    *(ULONG *)((UBYTE *)(h + 1) + asize) = NSMEM_TAIL_CANARY;
+#endif
     netstack.ns_MemInUse += total;
     return h + 1;
 }
 
 void *netstack_calloc(unsigned int count, unsigned int size)
 {
+    // KprintfH("[netstack] %s: count %lu size %lu\n", __func__, (ULONG)count, (ULONG)size);
     ULONG bytes = (ULONG)count * size;
     void *p = netstack_malloc(bytes);
     if (p != NULL)
@@ -168,14 +383,28 @@ void *netstack_calloc(unsigned int count, unsigned int size)
 
 void netstack_free(void *ptr)
 {
+    // KprintfH("[netstack] %s: ptr 0x%08lx\n", __func__, (ULONG)ptr);
     if (ptr == NULL)
         return;
 
     struct NsMemHeader *h = (struct NsMemHeader *)ptr - 1;
+#if defined(DEBUG) && defined(DEBUG_HIGH)
+    if (h->nsm_Origin != NSMEM_ORIGIN_DMA && h->nsm_Origin != NSMEM_ORIGIN_EXEC)
+        nsmem_dead("bad origin (double free / underrun / wild free)", h);
+    if (*(ULONG *)((UBYTE *)h + h->nsm_Size - 4) != NSMEM_TAIL_CANARY)
+        nsmem_dead("tail canary smashed (overrun)", h);
+#endif
     netstack.ns_MemInUse -= h->nsm_Size;
 
-    if (h->nsm_Origin == NSMEM_ORIGIN_DMA)
-        netdevif_dma_free(netstack.ns_ActiveNetdev, h, h->nsm_Size);
+    ULONG origin = h->nsm_Origin;
+    ULONG size = h->nsm_Size;
+#if defined(DEBUG) && defined(DEBUG_HIGH)
+    UBYTE *b = (UBYTE *)h;
+    for (ULONG i = 0; i < size; i++)
+        b[i] = NSMEM_POISON;
+#endif
+    if (origin == NSMEM_ORIGIN_DMA)
+        netdevif_dma_free(netstack.ns_ActiveNetdev, h, size);
     else
-        FreeMem(h, h->nsm_Size);
+        FreeMem(h, size);
 }

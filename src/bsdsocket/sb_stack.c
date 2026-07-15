@@ -2,7 +2,10 @@
 /*
  * The stack task: owns netstack time/timers and the netdev interface.
  *
- * Started under root->openLock by the first OpenLibrary(). Initializes the
+ * Started under root->openLock by the first OpenLibrary(). It is a DOS
+ * Process, not a bare Task: the netdev attach path runs driver open code
+ * on this context, which may do DOS I/O (genet reads ENV:genet.prefs),
+ * and the planned static-config reads need DOS too. Initializes the
  * netstack (timer.device EClock), attaches genet.device over the netdev
  * ABI, brings the interface up with DHCP, then ticks lwIP timeouts every
  * 100 ms until told to quit (library expunge).
@@ -15,9 +18,14 @@
 #include "sb_base.h"
 
 #include <dos/dos.h>
+#include <dos/dostags.h>
 #include <exec/io.h>
 
-#include <minlist.h>
+#ifdef __INTELLISENSE__
+#include <clib/dos_protos.h>
+#else
+#include <proto/dos.h>
+#endif
 
 #include <debug.h>
 
@@ -48,6 +56,7 @@ static struct SbStackCtx sb_stack;
 
 static BYTE sb_netdev_cmd(struct IOStdReq *io, UWORD cmd, APTR data, ULONG len)
 {
+    KprintfH("[bsdsocket] %s: cmd 0x%04lx, len %lu\n", __func__, (ULONG)cmd, len);
     io->io_Command = cmd;
     io->io_Data = data;
     io->io_Length = len;
@@ -112,6 +121,7 @@ static void sb_netdev_up(struct SbStackCtx *ctx)
 
 static void sb_netdev_down(struct SbStackCtx *ctx)
 {
+    Kprintf("[bsdsocket] %s: started %ld, attached %ld\n", __func__, (LONG)ctx->started, (LONG)ctx->attached);
     if (ctx->started)
     {
         netstack_lock();
@@ -145,8 +155,12 @@ static void sb_netdev_down(struct SbStackCtx *ctx)
     }
 }
 
-static void SbStackTask(struct SbStackCtx *ctx, struct Task *parent)
+static void SbStackTask(void)
 {
+    struct SbStackCtx *ctx = &sb_stack;
+    struct Task *parent = ctx->parent;
+
+    Kprintf("[bsdsocket] %s: starting\n", __func__);
     struct MsgPort *timerPort = CreateMsgPort();
     struct timerequest *tick =
         (struct timerequest *)CreateIORequest(timerPort, sizeof(struct timerequest));
@@ -161,6 +175,8 @@ static void SbStackTask(struct SbStackCtx *ctx, struct Task *parent)
     }
 
     netstack_init(tick->tr_node.io_Device);
+    /* build banner: ties every log to the exact library binary */
+    Kprintf("[bsdsocket] stack task up, build " __DATE__ " " __TIME__ "\n");
     sb_netdev_up(ctx);
 
     ctx->startResult = 0;
@@ -204,6 +220,7 @@ out:
     if (timerPort != NULL)
         DeleteMsgPort(timerPort);
 
+    Kprintf("[bsdsocket] %s: exiting\n", __func__);
     ctx->root->stackTask = NULL;
     Signal(parent, SIGBREAKF_CTRL_F);
 }
@@ -212,6 +229,7 @@ out:
 
 LONG sb_stack_start(struct SocketBase *root)
 {
+    Kprintf("[bsdsocket] %s: root 0x%08lx\n", __func__, (ULONG)root);
     struct SbStackCtx *ctx = &sb_stack;
 
     for (ULONG i = 0; i < sizeof(*ctx); i++)
@@ -220,49 +238,27 @@ LONG sb_stack_start(struct SocketBase *root)
     ctx->parent = FindTask(NULL);
     ctx->startResult = -1;
 
-    struct MemList *ml = AllocMem(sizeof(struct MemList) + sizeof(struct MemEntry), MEMF_PUBLIC | MEMF_CLEAR);
-    struct Task *task = AllocMem(sizeof(struct Task), MEMF_PUBLIC | MEMF_CLEAR);
-    ULONG *stack = AllocMem(SB_STACK_STACK_BYTES, MEMF_PUBLIC | MEMF_CLEAR);
-    if (ml == NULL || task == NULL || stack == NULL)
-    {
-        if (ml)
-            FreeMem(ml, sizeof(struct MemList) + sizeof(struct MemEntry));
-        if (task)
-            FreeMem(task, sizeof(struct Task));
-        if (stack)
-            FreeMem(stack, SB_STACK_STACK_BYTES);
+    /* a Process, not a Task: driver open code runs on this context and may
+     * do DOS I/O (genet reads ENV:genet.prefs) */
+    struct DosLibrary *DOSBase =
+        (struct DosLibrary *)OpenLibrary((CONST_STRPTR) "dos.library", 36);
+    if (DOSBase == NULL)
         return -1;
-    }
-
-    ml->ml_NumEntries = 2;
-    ml->ml_ME[0].me_Un.meu_Addr = task;
-    ml->ml_ME[0].me_Length = sizeof(struct Task);
-    ml->ml_ME[1].me_Un.meu_Addr = stack;
-    ml->ml_ME[1].me_Length = SB_STACK_STACK_BYTES;
-
-    task->tc_SPLower = stack;
-    task->tc_SPUpper = &stack[SB_STACK_STACK_BYTES / sizeof(ULONG)];
-
-    ULONG *sp = (ULONG *)task->tc_SPUpper;
-    *--sp = (ULONG)FindTask(NULL);
-    *--sp = (ULONG)ctx;
-    task->tc_SPReg = sp;
-
-    task->tc_Node.ln_Name = "bsdsocket.library stack";
-    task->tc_Node.ln_Type = NT_TASK;
-    task->tc_Node.ln_Pri = 5;
-
-    _NewMinList((struct MinList *)&task->tc_MemEntry);
-    AddHead(&task->tc_MemEntry, &ml->ml_Node);
 
     SetSignal(0UL, SIGBREAKF_CTRL_F);
-    if (AddTask(task, SbStackTask, NULL) == NULL)
-    {
-        FreeMem(ml, sizeof(struct MemList) + sizeof(struct MemEntry));
-        FreeMem(task, sizeof(struct Task));
-        FreeMem(stack, SB_STACK_STACK_BYTES);
+    /* Priority sits above dynamic-scheduler managed bands (Executive
+     * reprioritizes pri <= 5; at 5 this task was starved for ~1 s under
+     * app CPU bursts, stalling every lwIP timer) — same tier as the
+     * genet/nvme unit tasks. */
+    struct Process *proc = CreateNewProcTags(
+        NP_Entry, (ULONG)SbStackTask,
+        NP_Name, (ULONG) "bsdsocket.library stack",
+        NP_Priority, 10,
+        NP_StackSize, SB_STACK_STACK_BYTES,
+        TAG_DONE);
+    CloseLibrary((struct Library *)DOSBase);
+    if (proc == NULL)
         return -1;
-    }
 
     Wait(SIGBREAKF_CTRL_F);
     return ctx->startResult;
@@ -270,6 +266,7 @@ LONG sb_stack_start(struct SocketBase *root)
 
 void sb_stack_stop(struct SocketBase *root)
 {
+    Kprintf("[bsdsocket] %s: stackTask 0x%08lx\n", __func__, (ULONG)root->stackTask);
     if (root->stackTask == NULL)
         return;
 

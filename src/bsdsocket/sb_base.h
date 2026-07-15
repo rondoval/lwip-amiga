@@ -143,6 +143,8 @@ struct sb_timeval
 #define SB_SO_LINGER 0x0080
 #define SB_SO_SNDBUF 0x1001
 #define SB_SO_RCVBUF 0x1002
+#define SB_SO_SNDTIMEO 0x1005
+#define SB_SO_RCVTIMEO 0x1006
 #define SB_SO_ERROR 0x1007
 #define SB_SO_TYPE 0x1008
 #define SB_TCP_NODELAY 1
@@ -151,6 +153,16 @@ struct sb_timeval
 #define SB_MSG_PEEK 0x02
 #define SB_MSG_WAITALL 0x40
 #define SB_MSG_DONTWAIT 0x80
+
+/* GetSocketEvents / SO_EVENTMASK (libraries/bsdsocket.h) */
+#define SB_SO_EVENTMASK 0x2001
+#define SB_FD_ACCEPT 0x01
+#define SB_FD_CONNECT 0x02
+#define SB_FD_OOB 0x04
+#define SB_FD_READ 0x08
+#define SB_FD_WRITE 0x10
+#define SB_FD_ERROR 0x20
+#define SB_FD_CLOSE 0x40
 
 #define SB_FIONBIO 0x8004667EUL
 #define SB_FIONREAD 0x4004667FUL
@@ -190,6 +202,49 @@ struct sb_timeval
 
 #define SB_HOST_NOT_FOUND 1
 #define SB_TRY_AGAIN 2
+
+/* getaddrinfo/getnameinfo (netinclude/netdb.h) */
+#define SB_PF_UNSPEC 0
+
+#define SB_AI_PASSIVE 1
+#define SB_AI_CANONNAME 2
+#define SB_AI_NUMERICHOST 4
+#define SB_AI_EXT 8
+#define SB_AI_NUMERICSERV 16
+#define SB_AI_MASK \
+    (SB_AI_PASSIVE | SB_AI_CANONNAME | SB_AI_NUMERICHOST | SB_AI_NUMERICSERV)
+
+#define SB_NI_NUMERICHOST 1
+#define SB_NI_NUMERICSERV 2
+#define SB_NI_NOFQDN 4
+#define SB_NI_NAMEREQD 8
+#define SB_NI_DGRAM 16
+#define SB_NI_WITHSCOPEID 32
+
+#define SB_EAI_BADFLAGS (-1)
+#define SB_EAI_NONAME (-2)
+#define SB_EAI_AGAIN (-3)
+#define SB_EAI_FAIL (-4)
+#define SB_EAI_NODATA (-5)
+#define SB_EAI_FAMILY (-6)
+#define SB_EAI_SOCKTYPE (-7)
+#define SB_EAI_SERVICE (-8)
+#define SB_EAI_MEMORY (-10)
+#define SB_EAI_BADHINTS (-12)
+#define SB_EAI_PROTOCOL (-13)
+
+/* wire layout of netinclude/netdb.h struct addrinfo (all fields 32-bit) */
+struct sb_addrinfo
+{
+    LONG ai_flags;
+    LONG ai_family;
+    LONG ai_socktype;
+    LONG ai_protocol;
+    ULONG ai_addrlen;
+    struct sb_sockaddr_in *ai_addr;
+    char *ai_canonname;
+    struct sb_addrinfo *ai_next;
+};
 
 /* SocketBaseTagList encoding (netinclude/libraries/bsdsocket.h) */
 #define SBTF_REF 0x8000UL
@@ -257,8 +312,19 @@ struct SbSocket
 
     LONG err; /* pending errno; pcb.any == NULL after fatal errors */
 
-    /* TCP receive: pbuf chain, consumed via pbuf_free_header */
+    ULONG sndTimeoMs; /* SO_SNDTIMEO/SO_RCVTIMEO, 0 = block forever */
+    ULONG rcvTimeoMs;
+
+    ULONG eventMask;     /* SO_EVENTMASK: FD_* events the app wants */
+    ULONG eventsPending; /* accumulated, drained by GetSocketEvents */
+
+    /* TCP receive backlog: tail-linked pbuf queue. Only per-pbuf len
+     * fields are trusted for accounting — a pbuf chain's tot_len is u16
+     * and the backlog under a 256 KB window overflows it; rxBytes is the
+     * truth. */
     struct pbuf *rxq;
+    struct pbuf *rxqTail;
+    ULONG rxBytes;
 
     /* UDP/RAW receive: queued datagrams */
     struct MinList dgrams;
@@ -293,6 +359,7 @@ struct SocketBase
     ULONG breakMask;
     ULONG sigIoMask;
     ULONG sigUrgMask;
+    ULONG sigEventMask; /* SBTC_SIGEVENTMASK; stored, delivered with SIGIO */
 
     LONG internalErrno;
     APTR errnoPtr;   /* defaults to &internalErrno */
@@ -339,7 +406,19 @@ void sb_sock_free(struct SocketBase *base, struct SbSocket *s); /* under lock */
 LONG sb_fd_alloc(struct SocketBase *base, struct SbSocket *s);
 struct SbSocket *sb_fd_get(struct SocketBase *base, LONG fd);
 void sb_wake(struct SbSocket *s);
+void sb_event(struct SbSocket *s, ULONG ev); /* under lock; signals sigEventMask */
 LONG sb_wait(struct SocketBase *base); /* 0 or SB_EINTR; drops+retakes the lock */
+
+/* sb_wait with a per-call deadline (SO_RCVTIMEO/SO_SNDTIMEO). Zero-init the
+ * SbTimedWait per API call; the first blocking iteration latches the
+ * deadline. Adds SB_EWOULDBLOCK to sb_wait's returns; reclaims the opener's
+ * timer before returning, so no cleanup is needed on any exit path. */
+struct SbTimedWait
+{
+    ULONG deadlineMs;
+    UBYTE set;
+};
+LONG sb_wait_to(struct SocketBase *base, ULONG ms, struct SbTimedWait *tw);
 void sb_tcp_wire(struct SbSocket *s);  /* attach lwIP callbacks to s->pcb.tcp */
 err_t sb_tcp_connected_cb(void *arg, struct tcp_pcb *tpcb, err_t err);
 void sb_listen_wire(struct SbSocket *s);
@@ -385,6 +464,7 @@ LONG bsd_CloseSocket(LONG sock asm("d0"), struct SocketBase *base asm("a6"));
 LONG bsd_WaitSelect(LONG nfds asm("d0"), APTR readfds asm("a0"), APTR writefds asm("a1"), APTR exceptfds asm("a2"), APTR timeout asm("a3"), ULONG *signals asm("d1"), struct SocketBase *base asm("a6"));
 VOID bsd_SetSocketSignals(ULONG intMask asm("d0"), ULONG ioMask asm("d1"), ULONG urgMask asm("d2"), struct SocketBase *base asm("a6"));
 LONG bsd_getdtablesize(struct SocketBase *base asm("a6"));
+LONG bsd_GetSocketEvents(ULONG *eventsp asm("a0"), struct SocketBase *base asm("a6"));
 LONG bsd_Errno(struct SocketBase *base asm("a6"));
 VOID bsd_SetErrnoPtr(APTR errnoPtr asm("a0"), LONG size asm("d0"), struct SocketBase *base asm("a6"));
 STRPTR bsd_Inet_NtoA(ULONG ip asm("d0"), struct SocketBase *base asm("a6"));
@@ -436,7 +516,17 @@ VOID bsd_ReleaseDomainNameServerList(APTR list asm("a0"), struct SocketBase *bas
 LONG bsd_GetDefaultDomainName(STRPTR buffer asm("a0"), LONG bufferSize asm("d0"), struct SocketBase *base asm("a6"));
 VOID bsd_SetDefaultDomainName(STRPTR buffer asm("a0"), struct SocketBase *base asm("a6"));
 
+/* sb_gai.c */
+LONG bsd_getaddrinfo(STRPTR hostname asm("a0"), STRPTR servname asm("a1"), struct sb_addrinfo *hints asm("a2"), struct sb_addrinfo **res asm("a3"), struct SocketBase *base asm("a6"));
+VOID bsd_freeaddrinfo(struct sb_addrinfo *ai asm("a0"), struct SocketBase *base asm("a6"));
+STRPTR bsd_gai_strerror(LONG errnum asm("a0"), struct SocketBase *base asm("a6"));
+LONG bsd_getnameinfo(APTR sa asm("a0"), ULONG salen asm("d0"), STRPTR host asm("a1"), ULONG hostlen asm("d1"), STRPTR serv asm("a2"), ULONG servlen asm("d2"), ULONG flags asm("d3"), struct SocketBase *base asm("a6"));
+
 /* shared helpers (sb_misc.c) */
 struct sb_hostent *sb_host_resolve(struct SocketBase *base, const char *name, ULONG *addrOut, LONG *herrOut);
+
+/* services table lookups (sb_misc2.c); ports host-order, proto "tcp"/"udp" */
+LONG sb_serv_port_by_name(const char *name, const char *proto);
+const char *sb_serv_name_by_port(UWORD port, const char *proto);
 
 #endif /* SB_BASE_H */

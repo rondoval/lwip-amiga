@@ -14,6 +14,9 @@
 #include <lwip/raw.h>
 #include <lwip/tcp.h>
 #include <lwip/udp.h>
+#include <lwip/priv/tcp_priv.h> /* TCPGUARD in sb_tcp_send peeks at pcb->unsent */
+
+#include <debug.h>
 
 #include "netstack.h"
 
@@ -21,6 +24,7 @@
 
 static LONG sb_fail(struct SocketBase *base, LONG code)
 {
+    KprintfH("[bsdsocket] %s: code %ld\n", __func__, code);
     sb_set_errno(base, code);
     return -1;
 }
@@ -28,6 +32,7 @@ static LONG sb_fail(struct SocketBase *base, LONG code)
 /* parse an app sockaddr (4.4BSD, sin_len first) */
 static LONG sb_addr_in(const struct sb_sockaddr_in *sa, LONG salen, ip_addr_t *ip, u16_t *port)
 {
+    KprintfH("[bsdsocket] %s: sa 0x%08lx salen %ld\n", __func__, (ULONG)sa, salen);
     if (sa == NULL || salen < 8)
         return SB_EINVAL;
     if (sa->sin_family != SB_AF_INET && sa->sin_family != 0)
@@ -40,6 +45,7 @@ static LONG sb_addr_in(const struct sb_sockaddr_in *sa, LONG salen, ip_addr_t *i
 
 static void sb_addr_out(APTR name, LONG *namelen, ULONG addr, UWORD port)
 {
+    KprintfH("[bsdsocket] %s: addr 0x%08lx port %lu\n", __func__, addr, (ULONG)port);
     struct sb_sockaddr_in out;
 
     if (name == NULL || namelen == NULL || *namelen <= 0)
@@ -62,6 +68,7 @@ static void sb_addr_out(APTR name, LONG *namelen, ULONG addr, UWORD port)
 LONG bsd_socket(LONG domain asm("d0"), LONG type asm("d1"), LONG protocol asm("d2"),
                 struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: domain %ld type %ld protocol %ld\n", __func__, domain, type, protocol);
     if (domain != SB_AF_INET)
         return sb_fail(base, SB_EAFNOSUPPORT);
 
@@ -134,6 +141,7 @@ LONG bsd_socket(LONG domain asm("d0"), LONG type asm("d1"), LONG protocol asm("d
 LONG bsd_bind(LONG sock asm("d0"), APTR name asm("a0"), LONG namelen asm("d1"),
               struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: fd %ld name 0x%08lx namelen %ld\n", __func__, sock, (ULONG)name, namelen);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -173,6 +181,7 @@ LONG bsd_bind(LONG sock asm("d0"), APTR name asm("a0"), LONG namelen asm("d1"),
 LONG bsd_listen(LONG sock asm("d0"), LONG backlog asm("d1"),
                 struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: fd %ld backlog %ld\n", __func__, sock, backlog);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -212,6 +221,7 @@ LONG bsd_listen(LONG sock asm("d0"), LONG backlog asm("d1"),
 LONG bsd_accept(LONG sock asm("d0"), APTR addr asm("a0"), APTR addrlen asm("a1"),
                 struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: fd %ld\n", __func__, sock);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -269,6 +279,7 @@ LONG bsd_accept(LONG sock asm("d0"), APTR addr asm("a0"), APTR addrlen asm("a1")
 LONG bsd_connect(LONG sock asm("d0"), APTR name asm("a0"), LONG namelen asm("d1"),
                  struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: fd %ld name 0x%08lx namelen %ld\n", __func__, sock, (ULONG)name, namelen);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -354,8 +365,10 @@ LONG bsd_connect(LONG sock asm("d0"), APTR name asm("a0"), LONG namelen asm("d1"
 static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
                         const UBYTE *buf, LONG len, LONG flags)
 {
+    KprintfH("[bsdsocket] %s: len %ld flags 0x%lx\n", __func__, len, (ULONG)flags);
     LONG sent = 0;
     BOOL dontwait = s->nonblock || (flags & SB_MSG_DONTWAIT);
+    struct SbTimedWait tw = { 0, FALSE };
 
     netstack_lock();
     while (sent < len)
@@ -373,6 +386,131 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
             netstack_unlock();
             return sb_fail(base, SB_ESHUTDOWN);
         }
+        if (s->connecting)
+        {
+            /* Hold sends until established. lwIP would happily queue data
+             * in SYN_SENT, but the SYN-ACK RESETS snd_wnd_max to the raw
+             * handshake window (tcp_in.c) — anything already queued at
+             * full MSS then trips tcp_write's "mss_local is too small"
+             * assert (observed 2026-07-14: amispeedtest upload vs a
+             * small-window SYN-ACK; the assert-continue underflow wedged
+             * the stack). Matches sb_sock_writable, which reports
+             * not-writable while connecting. */
+            if (dontwait)
+            {
+                netstack_unlock();
+                return sb_fail(base, SB_EWOULDBLOCK);
+            }
+            LONG we = sb_wait_to(base, s->sndTimeoMs, &tw);
+            if (we != 0)
+            {
+                netstack_unlock();
+                return sb_fail(base, we);
+            }
+            continue;
+        }
+
+        /* TCPGUARD — guard + diagnostic for lwIP's tcp_write assert
+         * "mss_local is too small" (2026-07-14 upload wedge, root cause
+         * still open): tcp_write computes mss_local = min(mss,
+         * snd_wnd_max/2) and, if the last unsent segment is longer, its
+         * u16 space math underflows and shreds the queues. Statically
+         * that state looks unreachable, yet it happened mid-flow on a
+         * 26 MB upload — so detect it here, print the pcb state we could
+         * never observe, and wait it out like a full send buffer (the
+         * tail drains via tcp_output/ACKs). Remove once understood. */
+        struct tcp_seg *lu = s->pcb.tcp->unsent;
+        if (lu == NULL)
+        {
+            if (s->pcb.tcp->unsent_oversize != 0)
+            {
+                /* Unambiguous staleness: no unsent segment, yet the pcb
+                 * claims tail room — tcp_write would halt on its
+                 * "pcb->unsent is NULL" assert. Print and clamp. */
+                Kprintf("[bsdsocket] TCPGUARD-OVZ0 s=0x%08lx: ovz=%lu state=%ld pcbfl=0x%lx qlen=%lu\n",
+                        (ULONG)s, (ULONG)s->pcb.tcp->unsent_oversize, (LONG)s->pcb.tcp->state,
+                        (ULONG)s->pcb.tcp->flags, (ULONG)s->pcb.tcp->snd_queuelen);
+                s->pcb.tcp->unsent_oversize = 0;
+            }
+        }
+        else
+        {
+            while (lu->next != NULL)
+                lu = lu->next;
+            u16_t ml = LWIP_MIN(s->pcb.tcp->mss, TCPWND_MIN16(s->pcb.tcp->snd_wnd_max / 2));
+            if (ml == 0)
+                ml = s->pcb.tcp->mss;
+            u32_t luneed = (u32_t)lu->len + LWIP_TCP_OPT_LENGTH(lu->flags);
+#if TCP_OVERSIZE_DBGCHECK
+            /* lwIP's own desync detector (tcp_out.c "unsent_oversize
+             * mismatch"), rendered non-halting: a pcb-vs-segment mismatch
+             * is exactly the one-sided bookkeeping bug we're hunting.
+             * The shadow must then be zeroed in lockstep with the clamp
+             * below, or that assert halts on the very next write. */
+            if (s->pcb.tcp->unsent_oversize != lu->oversize_left)
+                Kprintf("[bsdsocket] TCPGUARD-DESYNC s=0x%08lx: ovz=%lu luovz=%lu len=%lu segfl=0x%lx "
+                        "state=%ld qlen=%lu plen=%lu ptot=%lu pref=%lu\n",
+                        (ULONG)s, (ULONG)s->pcb.tcp->unsent_oversize, (ULONG)lu->oversize_left,
+                        (ULONG)lu->len, (ULONG)lu->flags, (LONG)s->pcb.tcp->state,
+                        (ULONG)s->pcb.tcp->snd_queuelen, (ULONG)(lu->p != NULL ? lu->p->len : 0),
+                        (ULONG)(lu->p != NULL ? lu->p->tot_len : 0), (ULONG)(lu->p != NULL ? lu->p->ref : 0));
+            lu->oversize_left = 0;
+#endif
+            if (s->pcb.tcp->unsent_oversize != 0)
+            {
+                /* INTERIM: disable tcp_write's phase-1 tail reuse. The
+                 * 2026-07-14 22:25 run proved unsent_oversize goes
+                 * stale-high ("inconsistent oversize vs. space" halted the
+                 * task) — phase 1 trusts it and appends into the last
+                 * segment's pbuf tail, so a stale value writes PAST the
+                 * real allocation into the neighboring heap block: that
+                 * overflow is the corruption behind every wild write and
+                 * crash this week. Staleness means the field describes the
+                 * WRONG segment, so even values that pass lwIP's assert
+                 * can overflow — hence clamp ALWAYS (data goes into fresh
+                 * pbufs; only small-write coalescing is lost), and print
+                 * the evidence whenever the invariant was truly violated
+                 * so the bookkeeping bug can still be root-caused. */
+                if (luneed > ml || s->pcb.tcp->unsent_oversize > ml - luneed)
+                Kprintf("[bsdsocket] TCPGUARD-OVZ s=0x%08lx: ovz=%lu space=%lu ml=%lu mss=%lu swm=%lu swnd=%lu "
+                        "len=%lu segfl=0x%lx state=%ld pcbfl=0x%lx qlen=%lu luovz=%lu plen=%lu ptot=%lu pref=%lu\n",
+                        (ULONG)s, (ULONG)s->pcb.tcp->unsent_oversize, (ULONG)(ml - luneed), (ULONG)ml,
+                        (ULONG)s->pcb.tcp->mss, (ULONG)s->pcb.tcp->snd_wnd_max, (ULONG)s->pcb.tcp->snd_wnd,
+                        (ULONG)lu->len, (ULONG)lu->flags, (LONG)s->pcb.tcp->state, (ULONG)s->pcb.tcp->flags,
+                        (ULONG)s->pcb.tcp->snd_queuelen, (ULONG)lu->oversize_left,
+                        (ULONG)(lu->p != NULL ? lu->p->len : 0), (ULONG)(lu->p != NULL ? lu->p->tot_len : 0),
+                        (ULONG)(lu->p != NULL ? lu->p->ref : 0));
+                s->pcb.tcp->unsent_oversize = 0;
+            }
+            (void)luneed;
+            if (luneed > ml)
+            {
+                Kprintf("[bsdsocket] TCPGUARD s=0x%08lx: ml=%lu mss=%lu swm=%lu swnd=%lu len=%lu segfl=0x%lx "
+                        "state=%ld pcbfl=0x%lx qlen=%lu sndbuf=%lu ovz=%lu luovz=%lu ptot=%lu\n",
+                        (ULONG)s, (ULONG)ml, (ULONG)s->pcb.tcp->mss, (ULONG)s->pcb.tcp->snd_wnd_max,
+                        (ULONG)s->pcb.tcp->snd_wnd, (ULONG)lu->len, (ULONG)lu->flags,
+                        (LONG)s->pcb.tcp->state, (ULONG)s->pcb.tcp->flags, (ULONG)s->pcb.tcp->snd_queuelen,
+                        (ULONG)s->pcb.tcp->snd_buf, (ULONG)s->pcb.tcp->unsent_oversize,
+                        (ULONG)lu->oversize_left, (ULONG)(lu->p != NULL ? lu->p->tot_len : 0));
+                tcp_output(s->pcb.tcp);
+                if (dontwait)
+                {
+                    netstack_unlock();
+                    if (sent > 0)
+                        return sent;
+                    return sb_fail(base, SB_EWOULDBLOCK);
+                }
+                LONG gwe = sb_wait_to(base, s->sndTimeoMs, &tw);
+                if (gwe != 0)
+                {
+                    netstack_unlock();
+                    if (sent > 0)
+                        return sent;
+                    return sb_fail(base, gwe);
+                }
+                continue;
+            }
+        }
 
         ULONG avail = tcp_sndbuf(s->pcb.tcp);
         if (avail == 0)
@@ -385,7 +523,7 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
                     return sent;
                 return sb_fail(base, SB_EWOULDBLOCK);
             }
-            LONG we = sb_wait(base);
+            LONG we = sb_wait_to(base, s->sndTimeoMs, &tw);
             if (we != 0)
             {
                 netstack_unlock();
@@ -399,8 +537,23 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
         ULONG chunk = (ULONG)(len - sent);
         if (chunk > avail)
             chunk = avail;
-        if (chunk > 0xFFFF)
-            chunk = 0xFFFF;
+        /* Cap the per-hold work: tcp_write memcpys the chunk into pbufs
+         * and tcp_output pushes it to the driver, all under ns_Core — a
+         * 64 KB chunk held the lock 15-18 ms,
+         * starving RX injection into ring overruns. 16 KB + the lock
+         * break below bounds the hold. */
+        if (chunk > 16384)
+            chunk = 16384;
+        /* Keep split chunks whole-MSS: the TCPGUARD-OVZ clamp disables
+         * tcp_write's tail top-up, so a split remainder would ship as a
+         * runt segment on the wire, every chunk.
+         * The app buffer's own tail stays exact. */
+        if ((LONG)chunk < len - sent)
+        {
+            ULONG mss = s->pcb.tcp->mss;
+            if (chunk > mss)
+                chunk -= chunk % mss;
+        }
 
         u8_t wf = TCP_WRITE_FLAG_COPY;
         if ((LONG)(sent + (LONG)chunk) < len)
@@ -417,7 +570,7 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
                     return sent;
                 return sb_fail(base, SB_EWOULDBLOCK);
             }
-            LONG we = sb_wait(base);
+            LONG we = sb_wait_to(base, s->sndTimeoMs, &tw);
             if (we != 0)
             {
                 netstack_unlock();
@@ -435,6 +588,21 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
             return sb_fail(base, sb_map_err(r));
         }
         sent += (LONG)chunk;
+
+        if (sent < len && netstack.ns_Core.ss_QueueCount > 0)
+        {
+            /* Lock break between chunks — but only when someone is
+             * actually queued on ns_Core (the pri-10 unit task blocked
+             * on RX injection): push what's queued and hand the FIFO
+             * semaphore over. An unconditional break here cost a
+             * contended handoff (two context switches). The racy
+             * ss_QueueCount read is safe: a waiter arriving right after
+             * the check just waits out one more chunk. The loop head
+             * re-validates the socket state after the break. */
+            tcp_output(s->pcb.tcp);
+            netstack_unlock();
+            netstack_lock();
+        }
     }
     if (s->pcb.tcp != NULL)
         tcp_output(s->pcb.tcp);
@@ -446,6 +614,7 @@ static LONG sb_dgram_send(struct SocketBase *base, struct SbSocket *s,
                           const UBYTE *buf, LONG len,
                           BOOL have_dst, ip_addr_t *dst, u16_t port)
 {
+    KprintfH("[bsdsocket] %s: len %ld have_dst %ld port %lu\n", __func__, len, (LONG)have_dst, (ULONG)port);
     if (len < 0 || len > 0xFFFF)
         return sb_fail(base, SB_EMSGSIZE);
 
@@ -478,6 +647,7 @@ LONG bsd_sendto(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
                 LONG flags asm("d2"), APTR to asm("a1"), LONG tolen asm("d3"),
                 struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: fd %ld len %ld flags 0x%lx\n", __func__, sock, len, (ULONG)flags);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -502,6 +672,7 @@ LONG bsd_sendto(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
 LONG bsd_send(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
               LONG flags asm("d2"), struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: fd %ld len %ld flags 0x%lx\n", __func__, sock, len, (ULONG)flags);
     return bsd_sendto(sock, buf, len, flags, NULL, 0, base);
 }
 
@@ -510,10 +681,12 @@ LONG bsd_send(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
 static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
                         UBYTE *buf, LONG len, LONG flags)
 {
+    KprintfH("[bsdsocket] %s: len %ld flags 0x%lx\n", __func__, len, (ULONG)flags);
     BOOL dontwait = s->nonblock || (flags & SB_MSG_DONTWAIT);
     BOOL peek = (flags & SB_MSG_PEEK) != 0;
     BOOL waitall = (flags & SB_MSG_WAITALL) != 0;
     LONG copied = 0;
+    struct SbTimedWait tw = { 0, FALSE };
 
     netstack_lock();
     for (;;)
@@ -558,7 +731,7 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
                     return copied;
                 return sb_fail(base, SB_EWOULDBLOCK);
             }
-            LONG we = sb_wait(base);
+            LONG we = sb_wait_to(base, s->rcvTimeoMs, &tw);
             if (we != 0)
             {
                 netstack_unlock();
@@ -568,21 +741,88 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
             }
         }
 
-        ULONG want = (ULONG)(len - copied);
-        ULONG have = s->rxq->tot_len;
-        ULONG n = want < have ? want : have;
-
-        pbuf_copy_partial(s->rxq, buf + copied, (u16_t)n, 0);
-        copied += (LONG)n;
-
-        if (!peek)
+        if (peek)
         {
-            s->rxq = pbuf_free_header(s->rxq, (u16_t)n);
-            if (s->pcb.tcp != NULL)
-                tcp_recved(s->pcb.tcp, (u16_t)n);
+            /* non-destructive; pbuf_copy_partial walks per-pbuf len fields
+             * but takes a u16 count — cap the peek */
+            ULONG want = (ULONG)(len - copied);
+            if (want > s->rxBytes)
+                want = s->rxBytes;
+            if (want > 0xFFFF)
+                want = 0xFFFF;
+            pbuf_copy_partial(s->rxq, buf + copied, (u16_t)want, 0);
+            copied += (LONG)want;
+            break;
         }
 
-        if (peek || copied >= len || (!waitall && copied > 0))
+        /* Consume head pbufs. The memcpy dominates (up to 64 KB per call)
+         * and under ns_Core it stalls RX injection (2026-07-15 lock
+         * profile: app copy-outs ≈ 25% of wall time, matching unit-task
+         * lock waits) — so detach a run of whole pbufs under the lock,
+         * copy with the lock RELEASED, then free and acknowledge the
+         * window in one short re-acquired section (ndo_RxRelease and
+         * tcp_recved must run under the lock). Only per-pbuf len fields
+         * are trusted — the chain-wide tot_len is u16 and the backlog
+         * under a 256 KB window overflows it (the old single-counter
+         * consume spun forever under the core lock exactly there). */
+        while (copied < len && s->rxq != NULL)
+        {
+            struct pbuf *run = s->rxq;
+            struct pbuf *last = NULL;
+            ULONG take = 0;
+            for (struct pbuf *p = run;
+                 p != NULL && take + p->len <= (ULONG)(len - copied) && take + p->len <= 0xFFFF;
+                 p = p->next)
+            {
+                take += p->len;
+                last = p;
+            }
+
+            if (last == NULL)
+            {
+                /* the head pbuf alone exceeds the remaining request:
+                 * partial consume in place, at most one buffer's worth */
+                struct pbuf *h = run;
+                ULONG n = (ULONG)(len - copied);
+                pbuf_copy_partial(h, buf + copied, (u16_t)n, 0);
+                copied += (LONG)n;
+                s->rxBytes -= n;
+                pbuf_remove_header(h, n);
+                if (s->pcb.tcp != NULL)
+                    tcp_recved(s->pcb.tcp, (u16_t)n);
+                continue; /* copied == len now; the loop exits */
+            }
+
+            /* unlink the run — exclusively ours once detached */
+            s->rxq = last->next;
+            if (s->rxq == NULL)
+                s->rxqTail = NULL;
+            last->next = NULL;
+            s->rxBytes -= take;
+
+            netstack_unlock();
+            ULONG off = 0;
+            for (struct pbuf *p = run; p != NULL; p = p->next)
+            {
+                pbuf_copy_partial(p, buf + copied + off, p->len, 0);
+                off += p->len;
+            }
+            netstack_lock();
+            copied += (LONG)take;
+
+            struct pbuf *p = run;
+            while (p != NULL)
+            {
+                struct pbuf *nx = p->next;
+                p->next = NULL;
+                pbuf_free(p);
+                p = nx;
+            }
+            if (s->pcb.tcp != NULL)
+                tcp_recved(s->pcb.tcp, (u16_t)take);
+        }
+
+        if (copied >= len || !waitall)
             break;
     }
     netstack_unlock();
@@ -593,9 +833,11 @@ static LONG sb_dgram_recv(struct SocketBase *base, struct SbSocket *s,
                           UBYTE *buf, LONG len, LONG flags,
                           APTR from, LONG *fromlen)
 {
+    KprintfH("[bsdsocket] %s: len %ld flags 0x%lx\n", __func__, len, (ULONG)flags);
     BOOL dontwait = s->nonblock || (flags & SB_MSG_DONTWAIT);
     BOOL peek = (flags & SB_MSG_PEEK) != 0;
     struct SocketBase *root = SB_ROOT(base);
+    struct SbTimedWait tw = { 0, FALSE };
 
     netstack_lock();
     while (s->ndgrams == 0)
@@ -612,7 +854,7 @@ static LONG sb_dgram_recv(struct SocketBase *base, struct SbSocket *s,
             netstack_unlock();
             return sb_fail(base, SB_EWOULDBLOCK);
         }
-        LONG we = sb_wait(base);
+        LONG we = sb_wait_to(base, s->rcvTimeoMs, &tw);
         if (we != 0)
         {
             netstack_unlock();
@@ -646,6 +888,7 @@ LONG bsd_recvfrom(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
                   LONG flags asm("d2"), APTR addr asm("a1"), APTR addrlen asm("a2"),
                   struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: fd %ld len %ld flags 0x%lx\n", __func__, sock, len, (ULONG)flags);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -676,6 +919,7 @@ LONG bsd_recvfrom(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
 LONG bsd_recv(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
               LONG flags asm("d2"), struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: fd %ld len %ld flags 0x%lx\n", __func__, sock, len, (ULONG)flags);
     return bsd_recvfrom(sock, buf, len, flags, NULL, NULL, base);
 }
 
@@ -684,6 +928,7 @@ LONG bsd_recv(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
 LONG bsd_shutdown(LONG sock asm("d0"), LONG how asm("d1"),
                   struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: fd %ld how %ld\n", __func__, sock, how);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -730,6 +975,7 @@ LONG bsd_shutdown(LONG sock asm("d0"), LONG how asm("d1"),
 
 LONG bsd_CloseSocket(LONG sock asm("d0"), struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: fd %ld\n", __func__, sock);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -746,6 +992,7 @@ LONG bsd_CloseSocket(LONG sock asm("d0"), struct SocketBase *base asm("a6"))
 LONG bsd_getsockname(LONG sock asm("d0"), APTR name asm("a0"), APTR namelen asm("a1"),
                      struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: fd %ld\n", __func__, sock);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -783,6 +1030,7 @@ LONG bsd_getsockname(LONG sock asm("d0"), APTR name asm("a0"), APTR namelen asm(
 LONG bsd_getpeername(LONG sock asm("d0"), APTR name asm("a0"), APTR namelen asm("a1"),
                      struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: fd %ld\n", __func__, sock);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -823,6 +1071,7 @@ LONG bsd_getpeername(LONG sock asm("d0"), APTR name asm("a0"), APTR namelen asm(
 LONG bsd_IoctlSocket(LONG sock asm("d0"), ULONG req asm("d1"), APTR argp asm("a0"),
                      struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: fd %ld req 0x%lx\n", __func__, sock, req);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -839,7 +1088,7 @@ LONG bsd_IoctlSocket(LONG sock asm("d0"), ULONG req asm("d1"), APTR argp asm("a0
         LONG n = 0;
         netstack_lock();
         if (s->type == SBT_TCP)
-            n = s->rxq != NULL ? (LONG)s->rxq->tot_len : 0;
+            n = (LONG)s->rxBytes;
         else if (s->ndgrams != 0)
             n = (LONG)((struct SbDgram *)s->dgrams.mlh_Head)->p->tot_len;
         netstack_unlock();
@@ -855,6 +1104,7 @@ LONG bsd_setsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
                     APTR optval asm("a0"), LONG optlen asm("d3"),
                     struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: fd %ld level %ld optname %ld\n", __func__, sock, level, optname);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -900,6 +1150,44 @@ LONG bsd_setsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
         case SB_SO_RCVBUF:
         case SB_SO_LINGER:
             break; /* accepted, fixed internally */
+        case SB_SO_EVENTMASK:
+        {
+            /* subscription may arrive AFTER the state it cares about
+             * (AExplorer arms right after accept, request already queued):
+             * synthesize events from the current state so none are lost */
+            s->eventMask = (ULONG)val;
+            ULONG ev = 0;
+            if (s->type == SBT_TCP ? (s->rxq != NULL) : (s->ndgrams != 0))
+                ev |= SB_FD_READ;
+            if (s->naccept != 0)
+                ev |= SB_FD_ACCEPT;
+            if (s->rxeof)
+                ev |= SB_FD_CLOSE;
+            if (s->err != 0)
+                ev |= SB_FD_ERROR;
+            if (s->type == SBT_TCP && s->connected && s->pcb.tcp != NULL &&
+                tcp_sndbuf(s->pcb.tcp) > 0)
+                ev |= SB_FD_WRITE;
+            if (ev != 0)
+                sb_event(s, ev);
+            break;
+        }
+        case SB_SO_SNDTIMEO:
+        case SB_SO_RCVTIMEO:
+        {
+            const struct sb_timeval *tv = optval;
+            if (tv == NULL || optlen < (LONG)sizeof(*tv))
+            {
+                e = SB_EINVAL;
+                break;
+            }
+            ULONG ms = tv->tv_secs * 1000 + tv->tv_micro / 1000;
+            if (optname == SB_SO_SNDTIMEO)
+                s->sndTimeoMs = ms;
+            else
+                s->rcvTimeoMs = ms;
+            break;
+        }
         default:
             e = SB_ENOPROTOOPT;
             break;
@@ -934,6 +1222,7 @@ LONG bsd_getsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
                     APTR optval asm("a0"), APTR optlen asm("a1"),
                     struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: fd %ld level %ld optname %ld\n", __func__, sock, level, optname);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -943,6 +1232,21 @@ LONG bsd_getsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
     LONG val;
     switch (optname)
     {
+    case SB_SO_EVENTMASK:
+        val = (LONG)s->eventMask;
+        break;
+    case SB_SO_SNDTIMEO:
+    case SB_SO_RCVTIMEO:
+    {
+        if (*(LONG *)optlen < (LONG)sizeof(struct sb_timeval))
+            return sb_fail(base, SB_EINVAL);
+        ULONG ms = optname == SB_SO_SNDTIMEO ? s->sndTimeoMs : s->rcvTimeoMs;
+        struct sb_timeval *tv = optval;
+        tv->tv_secs = ms / 1000;
+        tv->tv_micro = (ms % 1000) * 1000;
+        *(LONG *)optlen = sizeof(*tv);
+        return 0;
+    }
     case SB_SO_ERROR:
         netstack_lock();
         val = s->err;
@@ -965,8 +1269,36 @@ LONG bsd_getsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
     return 0;
 }
 
+/* GetSocketEvents [AmiTCP V4]: next socket with pending FD_* events, or
+ * -1. Scan order is fd order (the autodoc promises no ordering); a
+ * listener with more connections still queued keeps FD_ACCEPT pending so
+ * every pending connection produces an event, per the autodoc. */
+LONG bsd_GetSocketEvents(ULONG *eventsp asm("a0"), struct SocketBase *base asm("a6"))
+{
+    KprintfH("[bsdsocket] %s\n", __func__);
+    if (eventsp == NULL)
+        return -1;
+
+    netstack_lock();
+    for (LONG fd = 0; fd < SB_FD_COUNT; fd++)
+    {
+        struct SbSocket *s = base->fd[fd];
+        if (s == NULL || s->eventsPending == 0)
+            continue;
+        *eventsp = s->eventsPending;
+        s->eventsPending = 0;
+        if (s->naccept > 1 && (s->eventMask & SB_FD_ACCEPT))
+            s->eventsPending = SB_FD_ACCEPT;
+        netstack_unlock();
+        return fd;
+    }
+    netstack_unlock();
+    return -1;
+}
+
 LONG bsd_getdtablesize(struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s\n", __func__);
     (void)base;
     return SB_FD_COUNT;
 }
@@ -974,7 +1306,11 @@ LONG bsd_getdtablesize(struct SocketBase *base asm("a6"))
 VOID bsd_SetSocketSignals(ULONG intMask asm("d0"), ULONG ioMask asm("d1"),
                           ULONG urgMask asm("d2"), struct SocketBase *base asm("a6"))
 {
+    KprintfH("[bsdsocket] %s: intMask 0x%08lx ioMask 0x%08lx urgMask 0x%08lx\n", __func__, intMask, ioMask, urgMask);
     base->breakMask = intMask != 0 ? intMask : SIGBREAKF_CTRL_C;
     base->sigIoMask = ioMask;
     base->sigUrgMask = urgMask;
+    /* see SBTC_SIGIOMASK: readiness may predate the mask */
+    if (ioMask != 0 && base->task != NULL)
+        Signal(base->task, ioMask);
 }

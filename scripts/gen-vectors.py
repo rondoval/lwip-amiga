@@ -89,6 +89,11 @@ IMPLEMENTED = {
     "ReleaseDomainNameServerList": "bsd_ReleaseDomainNameServerList",
     "GetDefaultDomainName": "bsd_GetDefaultDomainName",
     "SetDefaultDomainName": "bsd_SetDefaultDomainName",
+    "freeaddrinfo": "bsd_freeaddrinfo",
+    "getaddrinfo": "bsd_getaddrinfo",
+    "gai_strerror": "bsd_gai_strerror",
+    "getnameinfo": "bsd_getnameinfo",
+    "GetSocketEvents": "bsd_GetSocketEvents",
 }
 
 # Unimplemented LVOs that return POINTERS get the NULL stub; handing an app
@@ -96,7 +101,6 @@ IMPLEMENTED = {
 NULL_STUBS = {
     "mbuf_copym", "mbuf_free", "mbuf_get", "mbuf_gethdr", "mbuf_prepend",
     "mbuf_pullup", "GetRouteInfo", "ObtainInterfaceList", "ObtainRoadshowData",
-    "gai_strerror",
 }
 
 HEADER = """\

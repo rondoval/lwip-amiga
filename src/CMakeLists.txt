@@ -8,6 +8,10 @@ set(VERSTRING "$VER: ${PROJECT_NAME} ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_
 
 find_package(Emu68Common CONFIG REQUIRED)
 
+# Backend compile definitions (DEBUG/DEBUG_SERIAL/DEBUG_HIGH) apply only to
+# targets created after this call — it must precede every target in this dir.
+emu68_debug_backend_definitions()
+
 # --- netstack: lwIP core + Amiga port layer ---------------------------------
 # The stack proper as a static library: unmodified lwIP compiled with the
 # real port configuration (port/amiga/include/lwipopts.h) plus the port
@@ -37,8 +41,6 @@ target_link_libraries(netstack
         Emu68Common::common
 )
 
-emu68_debug_backend_definitions()
-
 # --- bsdsocket.library ------------------------------------------------------
 # Source order matters: main.c first (doNotExecute entry), end.c last
 # (endOfCode marker bounds the resident structure).
@@ -51,6 +53,7 @@ add_executable(bsdsocket_library
     bsdsocket/sb_select.c
     bsdsocket/sb_misc.c
     bsdsocket/sb_misc2.c
+    bsdsocket/sb_gai.c
     bsdsocket/end.c
 )
 
@@ -161,8 +164,30 @@ target_link_libraries(netdev-test
         Emu68Common::common
 )
 
+emu68_debug_backend_finalize(netdev-test)
+
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/netdev-test
+    DESTINATION C
+)
+
+# --- netdev-stats: loss-point counters on release builds --------------------
+# Second opener beside the running stack (GET_STATS/GET_LINK/SET_COALESCE
+# need no ATTACH) — the perf-tuning eyes when the DEBUG mib/txh prints are
+# compiled out. Pure exec/dos + the ABI header; no netstack, no debug glue.
+add_executable(netdev-stats
+    netdev-stats/netdev-stats.c
+)
+
+target_compile_options(netdev-stats PRIVATE -O2 -m68040 -Wall -Wextra)
+
+target_link_libraries(netdev-stats
+    PRIVATE
+        netdev_headers
+)
+
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/netdev-stats
     DESTINATION C
 )
 
@@ -175,8 +200,37 @@ add_executable(socktest
 
 target_compile_options(socktest PRIVATE -O2 -m68040 -Wall -Wextra)
 
+target_link_libraries(socktest
+    PRIVATE
+        Emu68Common::common
+)
+
+emu68_debug_backend_finalize(socktest)
+
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/socktest
+    DESTINATION C
+)
+
+# --- semstress: exec semaphore contended-handoff repro ----------------------
+# Diagnostic for the 2026-07-13 whole-stack freeze (notes.md): recreates the
+# app/unit/tick task topology around one SignalSemaphore and times every
+# ObtainSemaphore. No networking, no netstack — exec + timer.device only.
+add_executable(semstress
+    semstress/semstress.c
+)
+
+target_compile_options(semstress PRIVATE -O2 -m68040 -Wall -Wextra)
+
+target_link_libraries(semstress
+    PRIVATE
+        Emu68Common::common
+)
+
+emu68_debug_backend_finalize(semstress)
+
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/semstress
     DESTINATION C
 )
 

@@ -25,6 +25,8 @@
 
 #include <proto/exec.h>
 
+#include <debug.h>
+
 #include <lwip/dhcp.h>
 #include <lwip/ip4_addr.h>
 #include <lwip/netif.h>
@@ -37,6 +39,7 @@ static struct NetdevIf ndi;
 
 static BYTE netdev_cmd(struct IOStdReq *io, UWORD cmd, APTR data, ULONG len)
 {
+    Kprintf("[netdev-test] %s: cmd=0x%04lx len=%lu\n", __func__, (ULONG)cmd, len);
     io->io_Command = cmd;
     io->io_Data = data;
     io->io_Length = len;
@@ -47,6 +50,7 @@ static BYTE netdev_cmd(struct IOStdReq *io, UWORD cmd, APTR data, ULONG len)
 
 int main(int argc, char **argv)
 {
+    Kprintf("[netdev-test] %s: argc=%ld\n", __func__, (LONG)argc);
     int rc = 20;
     BOOL use_dhcp = (argc < 2);
     BOOL attached = FALSE, started = FALSE, netif_created = FALSE, dev_open = FALSE;
