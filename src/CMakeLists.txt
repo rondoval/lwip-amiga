@@ -2,9 +2,26 @@
 # bsdsocket.library — Amiga-side build (via the emu68-driver-stack superproject).
 project(bsdsocket.library VERSION 4.0 LANGUAGES C)
 
+# bsdsocket.library's runtime version. The ABI major stays 4 (the AmiTCP/Roadshow
+# contract apps test via OpenLibrary("bsdsocket.library", 4)); the revision is derived
+# from the component release version (top-level project(lwip-amiga VERSION x.y)) so it
+# increments monotonically with each release and survives a major bump:
+# 0.1 -> 4.1, 0.2 -> 4.2, 1.0 -> 4.100, 5.3 -> 4.503. Assumes minor < 100 (lib_Revision
+# is a UWORD, so major up to ~655 fits).
+set(BSDSOCKET_ABI_MAJOR ${PROJECT_VERSION_MAJOR})
+if(NOT DEFINED lwip-amiga_VERSION_MAJOR)
+    set(lwip-amiga_VERSION_MAJOR 0)
+    set(lwip-amiga_VERSION_MINOR 0)
+endif()
+math(EXPR BSDSOCKET_REVISION "${lwip-amiga_VERSION_MAJOR} * 100 + ${lwip-amiga_VERSION_MINOR}")
+
 # Version string (fleet convention)
 string(TIMESTAMP CURRENT_DATE "(%d.%m.%Y)")
-set(VERSTRING "$VER: ${PROJECT_NAME} ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR} ${CURRENT_DATE}")
+set(VERSTRING "$VER: ${PROJECT_NAME} ${BSDSOCKET_ABI_MAJOR}.${BSDSOCKET_REVISION} ${CURRENT_DATE}")
+
+# Shared warning flags. -m68040 / -fomit-frame-pointer are set stack-wide by the
+# toolchain (cmake/toolchain.cmake) and are not repeated per target.
+set(LWIP_WARN -Wall -Wextra)
 
 find_package(Emu68Common CONFIG REQUIRED)
 
@@ -27,7 +44,7 @@ add_library(netstack STATIC
     ${CMAKE_SOURCE_DIR}/port/amiga/netdev_if.c
 )
 
-target_compile_options(netstack PRIVATE -O3 -m68040 -fomit-frame-pointer -Wall -Wextra)
+target_compile_options(netstack PRIVATE -O3 ${LWIP_WARN})
 
 target_include_directories(netstack
     PUBLIC
@@ -60,18 +77,15 @@ add_executable(bsdsocket_library
 target_compile_definitions(bsdsocket_library
     PRIVATE
         LIBRARY_IDSTRING="${VERSTRING}"
-        LIBRARY_VERSION=${PROJECT_VERSION_MAJOR}
-        LIBRARY_REVISION=${PROJECT_VERSION_MINOR}
+        LIBRARY_VERSION=${BSDSOCKET_ABI_MAJOR}
+        LIBRARY_REVISION=${BSDSOCKET_REVISION}
         LIBRARY_NAME="${PROJECT_NAME}"
 )
 
 target_compile_options(bsdsocket_library
     PRIVATE
         -O3
-        -m68040
-        -fomit-frame-pointer
-        -Wall
-        -Wextra
+        ${LWIP_WARN}
         -Wshadow
         -Wmissing-prototypes
         -Wstrict-prototypes
@@ -101,11 +115,8 @@ set_target_properties(bsdsocket_library PROPERTIES
     SUFFIX ".library"
 )
 
-# The library is deliberately NOT installed into LIBS: yet — Phase 2 is not
-# HW-validated, and the emu68-drivers package ships install/LIBS wholesale.
-# Flip this to LIBS when the socket layer passes on-target tests.
-# The netdev ABI header IS installed and exported as the Netdev cmake
-# package — that is how genet.device consumes the contract.
+# The netdev ABI header is installed and exported as the Netdev cmake package —
+# that is how genet.device consumes the contract.
 install(FILES ${CMAKE_SOURCE_DIR}/include/netdev.h DESTINATION include)
 
 add_library(netdev_headers INTERFACE)
@@ -156,7 +167,7 @@ add_executable(netdev-stats
     netdev-stats/netdev-stats.c
 )
 
-target_compile_options(netdev-stats PRIVATE -O2 -m68040 -Wall -Wextra)
+target_compile_options(netdev-stats PRIVATE -O2 ${LWIP_WARN})
 
 target_link_libraries(netdev-stats
     PRIVATE
@@ -175,7 +186,7 @@ add_executable(socktest
     socktest/socktest.c
 )
 
-target_compile_options(socktest PRIVATE -O2 -m68040 -Wall -Wextra)
+target_compile_options(socktest PRIVATE -O2 ${LWIP_WARN})
 
 target_link_libraries(socktest
     PRIVATE
@@ -184,14 +195,11 @@ target_link_libraries(socktest
 
 emu68_debug_backend_finalize(socktest)
 
-install(
-    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/socktest
-    DESTINATION C
-)
+# socktest is a developer exerciser — built for local HW testing but deliberately
+# not installed, so it stays out of the shipped package.
 
-# The library itself: staged next to the tools for manual HW-test copies
-# (LIBS: install comes after on-target validation).
+# The shippable library.
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/bsdsocket.library
-    DESTINATION Testing
+    DESTINATION LIBS
 )

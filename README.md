@@ -8,11 +8,11 @@
 A modern TCP/IP stack for AmigaOS 3.2, built on
 [lwIP](https://savannah.nongnu.org/projects/lwip/).
 
-**Status: pre-alpha.** The zero-copy `netdev` datapath (through `genet.device`) is
-validated on real PiStorm/CM4 hardware — DHCP binds and ICMP is answered. The
-`bsdsocket.library` socket layer is implemented and builds clean (native + container)
-but is **not yet HW-validated**: it stages to `install/Testing/`, not `LIBS:`, until it
-passes on-target tests.
+**Status: early release.** The zero-copy `netdev` datapath (through `genet.device`) is
+validated on real PiStorm/CM4 hardware — DHCP binds, ICMP is answered, and TCP flows with
+hardware checksum offload. The `bsdsocket.library` socket layer is implemented and
+exercised on hardware; it installs to `LIBS:`. Throughput is still being optimized and a
+few areas carry known limitations (see below and [docs/TODO.md](docs/TODO.md)).
 
 ## What this is
 
@@ -38,9 +38,8 @@ layers, built bottom-up:
 
 Scope is IPv4 + DHCP + DNS, with a fresh minimal lwIP config and DHCP by default.
 
-Design record: [planning/concept.md](planning/concept.md) and
-[planning/netdev-abi.md](planning/netdev-abi.md). Running development log:
-[notes.md](notes.md).
+See [docs/architecture.md](docs/architecture.md) for how the stack works, and
+[docs/TODO.md](docs/TODO.md) for outstanding work and open investigations.
 
 ## Layout
 
@@ -52,11 +51,12 @@ Design record: [planning/concept.md](planning/concept.md) and
   `netstack.c` (singleton, core lock, `EClock`→ms time, DMA-aware heap), `netdev_if.c`
   (lwIP netif ⇄ `netdev` glue: zero-copy TX scatter-gather + L4 checksum offsets, RX
   `pbuf_custom` recycle, link events).
-- `src/bsdsocket/` — `bsdsocket.library` 4.0 (socket layer, LVO table, stack task).
-- `src/socktest/` — `bsdsocket.library` end-to-end test (installs to `C/`).
+- `src/bsdsocket/` — `bsdsocket.library` (socket layer, LVO table, stack task).
+- `src/socktest/` — `bsdsocket.library` end-to-end test + throughput bench (developer
+  tool; built but not shipped).
 - `sfd/`, `scripts/gen-vectors.py` — the NDK `bsdsocket` SFD and the generator that emits
   the full 139-slot LVO vector table from it.
-- `planning/` — design documents.
+- `docs/` — architecture and TODO documents.
 
 ## Features
 
@@ -66,7 +66,7 @@ batches, driver-provided DMA allocator for the TX pool, offset-based TX L4 check
 STOP/DETACH quiesce protocol. genet's negotiated caps: interrupt coalescing, link
 events, TX L4 checksum offload, RX checksum (RAW + VALID).
 
-**`bsdsocket.library`** — 67 of 121 LVOs implemented, including:
+**`bsdsocket.library`** — 72 of 121 LVOs implemented, including:
 
 - Socket core: `socket` `bind` `listen` `accept` `connect` `send`/`sendto`
   `recv`/`recvfrom` `shutdown` `CloseSocket` `setsockopt`/`getsockopt`
@@ -80,13 +80,15 @@ events, TX L4 checksum offload, RX checksum (RAW + VALID).
 - `Dup2Socket`, `sendmsg`/`recvmsg` (iovec scatter-gather),
   `ObtainSocket`/`ReleaseSocket`/`ReleaseCopyOfSocket`, `vsyslog`/`syslog`,
   DNS-server config + default-domain LVOs.
+- `getaddrinfo`/`freeaddrinfo`/`gai_strerror`/`getnameinfo` (RFC 2553 IPv4 subset) and the
+  full AmiTCP V4 async event API (`GetSocketEvents`, `SO_EVENTMASK`).
 
 TCP receive consumes driver RX pbufs with zero copies until the app buffer; TCP send
 copies into the DMA-backed heap with `sndbuf` blocking. UDP/RAW get bounded datagram
 queues. Blocking is done with Exec signals under the core lock, so there are no lost
 wakeups; break signals (Ctrl-C by default) surface as `EINTR`.
 
-See [notes.md](notes.md) for the full LVO scoreboard (what's stubbed and why).
+See [docs/TODO.md](docs/TODO.md) for the full LVO scoreboard (what's stubbed and why).
 
 ## Building
 
@@ -115,32 +117,36 @@ options — `lwip-amiga` is a valid `EMU68_DEBUG_HIGH` component name.
 
 ## Test tools
 
-- **`socktest`** (`C/`) — app-side exercise of the socket layer via the library's LVOs
-  (own inline glue, no netinclude dependency): `inet_addr`/`gethostbyname` → TCP
-  connect/send/recv, default an HTTP/1.0 GET. Copy `Testing/bsdsocket.library` to
-  `LIBS:` first, then `socktest <host> 80` — this drives DHCP + DNS + TCP through the
-  whole zero-copy `netdev` path with hardware checksums active.
+- **`netdev-stats`** (`C/`, shipped) — a second `netdev` opener beside the running stack
+  that reads live loss-point counters (`GET_STATS`/`GET_LINK`) and drives interrupt
+  coalescing (`SET_COALESCE`) — no ATTACH needed. The release-build replacement for the
+  debug driver's serial counters.
+- **`socktest`** (developer tool, built but not shipped) — app-side exercise of the socket
+  layer via the library's LVOs (own inline glue, no netinclude dependency):
+  `gethostbyname` → TCP connect/send/recv (default an HTTP/1.0 GET), plus a throughput
+  bench mode. `socktest <host> 80` drives DHCP + DNS + TCP through the whole zero-copy
+  `netdev` path with hardware checksums active.
 
 ## Known limitations
 
-- **`bsdsocket.library` is not HW-validated yet** — staged in `install/Testing/`, not
-  installed to `LIBS:`. The `netdev` genet datapath is validated on hardware.
+- **Throughput is still being optimized** — download runs below line rate; the ceiling is
+  serialized stack-side work under the core lock. See [docs/TODO.md](docs/TODO.md).
 - **Router-side first-packet drop (under investigation)** — the first inbound packet of
   a fresh through-NAT flow after a few seconds of TX-idle can be lost *upstream* of the
   NIC (MIB counters show it never reaches the MAC); local-LAN flows are unaffected.
-  Suspected router hardware-NAT / flow-offload. Mitigated with a 500 ms TCP RTO in
-  `lwipopts.h` (SYN retransmit beats apps' 1 s connect timeouts). See
-  [notes.md](notes.md).
+  Suspected router hardware-NAT / flow-offload. Mitigated with a 500 ms initial TCP RTO in
+  `lwipopts.h` (the SYN retransmit beats apps' 1 s connect timeouts). See
+  [docs/TODO.md](docs/TODO.md).
 - **TCP loss handling** — lwIP emits SACKs but does not act on received ones, so ~2%
   loss can trigger RTO collapse. Fine for a clean wired LAN.
-- Stubbed LVOs include `getaddrinfo`, `GetSocketEvents`, the Roadshow
-  interface-config/route/monitor families, `mbuf_*`, `bpf_*`, and (intentionally) the
-  private `ipf_*` filter. No reverse DNS yet (`gethostbyaddr` returns the dotted quad).
+- Stubbed LVOs include the Roadshow interface-config/route/monitor families, `mbuf_*`,
+  `bpf_*`, and (intentionally) the private `ipf_*` filter. No reverse DNS yet
+  (`gethostbyaddr` returns the dotted quad).
 
 ## License
 
 `BSD-3-Clause` throughout — own code, the `include/` `netdev` ABI headers, and the
 bundled `lwip/` submodule (© the lwIP developers, used unmodified) all match. Any
 driver or stack, under any license, may implement the `netdev` ABI contract. See
-[LICENSE.md](LICENSE.md), including a note on the `emu68-common` build dependency
+[LICENSE](LICENSE), including a note on the `emu68-common` build dependency
 used by the Amiga binaries.

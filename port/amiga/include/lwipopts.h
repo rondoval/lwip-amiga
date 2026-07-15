@@ -69,9 +69,9 @@
 #define MEMP_NUM_SYS_TIMEOUT            (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8)
 #define PBUF_POOL_SIZE                  64   /* loopback traffic only */
 
-/* --- TCP, sized for the wire-speed goal (validated by harness/tcpbench:
- * scaling negotiates; recovery is fast-retransmit only — lwIP emits SACKs
- * but does not use received ones, so lossy paths degrade to RTO) --- */
+/* --- TCP, sized for the wire-speed goal: window scaling negotiates, and
+ * recovery is fast-retransmit only — lwIP emits SACKs but does not use
+ * received ones, so lossy paths degrade to RTO --- */
 #define TCP_MSS                         1460
 #define LWIP_WND_SCALE                  1
 #define TCP_RCV_SCALE                   4
@@ -83,8 +83,7 @@
 #define LWIP_TCP_SACK_OUT               1
 /* init.c's sanity check requires PBUF_POOL to cover TCP_WND, assuming RX
  * allocates from it. Our RX buffers are driver-owned custom pbufs — the
- * pool only serves loopback — so that premise doesn't hold here. The other
- * TCP sizing relations were validated with checks enabled (harness/bench). */
+ * pool only serves loopback — so that premise doesn't hold here. */
 #define LWIP_DISABLE_TCP_SANITY_CHECKS  1
 #define TCP_LISTEN_BACKLOG              1
 #define LWIP_TCP_KEEPALIVE              1
