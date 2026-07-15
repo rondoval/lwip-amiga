@@ -262,12 +262,29 @@ struct sb_addrinfo
 #define SBTC_ERRNOLONGPTR 24
 #define SBTC_HERRNOLONGPTR 25
 
+/* Roadshow feature-capability tags (SBTM_GETREF(...) probes): an opener reads
+ * these through SocketBaseTagList to learn which extension LVO groups this
+ * library actually provides. */
+#define SBTC_NUM_PACKET_FILTER_CHANNELS 40
+#define SBTC_HAVE_ROUTING_API 41
+#define SBTC_HAVE_INTERFACE_API 47
+#define SBTC_HAVE_MONITORING_API 50
+#define SBTC_HAVE_STATUS_API 53
+#define SBTC_HAVE_DNS_API 54
+#define SBTC_HAVE_LOCAL_DATABASE_API 59
+#define SBTC_HAVE_ADDRESS_CONVERSION_API 60
+#define SBTC_HAVE_KERNEL_MEMORY_API 61
+#define SBTC_HAVE_SERVER_API 63
+#define SBTC_HAVE_ROADSHOWDATA_API 67
+#define SBTC_HAVE_GETHOSTADDR_R_API 69
+
 /* --- sockets -------------------------------------------------------------- */
 
 #define SB_FD_COUNT 64
 #define SB_DGRAM_QMAX 32
 #define SB_ACCEPT_QMAX 16
 #define SB_HOSTNAME_MAX 128
+#define SB_SOCK_OWNERS 4 /* distinct owner bases a shared socket can wake */
 
 typedef enum
 {
@@ -285,11 +302,25 @@ struct SbDgram
     UWORD pad;
 };
 
+/* One owner base of a socket: the task woken on readiness. A plain socket has
+ * exactly one (its creator). A socket shared by ReleaseCopyOfSocket +
+ * ObtainSocket gains a second — both holders must be woken. fdrefs counts the
+ * fds THIS base holds so a partial close (Dup2Socket left another fd open)
+ * keeps the base an owner. An empty slot has base == NULL. */
+struct SbOwnerRef
+{
+    struct SocketBase *base;
+    UWORD fdrefs;
+    UWORD pad;
+};
+
 struct SbSocket
 {
     struct MinNode node; /* accept-queue linkage */
-    struct SocketBase *owner;    /* the base whose task gets woken; NULL while
-                                  * parked by ReleaseSocket */
+    /* owner bases whose tasks get woken; slot 0 is the sole owner in the
+     * common case, extra slots fill only via ReleaseCopyOfSocket sharing.
+     * All-empty == parked by ReleaseSocket (nobody to wake until obtained). */
+    struct SbOwnerRef owners[SB_SOCK_OWNERS];
     struct SocketBase *rootBase; /* never changes; owns the pool */
     UBYTE refs;                  /* fd references (Dup2Socket, ReleaseCopyOf) */
 
@@ -405,6 +436,14 @@ struct SbSocket *sb_sock_alloc(struct SocketBase *base, SbSockType type);
 void sb_sock_free(struct SocketBase *base, struct SbSocket *s); /* under lock */
 LONG sb_fd_alloc(struct SocketBase *base, struct SbSocket *s);
 struct SbSocket *sb_fd_get(struct SocketBase *base, LONG fd);
+
+/* socket ownership (sb_socket.c); all under the core lock. incref adds one fd
+ * reference for @b (a new owner slot on first, else fdrefs++), returning FALSE
+ * only if the socket already has SB_SOCK_OWNERS distinct owners. decref drops
+ * one, freeing the slot at zero. first == NULL only for a parked socket. */
+BOOL sb_owner_incref(struct SbSocket *s, struct SocketBase *b);
+void sb_owner_decref(struct SbSocket *s, struct SocketBase *b);
+struct SocketBase *sb_owner_first(struct SbSocket *s);
 void sb_wake(struct SbSocket *s);
 void sb_event(struct SbSocket *s, ULONG ev); /* under lock; signals sigEventMask */
 LONG sb_wait(struct SocketBase *base); /* 0 or SB_EINTR; drops+retakes the lock */
@@ -524,6 +563,12 @@ LONG bsd_getnameinfo(APTR sa asm("a0"), ULONG salen asm("d0"), STRPTR host asm("
 
 /* shared helpers (sb_misc.c) */
 struct sb_hostent *sb_host_resolve(struct SocketBase *base, const char *name, ULONG *addrOut, LONG *herrOut);
+
+/* reverse DNS (sb_rdns.c): resolve @addr (network order) to a hostname via a
+ * PTR query to the configured resolver. Fills @out (NUL-terminated) and
+ * returns 0 on success, -1 if no PTR record, no resolver, or timeout. Takes
+ * the core lock internally; call it without the lock held. */
+LONG sb_ptr_resolve(struct SocketBase *base, ULONG addr, char *out, ULONG outmax);
 
 /* services table lookups (sb_misc2.c); ports host-order, proto "tcp"/"udp" */
 LONG sb_serv_port_by_name(const char *name, const char *proto);

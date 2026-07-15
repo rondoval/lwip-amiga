@@ -62,6 +62,7 @@ LONG bsd_Dup2Socket(LONG oldSock asm("d0"), LONG newSock asm("d1"),
         base->fd[newSock] = s;
     }
     s->refs++;
+    sb_owner_incref(s, base); /* same base, extra fd: bumps its existing slot */
     netstack_unlock();
     return newSock;
 }
@@ -389,12 +390,15 @@ static LONG sb_release_common(struct SocketBase *base, LONG sock, LONG id, BOOL 
     r->s = s;
     if (copy)
     {
-        s->refs++; /* the releaser keeps its fd */
+        s->refs++; /* the releaser keeps its fd (and its owner slot) */
     }
     else
     {
         base->fd[sock] = NULL;
-        s->owner = NULL; /* parked: nobody to wake until obtained */
+        /* the releaser hands its fd to the parking lot; drop its ownership but
+         * keep refs (the park holds that reference). All owners gone ==
+         * parked: nobody to wake until obtained. */
+        sb_owner_decref(s, base);
     }
     AddTailMinList(&root->releasedSockets, &r->node);
     netstack_unlock();
@@ -453,10 +457,19 @@ LONG bsd_ObtainSocket(LONG id asm("d0"), LONG domain asm("d1"), LONG type asm("d
         sb_set_errno(base, SB_EMFILE);
         return -1;
     }
+    /* wakeups now also target this opener; a copy keeps the releaser's slot,
+     * so both are woken. The parked refcount transferred into this fd already,
+     * so refs is not bumped here. */
+    if (!sb_owner_incref(s, base))
+    {
+        base->fd[fd] = NULL;
+        netstack_unlock();
+        sb_set_errno(base, SB_ENOBUFS);
+        return -1;
+    }
 
     RemoveMinNode(&r->node);
     FreePooled(root->sockPool, r, sizeof(struct SbReleased));
-    s->owner = base; /* wakeups now target the new opener */
     netstack_unlock();
     return fd;
 }

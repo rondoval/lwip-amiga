@@ -71,6 +71,7 @@ add_executable(bsdsocket_library
     bsdsocket/sb_misc.c
     bsdsocket/sb_misc2.c
     bsdsocket/sb_gai.c
+    bsdsocket/sb_rdns.c
     bsdsocket/end.c
 )
 

@@ -57,19 +57,67 @@ LONG sb_map_err(signed char e)
     }
 }
 
+/* ------------------------------------------------------------- ownership --- */
+
+struct SocketBase *sb_owner_first(struct SbSocket *s)
+{
+    for (ULONG i = 0; i < SB_SOCK_OWNERS; i++)
+        if (s->owners[i].base != NULL)
+            return s->owners[i].base;
+    return NULL;
+}
+
+BOOL sb_owner_incref(struct SbSocket *s, struct SocketBase *b)
+{
+    KprintfH("[bsdsocket] %s: s=0x%08lx b=0x%08lx\n", __func__, (ULONG)s, (ULONG)b);
+    struct SbOwnerRef *slot = NULL;
+    for (ULONG i = 0; i < SB_SOCK_OWNERS; i++)
+    {
+        if (s->owners[i].base == b)
+        {
+            s->owners[i].fdrefs++;
+            return TRUE;
+        }
+        if (slot == NULL && s->owners[i].base == NULL)
+            slot = &s->owners[i];
+    }
+    if (slot == NULL)
+        return FALSE; /* SB_SOCK_OWNERS distinct owners already */
+    slot->base = b;
+    slot->fdrefs = 1;
+    return TRUE;
+}
+
+void sb_owner_decref(struct SbSocket *s, struct SocketBase *b)
+{
+    KprintfH("[bsdsocket] %s: s=0x%08lx b=0x%08lx\n", __func__, (ULONG)s, (ULONG)b);
+    for (ULONG i = 0; i < SB_SOCK_OWNERS; i++)
+    {
+        if (s->owners[i].base == b)
+        {
+            if (--s->owners[i].fdrefs == 0)
+                s->owners[i].base = NULL;
+            return;
+        }
+    }
+}
+
 void sb_wake(struct SbSocket *s)
 {
     KprintfH("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
-    struct SocketBase *b = s->owner;
-    if (b != NULL && b->task != NULL)
+    /* Wake every owner: normally one, but a socket shared via
+     * ReleaseCopyOfSocket has several and all of them must be woken (the
+     * 2026 "last claimant only" gap). sigIoMask = AmiTCP-style async SIGIO
+     * (SetSocketSignals / SBTC_SIGIOMASK): apps park in Wait() on it instead
+     * of WaitSelect — every readiness change must deliver it or they hang
+     * (AExplorer post-accept, 2026-07-14). Spurious delivery is fine, SIGIO
+     * consumers re-poll. sigEventMask delivered likewise until a real
+     * GetSocketEvents queue exists. */
+    for (ULONG i = 0; i < SB_SOCK_OWNERS; i++)
     {
-        /* sigIoMask = AmiTCP-style async SIGIO (SetSocketSignals /
-         * SBTC_SIGIOMASK): apps park in Wait() on it instead of WaitSelect
-         * — every readiness change must deliver it or they hang (AExplorer
-         * post-accept, 2026-07-14). Spurious delivery is fine, SIGIO
-         * consumers re-poll. sigEventMask delivered likewise until a real
-         * GetSocketEvents queue exists. */
-        Signal(b->task, (1UL << b->sigBit) | b->sigIoMask | b->sigEventMask);
+        struct SocketBase *b = s->owners[i].base;
+        if (b != NULL && b->task != NULL)
+            Signal(b->task, (1UL << b->sigBit) | b->sigIoMask | b->sigEventMask);
     }
 }
 
@@ -79,13 +127,16 @@ void sb_wake(struct SbSocket *s)
  * so unsubscribed sockets cost one masked AND. */
 void sb_event(struct SbSocket *s, ULONG ev)
 {
-    struct SocketBase *b = s->owner;
     ev &= s->eventMask;
-    if (ev == 0 || b == NULL)
+    if (ev == 0)
         return;
     s->eventsPending |= ev;
-    if (b->task != NULL && b->sigEventMask != 0)
-        Signal(b->task, b->sigEventMask);
+    for (ULONG i = 0; i < SB_SOCK_OWNERS; i++)
+    {
+        struct SocketBase *b = s->owners[i].base;
+        if (b != NULL && b->task != NULL && b->sigEventMask != 0)
+            Signal(b->task, b->sigEventMask);
+    }
 }
 
 /* Drop the core lock and sleep until this base's socket signal or a break
@@ -296,7 +347,7 @@ static err_t sb_tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err)
 
     struct SbSocket *s = NULL;
     if (lst->naccept < SB_ACCEPT_QMAX)
-        s = sb_sock_alloc(lst->owner, SBT_TCP);
+        s = sb_sock_alloc(sb_owner_first(lst), SBT_TCP);
     if (s == NULL)
     {
         tcp_abort(newpcb);
@@ -388,7 +439,8 @@ struct SbSocket *sb_sock_alloc(struct SocketBase *base, SbSockType type)
     for (ULONG i = 0; i < sizeof(*s); i++)
         ((UBYTE *)s)[i] = 0;
 
-    s->owner = base;
+    s->owners[0].base = base;
+    s->owners[0].fdrefs = 1;
     s->rootBase = root;
     s->refs = 1;
     s->type = (UBYTE)type;
@@ -403,8 +455,8 @@ void sb_sock_free(struct SocketBase *base, struct SbSocket *s)
 {
     KprintfH("[bsdsocket] %s: s=0x%08lx refs=%lu\n", __func__, (ULONG)s, (ULONG)s->refs);
     struct SocketBase *root = s->rootBase;
-    (void)base;
 
+    sb_owner_decref(s, base); /* this base gives up one fd on the socket */
     if (--s->refs != 0)
         return;
 

@@ -6,9 +6,9 @@
  * The whole result list lives in ONE AllocMem block with a hidden size
  * header before the first addrinfo, so freeaddrinfo needs the list head
  * only (standard usage). No CNAME chasing: AI_CANONNAME echoes the queried
- * name. getnameinfo has no reverse DNS (matching gethostbyaddr): hosts
- * come out numeric, NI_NAMEREQD fails with EAI_NONAME; service names come
- * from the static services table.
+ * name. getnameinfo does reverse DNS via sb_ptr_resolve (PTR query); when it
+ * finds nothing the host falls back to numeric unless NI_NAMEREQD is set (then
+ * EAI_NONAME). Service names come from the static services table.
  */
 
 #include "sb_base.h"
@@ -242,7 +242,6 @@ LONG bsd_getnameinfo(APTR sa asm("a0"), ULONG salen asm("d0"),
                      ULONG flags asm("d3"), struct SocketBase *base asm("a6"))
 {
     KprintfH("[bsdsocket] %s: sa=0x%08lx flags=0x%lx\n", __func__, (ULONG)sa, flags);
-    (void)base;
     const struct sb_sockaddr_in *sin = sa;
 
     if ((flags & ~(ULONG)(SB_NI_NUMERICHOST | SB_NI_NUMERICSERV | SB_NI_NOFQDN |
@@ -259,17 +258,26 @@ LONG bsd_getnameinfo(APTR sa asm("a0"), ULONG salen asm("d0"),
 
     if (wantHost)
     {
-        /* no reverse DNS: numeric only */
-        if (flags & SB_NI_NAMEREQD)
-            return SB_EAI_NONAME;
-        ip4_addr_t ip;
-        ip4_addr_set_u32(&ip, sin->sin_addr);
-        char buf[IP4ADDR_STRLEN_MAX];
-        ip4addr_ntoa_r(&ip, buf, sizeof(buf));
-        ULONG n = sb_gai_strlen(buf);
+        char nameBuf[SB_HOSTNAME_MAX];
+        const char *name = NULL;
+        if (!(flags & SB_NI_NUMERICHOST) &&
+            sb_ptr_resolve(base, sin->sin_addr, nameBuf, sizeof(nameBuf)) == 0)
+            name = nameBuf;
+
+        char numBuf[IP4ADDR_STRLEN_MAX];
+        if (name == NULL)
+        {
+            if (flags & SB_NI_NAMEREQD)
+                return SB_EAI_NONAME;
+            ip4_addr_t ip;
+            ip4_addr_set_u32(&ip, sin->sin_addr);
+            ip4addr_ntoa_r(&ip, numBuf, sizeof(numBuf));
+            name = numBuf;
+        }
+        ULONG n = sb_gai_strlen(name);
         if (n + 1 > hostlen)
             return SB_EAI_MEMORY;
-        CopyMem(buf, host, n + 1);
+        CopyMem((APTR)name, host, n + 1);
     }
 
     if (wantServ)

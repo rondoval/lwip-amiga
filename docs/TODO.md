@@ -9,36 +9,12 @@ For how the stack is put together, see [architecture.md](architecture.md).
   ICMP is answered, TCP flows, and the TSB/RSB checksum offloads are active. The zero-copy
   vertical slice works end to end.
 - **`bsdsocket.library`** — exercised on hardware (speed tests, Amiga Explorer, browser
-  traffic) and functional; 72 of 121 LVOs implemented. Throughput is being actively
-  optimized (see below) and a few of the later LVO waves still want a HW retest.
+  traffic) and functional; 72 of 121 LVOs implemented. The full per-LVO map — what is
+  done and the decision on each stub — is [bsdsocket-lvo-coverage.md](bsdsocket-lvo-coverage.md).
+  Throughput is being actively optimized (see below) and a few of the later LVO waves
+  still want a HW retest.
 - **ABI freeze** — the `netdev` ABI is still a pre-freeze internal prototype (v1); several
   questions below should be settled before it is frozen.
-
-## `bsdsocket.library` — LVO gaps
-
-72 implemented, 49 stubbed. The stubs, grouped:
-
-- **Roadshow interface-config family (10)** — `AddInterfaceTagList`,
-  `ConfigureInterfaceTagList`, `Obtain/ReleaseInterfaceList`, `QueryInterfaceTagList`,
-  `Create/DeleteAddrAllocMessage`, `Begin/AbortInterfaceConfig`, `RemoveInterface`. The
-  stack self-configures via DHCP; a `Query` subset would still serve status tools. Ties
-  into the config-UX decision below.
-- **Route API (5)** — `Add/Delete/ChangeRouteTagList`, `Free/GetRouteInfo`. lwIP has no
-  route table beyond netif + gateway.
-- **Monitor / stats (3)** — `Add/RemoveNetMonitorHook`, `GetNetworkStatistics`. The last is
-  worth faking from lwIP's own stats eventually.
-- **Server support (2)** — `ProcessIsServer`, `ObtainServerSocket` (inetd model). The
-  `ObtainSocket`/`ReleaseSocket` family already covers the handoff apps actually need.
-- **Roadshow data (3)** — `Obtain/Release/ChangeRoadshowData`.
-- **`mbuf_*` (11)** — AmiTCP mbuf compatibility over pbufs; near-zero modern-app value,
-  implement only if a real app demands it.
-- **`bpf_*` (8)** — packet capture (tcpdump-class); would map to a promiscuous RAW netif
-  tap. Future.
-- **`ipf_*` (7)** — Roadshow's private IP filter; intentionally never implemented.
-
-Deferred smalls: reverse DNS (`gethostbyaddr`/`getnameinfo` return the dotted quad),
-static-IP env config for the stack task, and shared-socket wakeup fan-out (a copy shared
-via `ReleaseCopyOfSocket` currently wakes only the last claimant).
 
 ## `netdev` ABI — questions to settle before freeze
 
@@ -71,6 +47,8 @@ via `ReleaseCopyOfSocket` currently wakes only the last claimant).
 - **Config file & tools.** A fresh, minimal config (one file in `ENVARC:`, DHCP by default)
   and a small set of CLI tools; interface-config LVOs vs pure DHCP self-config; tool
   naming; release branding. No Roadshow file-format compatibility.
+- **Static-IP config.** The stack task self-configures via DHCP; a static-IP override
+  (env config read by the stack task at startup) is still to be added.
 
 ## Ongoing investigations
 

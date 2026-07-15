@@ -191,6 +191,37 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
                 return index;
             base->hErrnoPtr = (APTR)*valp != NULL ? (LONG *)*valp : &base->hErrno;
             break;
+
+        /* Roadshow feature-capability probes (read-only): report which
+         * extension LVO groups this library implements so apps can discover
+         * them instead of guessing. Implemented groups -> TRUE. */
+        case SBTC_HAVE_DNS_API:
+        case SBTC_HAVE_LOCAL_DATABASE_API:
+        case SBTC_HAVE_ADDRESS_CONVERSION_API:
+        case SBTC_HAVE_GETHOSTADDR_R_API:
+            if (isSet)
+                return index;
+            *valp = TRUE;
+            break;
+        /* Not (yet) implemented groups -> FALSE; the packet-filter probe
+         * reports zero channels. Answering keeps the taglist succeeding
+         * rather than erroring on an unrecognised tag. */
+        case SBTC_HAVE_ROUTING_API:
+        case SBTC_HAVE_INTERFACE_API:
+        case SBTC_HAVE_MONITORING_API:
+        case SBTC_HAVE_STATUS_API:
+        case SBTC_HAVE_SERVER_API:
+        case SBTC_HAVE_ROADSHOWDATA_API:
+        case SBTC_HAVE_KERNEL_MEMORY_API:
+            if (isSet)
+                return index;
+            *valp = FALSE;
+            break;
+        case SBTC_NUM_PACKET_FILTER_CHANNELS:
+            if (isSet)
+                return index;
+            *valp = 0;
+            break;
         default:
             return index; /* unknown tag: report its 1-based position */
         }
@@ -428,17 +459,20 @@ APTR bsd_gethostbyaddr(STRPTR addr asm("a0"), LONG len asm("d0"), LONG type asm(
                        struct SocketBase *base asm("a6"))
 {
     KprintfH("[bsdsocket] %s: addr=0x%08lx len=%ld\n", __func__, (ULONG)addr, len);
-    /* no reverse DNS yet: hand back the dotted quad as the name */
     if (addr == NULL || len != 4 || type != SB_AF_INET)
     {
         sb_set_herrno(base, SB_HOST_NOT_FOUND);
         return NULL;
     }
     ULONG a = *(ULONG *)addr;
-    ip4_addr_t ip;
-    ip4_addr_set_u32(&ip, a);
-    ip4addr_ntoa_r(&ip, base->ntoaBuf, sizeof(base->ntoaBuf));
-    return sb_host_fill(base, base->ntoaBuf, a);
+    char nameBuf[SB_HOSTNAME_MAX];
+    if (sb_ptr_resolve(base, a, nameBuf, sizeof(nameBuf)) != 0)
+    {
+        /* no PTR record (or no resolver / timeout): BSD reports not-found */
+        sb_set_herrno(base, SB_HOST_NOT_FOUND);
+        return NULL;
+    }
+    return sb_host_fill(base, nameBuf, a);
 }
 
 LONG bsd_gethostname(STRPTR name asm("a0"), LONG namelen asm("d0"),
