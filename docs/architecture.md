@@ -189,8 +189,8 @@ supplies the toolchain and `emu68-common`); see the [README](../README.md) for c
 - The **`Netdev`** cmake package — `include/netdev.h` exported as
   `Netdev::netdev_headers`; this is how `genet.device` consumes the contract.
 - Diagnostics: `netdev-stats` (a second netdev opener reading live loss-point counters and
-  driving `SET_COALESCE`) and `socktest` (an end-to-end socket exerciser + throughput
-  bench; built but not shipped).
+  driving `SET_COALESCE`) and `sockbench` (a LAN TCP throughput benchmark; built but not
+  shipped).
 
 **Versioning.** The component/release version lives in the top-level
 `project(lwip-amiga VERSION x.y)` and is what the git tag and the stack manifest track.

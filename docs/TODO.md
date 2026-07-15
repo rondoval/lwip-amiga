@@ -81,7 +81,7 @@ shows the ceiling is **serialized stack-side work under the core lock** (`ns_Cor
 for the large majority of wall-clock time during a receive; the RX cost is dominated by
 lwIP's input path plus lock waits, while the driver's ring mechanics are a few microseconds
 per frame). The work is measurement-first, using the `netdev-stats` loss-point counters and
-`socktest bench` against a LAN peer.
+`sockbench` against a LAN peer.
 
 Levers in flight / planned:
 

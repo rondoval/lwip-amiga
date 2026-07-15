@@ -52,7 +52,7 @@ See [docs/architecture.md](docs/architecture.md) for how the stack works, and
   (lwIP netif ⇄ `netdev` glue: zero-copy TX scatter-gather + L4 checksum offsets, RX
   `pbuf_custom` recycle, link events).
 - `src/bsdsocket/` — `bsdsocket.library` (socket layer, LVO table, stack task).
-- `src/socktest/` — `bsdsocket.library` end-to-end test + throughput bench (developer
+- `src/sockbench/` — LAN TCP throughput benchmark over `bsdsocket.library` (developer
   tool; built but not shipped).
 - `sfd/`, `scripts/gen-vectors.py` — the NDK `bsdsocket` SFD and the generator that emits
   the full 139-slot LVO vector table from it.
@@ -121,11 +121,11 @@ options — `lwip-amiga` is a valid `EMU68_DEBUG_HIGH` component name.
   that reads live loss-point counters (`GET_STATS`/`GET_LINK`) and drives interrupt
   coalescing (`SET_COALESCE`) — no ATTACH needed. The release-build replacement for the
   debug driver's serial counters.
-- **`socktest`** (developer tool, built but not shipped) — app-side exercise of the socket
-  layer via the library's LVOs (own inline glue, no netinclude dependency):
-  `gethostbyname` → TCP connect/send/recv (default an HTTP/1.0 GET), plus a throughput
-  bench mode. `socktest <host> 80` drives DHCP + DNS + TCP through the whole zero-copy
-  `netdev` path with hardware checksums active.
+- **`sockbench`** (developer tool, built but not shipped) — LAN TCP throughput benchmark
+  over the NDK BSD socket API (`bsdsocket.library`): `sockbench rx|tx <host> [streams]
+  [seconds] [bufKB]` runs N nonblocking sockets from one `WaitSelect` loop against
+  `scripts/tcp-bench-peer.py` and reports per-stream + aggregate Mb/s. Exercises DHCP +
+  DNS + TCP through the whole zero-copy `netdev` path with hardware checksums active.
 
 ## Known limitations
 

@@ -179,23 +179,24 @@ install(
     DESTINATION C
 )
 
-# --- socktest: bsdsocket.library end-to-end test ----------------------------
-# App-side exercise of the socket layer: DNS + TCP connect/send/recv through
-# the library's LVOs (own inline glue; no netinclude dependency).
-add_executable(socktest
-    socktest/socktest.c
+# --- sockbench: LAN TCP throughput benchmark --------------------------------
+# App-side throughput bench over the socket layer: DNS + nonblocking TCP
+# send/recv via the NDK BSD socket API (bsdsocket.library). Drives
+# scripts/tcp-bench-peer.py on a LAN peer.
+add_executable(sockbench
+    sockbench/sockbench.c
 )
 
-target_compile_options(socktest PRIVATE -O2 ${LWIP_WARN})
+target_compile_options(sockbench PRIVATE -O2 ${LWIP_WARN})
 
-target_link_libraries(socktest
+target_link_libraries(sockbench
     PRIVATE
         Emu68Common::common
 )
 
-emu68_debug_backend_finalize(socktest)
+emu68_debug_backend_finalize(sockbench)
 
-# socktest is a developer exerciser — built for local HW testing but deliberately
+# sockbench is a developer benchmark — built for local HW testing but deliberately
 # not installed, so it stays out of the shipped package.
 
 # The shippable library.

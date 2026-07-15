@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-3-Clause
-"""LAN throughput peer for `socktest bench` (stdlib only).
+"""LAN throughput peer for `sockbench` (stdlib only).
 
     python3 tcp-bench-peer.py [bind-address]
 
-Port 5001: sink   — discards whatever the client sends (socktest bench tx)
-Port 5002: source — blasts data until the client closes  (socktest bench rx)
+Port 5001: sink   — discards whatever the client sends (sockbench tx)
+Port 5002: source — blasts data until the client closes  (sockbench rx)
 
 The Amiga side measures itself; this peer just moves bytes, but prints its
 own per-connection byte count and rate as a cross-check.
