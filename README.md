@@ -3,8 +3,7 @@
 > **Releases:** this component is developed and built as part of the
 > [emu68-driver-stack](https://github.com/rondoval/emu68-driver-stack). That repository
 > publishes the downloadable `.lha` and bundled documentation; this one is source-only
-> and versioned via git tags. It can also build a Linux host harness on its own — see
-> [Building](#building).
+> and versioned via git tags.
 
 A modern TCP/IP stack for AmigaOS 3.2, built on
 [lwIP](https://savannah.nongnu.org/projects/lwip/).
@@ -55,10 +54,7 @@ Design record: [planning/concept.md](planning/concept.md) and
   (lwIP netif ⇄ `netdev` glue: zero-copy TX scatter-gather + L4 checksum offsets, RX
   `pbuf_custom` recycle, link events).
 - `src/bsdsocket/` — `bsdsocket.library` 4.0 (socket layer, LVO table, stack task).
-- `src/netdev-test/` — hosted `netdev` bring-up diagnostic (installs to `C/`).
 - `src/socktest/` — `bsdsocket.library` end-to-end test (installs to `C/`).
-- `harness/` — Linux host harness: builds the lwIP core + port natively and runs smoke
-  tests (`smoke.c` loopback TCP echo) and a TCP behaviour benchmark (`bench/tcpbench.c`).
 - `sfd/`, `scripts/gen-vectors.py` — the NDK `bsdsocket` SFD and the generator that emits
   the full 139-slot LVO vector table from it.
 - `planning/` — design documents.
@@ -95,17 +91,6 @@ See [notes.md](notes.md) for the full LVO scoreboard (what's stubbed and why).
 
 ## Building
 
-### Linux host harness (standalone)
-
-The standalone build targets only the Linux host harness — it builds the lwIP core with
-the port layer natively and runs the smoke tests. No cross-toolchain required.
-
-```sh
-git submodule update --init --recursive   # nested lwIP submodule
-cmake -B build && cmake --build build
-./build/harness/smoke                      # 256 KB loopback TCP echo, byte-exact
-```
-
 ### Amiga (m68k) binaries
 
 The `netstack` library, `bsdsocket.library`, and the test tools are built through the
@@ -131,22 +116,16 @@ options — `lwip-amiga` is a valid `EMU68_DEBUG_HIGH` component name.
 
 ## Test tools
 
-- **`netdev-test`** (`C/`) — first-light `netdev` bring-up: ATTACH (prints negotiated
-  caps), create netif, static-IP or DHCP config, START, then a tick loop. lwIP answers
-  ARP/ICMP itself, so `ping` from another host is the test; Ctrl-C exercises
-  STOP/DETACH (a clean teardown proves no RX-buffer leak). Needs no `bsdsocket.library`.
 - **`socktest`** (`C/`) — app-side exercise of the socket layer via the library's LVOs
   (own inline glue, no netinclude dependency): `inet_addr`/`gethostbyname` → TCP
   connect/send/recv, default an HTTP/1.0 GET. Copy `Testing/bsdsocket.library` to
   `LIBS:` first, then `socktest <host> 80` — this drives DHCP + DNS + TCP through the
   whole zero-copy `netdev` path with hardware checksums active.
-- **`harness/smoke`, `harness/bench/tcpbench`** — Linux-hosted lwIP core tests (loopback
-  echo; TCP window-scaling / retransmit behaviour over a lossy echo netif).
 
 ## Known limitations
 
 - **`bsdsocket.library` is not HW-validated yet** — staged in `install/Testing/`, not
-  installed to `LIBS:`. `netdev-test` + `netdev` genet are validated on hardware.
+  installed to `LIBS:`. The `netdev` genet datapath is validated on hardware.
 - **Router-side first-packet drop (under investigation)** — the first inbound packet of
   a fresh through-NAT flow after a few seconds of TX-idle can be lost *upstream* of the
   NIC (MIB counters show it never reaches the MAC); local-LAN flows are unaffected.
@@ -163,7 +142,7 @@ options — `lwip-amiga` is a valid `EMU68_DEBUG_HIGH` component name.
 
 Mixed-license; the file-level SPDX header is authoritative — see [LICENSE.md](LICENSE.md).
 
-- **Own code** (port layer, `bsdsocket.library`, harness, tools): `GPL-2.0-or-later`.
+- **Own code** (port layer, `bsdsocket.library`, tools): `GPL-2.0-or-later`.
 - **`include/` — the `netdev` ABI headers**: `BSD-2-Clause`, so any driver or stack,
   under any license, may implement the contract.
 - **`lwip/` submodule**: `BSD-3-Clause`, © the lwIP developers (used unmodified).

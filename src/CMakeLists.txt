@@ -148,29 +148,6 @@ install(
     DESTINATION lib/cmake/Netdev
 )
 
-# --- netdev-test: first-light bring-up diagnostic ---------------------------
-# Hosted CLI program (libnix startup): attach + START + DHCP/static config,
-# then the tick loop — lwIP answers ping by itself. Installed to C/ for the
-# AE-upload workflow; pull it from packaging before any public release.
-add_executable(netdev-test
-    netdev-test/netdev-test.c
-)
-
-target_compile_options(netdev-test PRIVATE -O2 -m68040 -Wall -Wextra)
-
-target_link_libraries(netdev-test
-    PRIVATE
-        netstack
-        Emu68Common::common
-)
-
-emu68_debug_backend_finalize(netdev-test)
-
-install(
-    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/netdev-test
-    DESTINATION C
-)
-
 # --- netdev-stats: loss-point counters on release builds --------------------
 # Second opener beside the running stack (GET_STATS/GET_LINK/SET_COALESCE
 # need no ATTACH) — the perf-tuning eyes when the DEBUG mib/txh prints are
@@ -209,28 +186,6 @@ emu68_debug_backend_finalize(socktest)
 
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/socktest
-    DESTINATION C
-)
-
-# --- semstress: exec semaphore contended-handoff repro ----------------------
-# Diagnostic for the 2026-07-13 whole-stack freeze (notes.md): recreates the
-# app/unit/tick task topology around one SignalSemaphore and times every
-# ObtainSemaphore. No networking, no netstack — exec + timer.device only.
-add_executable(semstress
-    semstress/semstress.c
-)
-
-target_compile_options(semstress PRIVATE -O2 -m68040 -Wall -Wextra)
-
-target_link_libraries(semstress
-    PRIVATE
-        Emu68Common::common
-)
-
-emu68_debug_backend_finalize(semstress)
-
-install(
-    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/semstress
     DESTINATION C
 )
 
