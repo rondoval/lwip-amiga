@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * Second API wave: netdb services + iterators, scatter-gather I/O
  * (sendmsg/recvmsg), fd duplication, the ObtainSocket/ReleaseSocket task

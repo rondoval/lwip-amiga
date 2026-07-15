@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * lwIP architecture glue for AmigaOS/m68k (bebbo gcc).
  *

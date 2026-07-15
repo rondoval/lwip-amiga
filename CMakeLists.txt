@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-License-Identifier: BSD-3-Clause
 cmake_minimum_required(VERSION 3.16)
 project(lwip-amiga C)
 

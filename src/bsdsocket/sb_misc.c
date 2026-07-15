@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * errno plumbing, SocketBaseTagList, the inet_* utilities, gethostbyname
  * (lwIP DNS, blocking on the opener's signal) and the tiny netdb subset.

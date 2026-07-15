@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * getaddrinfo/freeaddrinfo/gai_strerror/getnameinfo — RFC 2553 subset for
  * IPv4 (netinclude/netdb.h ABI, register conventions from the NDK sfd).

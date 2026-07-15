@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-License-Identifier: BSD-3-Clause
 # bsdsocket.library — Amiga-side build (via the emu68-driver-stack superproject).
 project(bsdsocket.library VERSION 4.0 LANGUAGES C)
 

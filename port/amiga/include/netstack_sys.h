@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * Exec access for the port layer. Fleet convention: exec calls fetch
  * ExecBase from AbsExecBase (address 4) — no writable SysBase global needed

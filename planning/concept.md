@@ -39,6 +39,14 @@ lwip-amiga is three deliverables:
 | License | **GPL-2.0-or-later own code; BSD-2-Clause for `include/` (netdev ABI headers); lwIP stays BSD-3** | SPDX header per file is authoritative (fleet convention). The ABI header is permissive so any driver or stack, under any license, may implement the contract — same spirit as SANA-II being an open spec. |
 | Hosting | **Private GitHub (rondoval/lwip-amiga) until release** | Real submodule URLs in the superproject from day one; flip public at release like the Poseidon plan. |
 
+**REVISED 2026-07-15 (License):** relicensed own code + `include/` ABI headers
+from `GPL-2.0-or-later`/`BSD-2-Clause` to a single `BSD-3-Clause`, matching
+lwIP's own license — repo was still private/unreleased, sole-authored, so no
+downstream consent or compatibility concerns. `emu68-common` (statically
+linked, `MPL-2.0 OR GPL-2.0+`) needed no change: MPL §3.3 already permits
+combining it into a differently-licensed "Larger Work". See
+[LICENSE.md](../LICENSE.md).
+
 ## Architecture
 
 ```
@@ -141,7 +149,8 @@ The performance unlock. Founding ideas:
 4. **Coexistence story.** Only one `bsdsocket.library` can exist at runtime; install
    replaces Roadshow. Uninstall/switch-back must be clean.
 5. ~~License of our code~~ — resolved: GPL-2.0-or-later + BSD-2 ABI headers (see
-   decisions table).
+   decisions table); revised 2026-07-15 to a single BSD-3-Clause (see decisions
+   table).
 
 ## Open questions for the design phase
 

@@ -1,11 +1,9 @@
-/* SPDX-License-Identifier: BSD-2-Clause */
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
 **  netdev.h — the netdev NIC driver ABI (SANA-II replacement), draft 1
 **
 **  The contract between a TCP/IP stack and a NIC driver on AmigaOS, designed
-**  for zero-copy DMA and hardware offloads. This header is the entire ABI;
-**  it is licensed BSD-2-Clause so any driver or stack, under any license,
-**  may implement it. First implementation: lwip-amiga <-> genet.device.
+**  for zero-copy DMA and hardware offloads.
 **
 **  Request framing (the emu68 fleet idiom, cf. the xHCI context ABI):
 **   - CONTROL OPS are synchronous commands on a plain struct IOStdReq:

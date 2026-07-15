@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * socktest — exercise bsdsocket.library end to end from the app side:
  * OpenLibrary starts the stack (DHCP), gethostbyname resolves over lwIP DNS,

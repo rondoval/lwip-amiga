@@ -8,7 +8,8 @@ TL;DR: lwIP core (submodule + Amiga port layer), core-locking direct path,
 bsdsocket.library built on the raw API with Exec signals as the blocking primitive,
 clean break from SANA-II (adapter netif possible later), new batched zero-copy
 `netdev` driver ABI designed for wire speed, genet.device first. IPv4+DHCP+DNS scope,
-fresh minimal config, DHCP by default. GPL-2.0-or-later own code, BSD-2 ABI headers.
+fresh minimal config, DHCP by default. BSD-3-Clause throughout (revised
+2026-07-15, was GPL-2.0-or-later own code + BSD-2 ABI headers — see below).
 
 Refinements 2026-07-10 (round 2): lwip-amiga is a submodule of emu68-driver-stack
 (standalone build = Linux host harness only; ABI header lives here, genet includes it);
@@ -663,3 +664,11 @@ scales, else the RxRingSlots*2=512 wrap cap re-imposes the limit).
 3b TCP_WND 512 KB coupled with pool 2048. Phase 4 (conditional) ranked:
 recycle-side CachePreDMA per frame, tcp_recved batching, csum fold outside
 ns_Core, ND_RX_BATCH 64.
+
+**Relicense (2026-07-15):** own code + `include/` ABI headers moved from
+GPL-2.0-or-later/BSD-2-Clause to a single BSD-3-Clause, matching lwIP's own
+license (repo still private/unreleased, sole-authored — no compatibility
+concerns). `emu68-common` stays MPL-2.0 OR GPL-2.0+ unmodified; it's
+statically linked as a separate "Larger Work" per MPL §3.3, with an
+attribution note added to LICENSE.md. See planning/concept.md decisions
+table.

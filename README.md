@@ -20,7 +20,7 @@ The TCP/IP stacks available on AmigaOS are outdated, closed source, or both, and
 SANA-II driver interface is copy-based and offload-blind. This project delivers three
 layers, built bottom-up:
 
-- **`netdev` — a new NIC driver ABI** (`include/netdev.h`, BSD-2-Clause). A clean-break
+- **`netdev` — a new NIC driver ABI** (`include/netdev.h`, BSD-3-Clause). A clean-break
   SANA-II replacement: direct-call, context-based (the `xhci.device` context-ABI idiom),
   batched and zero-copy in both directions, with capability negotiation (checksum
   offload, interrupt coalescing, link events). The ABI header is the open public
@@ -44,8 +44,7 @@ Design record: [planning/concept.md](planning/concept.md) and
 
 ## Layout
 
-- `include/netdev.h` — the `netdev` driver ABI header (BSD-2-Clause; the public contract,
-  `NETDEV_ABI_VERSION 1`). Installed and exported as the `Netdev` CMake package
+- `include/netdev.h` — the `netdev` driver ABI header. Installed and exported as the `Netdev` CMake package
   (`Netdev::netdev_headers`), which is how `genet.device` consumes it.
 - `lwip/` — lwIP core, git submodule (BSD-3-Clause, pinned to `STABLE-2_2_1_RELEASE`,
   used unmodified).
@@ -140,9 +139,8 @@ options — `lwip-amiga` is a valid `EMU68_DEBUG_HIGH` component name.
 
 ## License
 
-Mixed-license; the file-level SPDX header is authoritative — see [LICENSE.md](LICENSE.md).
-
-- **Own code** (port layer, `bsdsocket.library`, tools): `GPL-2.0-or-later`.
-- **`include/` — the `netdev` ABI headers**: `BSD-2-Clause`, so any driver or stack,
-  under any license, may implement the contract.
-- **`lwip/` submodule**: `BSD-3-Clause`, © the lwIP developers (used unmodified).
+`BSD-3-Clause` throughout — own code, the `include/` `netdev` ABI headers, and the
+bundled `lwip/` submodule (© the lwIP developers, used unmodified) all match. Any
+driver or stack, under any license, may implement the `netdev` ABI contract. See
+[LICENSE.md](LICENSE.md), including a note on the `emu68-common` build dependency
+used by the Amiga binaries.

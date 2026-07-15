@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * WaitSelect — the autodoc contract, exactly:
  *  - break signal: return -1, errno EINTR, break re-posted, sets UNMODIFIED

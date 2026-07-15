@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * The core socket API. Register annotations follow the NDK sfd exactly;
  * the base arrives in a6 and is always a per-opener child base.
