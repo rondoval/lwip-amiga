@@ -15,6 +15,7 @@
 
 #include "netdev_if.h"
 #include "netstack.h"
+#include "netstack_lwiphooks.h"
 
 /* One RX buffer in flight to lwIP: a custom pbuf wrapping driver memory.
  * Freeing the pbuf recycles the driver buffer. Wrappers live in a free
@@ -29,9 +30,12 @@ struct NdRxWrap
 
 #define NDIF_MAX_STACK_SEGS 16
 #define NDIF_MIN_WRAPS      64
+#define NDIF_RX_CHUNK       32 /* covers genet's RX batch in one lock hold */
 
 static BOOL ndif_rx_csum_ok(const struct NetDevRxDesc *d, ULONG raw);
+#ifdef DEBUG
 static UWORD ndif_sum_range(const UBYTE *data, ULONG len);
+#endif
 
 /* ---------------------------------------------------------------- RX --- */
 
@@ -53,57 +57,82 @@ static ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULON
     struct NetdevIf *ndi = stackctx;
     ULONG consumed = 0;
 
-    netstack_lock();
-
     while (consumed < count)
     {
-        const struct NetDevRxDesc *d = &descs[consumed];
+        const struct NetDevRxDesc *cd = &descs[consumed];
+        ULONG chunk = count - consumed;
+        if (chunk > NDIF_RX_CHUNK)
+            chunk = NDIF_RX_CHUNK;
 
-        /* lwIP's TCP/UDP checking is off when the driver offloads RX csum;
-         * frames without the VALID verdict get their RAW sum folded here.
-         * A bad frame is consumed and its buffer released immediately. */
-        if (ndi->ndi_RxOffload && !(d->nrd_Flags & NDRF_CSUM_VALID) &&
-            (d->nrd_Flags & NDRF_CSUM_RAW) && !ndif_rx_csum_ok(d, d->nrd_CsumRaw))
+        /* Checksum verdicts BEFORE taking the core lock — the fold reads
+         * only frame bytes plus the IP header, and nso_RxInput runs on the
+         * driver's unit task alone, so nothing here needs protection.
+         * lwIP's TCP/UDP checking is off when the driver offloads RX csum;
+         * frames without the VALID verdict get their RAW sum folded here. */
+        UBYTE drop[NDIF_RX_CHUNK];
+        for (ULONG i = 0; i < chunk; i++)
         {
-            /* The HW raw sum disagreed: verify in software before dropping,
-             * and log the pair — live traffic maps the RXCHK coverage and
-             * byte order while the hardware decode is still in question. */
-            UWORD sw = ndif_sum_range(d->nrd_Data + SIZEOF_ETH_HDR,
-                                      d->nrd_Len - SIZEOF_ETH_HDR);
-            BOOL ok = ndif_rx_csum_ok(d, sw);
-            Kprintf("[netdevif] RX csum: hw 0x%04lx sw 0x%04lx len %lu %s\n",
-                    (ULONG)d->nrd_CsumRaw, (ULONG)sw, (ULONG)d->nrd_Len,
-                    (ULONG)(ok ? "pass(sw)" : "DROP"));
-            if (!ok)
+            const struct NetDevRxDesc *d = &cd[i];
+            drop[i] = ndi->ndi_RxOffload &&
+                      !(d->nrd_Flags & NDRF_CSUM_VALID) &&
+                      (d->nrd_Flags & NDRF_CSUM_RAW) &&
+                      !ndif_rx_csum_ok(d, d->nrd_CsumRaw);
+#ifdef DEBUG
+            if (drop[i])
+            {
+                /* debug cross-check of the hardware raw sum (the RXCHK
+                 * decode was mapped live before it was trusted) */
+                UWORD sw = ndif_sum_range(d->nrd_Data + SIZEOF_ETH_HDR,
+                                          d->nrd_Len - SIZEOF_ETH_HDR);
+                BOOL ok = ndif_rx_csum_ok(d, sw);
+                Kprintf("[netdevif] RX csum: hw 0x%04lx sw 0x%04lx len %lu %s\n",
+                        (ULONG)d->nrd_CsumRaw, (ULONG)sw, (ULONG)d->nrd_Len,
+                        (ULONG)(ok ? "pass(sw)" : "DROP"));
+                if (ok)
+                    drop[i] = 0;
+            }
+#endif
+        }
+
+        netstack_lock();
+        for (ULONG i = 0; i < chunk; i++)
+        {
+            const struct NetDevRxDesc *d = &cd[i];
+
+            /* a bad frame is consumed and its buffer released immediately
+             * (releases stay under the lock: it is the recycle ring's
+             * single-producer guarantee) */
+            if (drop[i])
             {
                 ndi->ndi_RxCsumBad++;
                 ndi->ndi_Ops->ndo_RxRelease(ndi->ndi_Drv, d->nrd_Cookie);
                 consumed++;
                 continue;
             }
+
+            struct NdRxWrap *w = ndi->ndi_FreeWraps;
+            if (w == NULL)
+            {
+                ndi->ndi_RxNoWrap++;
+                netstack_unlock();
+                return consumed; /* backpressure: driver recycles the tail */
+            }
+            ndi->ndi_FreeWraps = w->nrw_Next;
+
+            w->nrw_Cookie = d->nrd_Cookie;
+            w->nrw_Pc.custom_free_function = ndif_rx_pbuf_freed;
+
+            struct pbuf *p = pbuf_alloced_custom(PBUF_RAW, (u16_t)d->nrd_Len,
+                                                 PBUF_REF, &w->nrw_Pc,
+                                                 d->nrd_Data, (u16_t)d->nrd_Len);
+            consumed++;
+
+            if (ndi->ndi_Netif.input(p, &ndi->ndi_Netif) != ERR_OK)
+                pbuf_free(p);
         }
-
-        struct NdRxWrap *w = ndi->ndi_FreeWraps;
-        if (w == NULL)
-        {
-            ndi->ndi_RxNoWrap++;
-            break; /* backpressure: driver recycles the tail */
-        }
-        ndi->ndi_FreeWraps = w->nrw_Next;
-
-        w->nrw_Cookie = d->nrd_Cookie;
-        w->nrw_Pc.custom_free_function = ndif_rx_pbuf_freed;
-
-        struct pbuf *p = pbuf_alloced_custom(PBUF_RAW, (u16_t)d->nrd_Len,
-                                             PBUF_REF, &w->nrw_Pc,
-                                             d->nrd_Data, (u16_t)d->nrd_Len);
-        consumed++;
-
-        if (ndi->ndi_Netif.input(p, &ndi->ndi_Netif) != ERR_OK)
-            pbuf_free(p);
+        netstack_unlock();
     }
 
-    netstack_unlock();
     return consumed;
 }
 
@@ -136,6 +165,32 @@ static UWORD ndif_pseudo_sum(const struct ip_hdr *ip, ULONG start)
     return (UWORD)sum;
 }
 
+/* Byte offset of the IPv4 header inside a (possibly in-band 802.1Q-tagged)
+ * Ethernet frame, or 0 if the frame is not IPv4 or its headers are not
+ * contiguous in `len`. Recognises a single VLAN tag: IP sits at +14 untagged,
+ * +18 tagged. The offset-based csum offloads work on tagged frames precisely
+ * because everything downstream keys off this shifted L3 position. */
+static ULONG ndif_ip_offset(const UBYTE *frame, ULONG len)
+{
+    if (len < SIZEOF_ETH_HDR + sizeof(struct ip_hdr))
+        return 0;
+    const struct eth_hdr *eth = (const struct eth_hdr *)frame;
+    if (eth->type == PP_HTONS(ETHTYPE_IP))
+        return SIZEOF_ETH_HDR;
+#if ETHARP_SUPPORT_VLAN
+    if (eth->type == PP_HTONS(ETHTYPE_VLAN))
+    {
+        if (len < SIZEOF_ETH_HDR + SIZEOF_VLAN_HDR + sizeof(struct ip_hdr))
+            return 0;
+        const struct eth_vlan_hdr *vlan =
+            (const struct eth_vlan_hdr *)(frame + SIZEOF_ETH_HDR);
+        if (vlan->tpid == PP_HTONS(ETHTYPE_IP))
+            return SIZEOF_ETH_HDR + SIZEOF_VLAN_HDR;
+    }
+#endif
+    return 0;
+}
+
 /* TX offload preparation: seed the L4 checksum field with the pseudo-header
  * sum (CHECKSUM_PARTIAL style) and compute the offload offsets. Returns the
  * L4 protocol (IP_PROTO_TCP/UDP), or 0xFFFF when the frame is not
@@ -143,19 +198,17 @@ static UWORD ndif_pseudo_sum(const struct ip_hdr *ip, ULONG start)
 static ULONG ndif_l4_offsets(struct pbuf *p, UWORD *csum_start, UWORD *csum_offset)
 {
     // KprintfH("[netdevif] %s: len %lu\n", __func__, (ULONG)p->len);
-    if (p->len < SIZEOF_ETH_HDR + sizeof(struct ip_hdr))
-        return 0xFFFF; /* headers must be contiguous in the first pbuf */
+    /* headers (incl. any VLAN tag) must be contiguous in the first pbuf */
+    ULONG l3 = ndif_ip_offset(p->payload, p->len);
+    if (l3 == 0)
+        return 0xFFFF; /* not IPv4 (or non-contiguous): not offloadable */
 
-    const struct eth_hdr *eth = (const struct eth_hdr *)p->payload;
-    if (eth->type != PP_HTONS(ETHTYPE_IP))
-        return 0xFFFF;
-
-    struct ip_hdr *ip = (struct ip_hdr *)((UBYTE *)p->payload + SIZEOF_ETH_HDR);
+    struct ip_hdr *ip = (struct ip_hdr *)((UBYTE *)p->payload + l3);
     if ((IPH_OFFSET(ip) & PP_HTONS(IP_OFFMASK | IP_MF)) != 0)
         return 0xFFFF; /* fragment: no L4 header / partial coverage */
 
     ULONG ihl = (ULONG)IPH_HL(ip) * 4;
-    ULONG l4_start = SIZEOF_ETH_HDR + ihl;
+    ULONG l4_start = l3 + ihl;
     ULONG proto = IPH_PROTO(ip);
     ULONG field;
 
@@ -179,6 +232,7 @@ static ULONG ndif_l4_offsets(struct pbuf *p, UWORD *csum_start, UWORD *csum_offs
     return proto;
 }
 
+#ifdef DEBUG
 /* 1's-complement sum over a byte range, network order, odd tail
  * zero-padded, folded to 16 bits. */
 static UWORD ndif_sum_range(const UBYTE *data, ULONG len)
@@ -196,6 +250,7 @@ static UWORD ndif_sum_range(const UBYTE *data, ULONG len)
         sum = (sum & 0xFFFF) + (sum >> 16);
     return (UWORD)sum;
 }
+#endif /* DEBUG (ndif_sum_range) */
 
 /* RX verification for frames the driver reported only a RAW checksum for.
  * `raw` is the 1's-complement sum over the frame past the Ethernet
@@ -207,15 +262,23 @@ static UWORD ndif_sum_range(const UBYTE *data, ULONG len)
 static BOOL ndif_rx_csum_ok(const struct NetDevRxDesc *d, ULONG raw)
 {
     // KprintfH("[netdevif] %s: len %lu\n", __func__, (ULONG)d->nrd_Len);
-    if (d->nrd_Len < SIZEOF_ETH_HDR + sizeof(struct ip_hdr))
-        return TRUE;
-
     const UBYTE *frame = d->nrd_Data;
-    const struct eth_hdr *eth = (const struct eth_hdr *)frame;
-    if (eth->type != PP_HTONS(ETHTYPE_IP))
-        return TRUE;
+    ULONG l3 = ndif_ip_offset(frame, d->nrd_Len);
+    if (l3 == 0)
+        return TRUE; /* non-IPv4: nothing to fold, accept */
 
-    const struct ip_hdr *ip = (const struct ip_hdr *)(frame + SIZEOF_ETH_HDR);
+    /* `raw` is the 1's-complement sum over [frame + SIZEOF_ETH_HDR .. end].
+     * On a tagged frame that region opens with the two 16-bit tag words (the
+     * TCI and the inner ethertype) that sit before the IP header, so remove
+     * them here — ndif_pseudo_sum expects a sum over [IP .. end]. */
+    if (l3 != SIZEOF_ETH_HDR)
+    {
+        const UWORD *tag = (const UWORD *)(frame + SIZEOF_ETH_HDR);
+        raw += (~(ULONG)tag[0]) & 0xFFFF;   /* subtract the 802.1Q TCI word */
+        raw += (~(ULONG)tag[1]) & 0xFFFF;   /* subtract the inner ethertype word */
+    }
+
+    const struct ip_hdr *ip = (const struct ip_hdr *)(frame + l3);
     if ((IPH_OFFSET(ip) & PP_HTONS(IP_OFFMASK | IP_MF)) != 0)
         return TRUE;
 
@@ -226,7 +289,7 @@ static BOOL ndif_rx_csum_ok(const struct NetDevRxDesc *d, ULONG raw)
     if (proto == IP_PROTO_UDP)
     {
         const struct udp_hdr *uh =
-            (const struct udp_hdr *)(frame + SIZEOF_ETH_HDR + (ULONG)IPH_HL(ip) * 4);
+            (const struct udp_hdr *)(frame + l3 + (ULONG)IPH_HL(ip) * 4);
         if (uh->chksum == 0)
             return TRUE; /* UDP without checksum is legal on IPv4 */
     }
@@ -331,6 +394,34 @@ static void ndif_link_change(APTR stackctx, const struct NetDevLinkState *state)
     netstack_unlock();
 }
 
+/* ---------------------------------------------------------- VLAN hooks --- */
+/* In-band 802.1Q (lwIP LWIP_HOOK_VLAN_SET/CHECK, wired in netstack_lwiphooks.h).
+ * The per-interface TCI is ndi_VlanTci (-1 = untagged), set from
+ * netstack.prefs before the netif comes up. GENET has no hardware VLAN
+ * offload, so the tag rides inside the frame both ways; the checksum
+ * offloads stay on because ndif_l4_offsets/ndif_rx_csum_ok are tag-aware. */
+
+s32_t netdevif_vlan_set(struct netif *nif, struct pbuf *p,
+                        const struct eth_addr *src, const struct eth_addr *dst,
+                        u16_t eth_type)
+{
+    (void)p;
+    (void)src;
+    (void)dst;
+    (void)eth_type;
+    return (s32_t)((struct NetdevIf *)nif->state)->ndi_VlanTci; /* <0 = no tag */
+}
+
+int netdevif_vlan_check(struct netif *nif, struct eth_hdr *eth,
+                        struct eth_vlan_hdr *vlan)
+{
+    (void)eth;
+    LONG tci = ((struct NetdevIf *)nif->state)->ndi_VlanTci;
+    if (tci < 0)
+        return 0; /* not on a VLAN: drop tagged frames */
+    return VLAN_ID(vlan) == (UWORD)(tci & 0xFFF);
+}
+
 /* ------------------------------------------------------------ plumbing --- */
 
 static const struct NetDevStackOps ndif_stack_ops = {
@@ -343,6 +434,19 @@ const struct NetDevStackOps *netdevif_stack_ops(void)
 {
     KprintfH("[netdevif] %s\n", __func__);
     return &ndif_stack_ops;
+}
+
+/* Frames the stack can pin at once: one full receive window per expected
+ * concurrent bulk stream plus in-flight slack. Four streams also sized the
+ * old fixed genet pool. = 4 x ceil(TCP_WND / TCP_MSS) + 64 = 784 with the current
+ * lwipopts. */
+#define NDIF_RX_HOLD_STREAMS 4
+#define NDIF_RX_HOLD_SLACK   64
+
+UWORD netdevif_rx_hold_budget(void)
+{
+    ULONG wndFrames = (TCP_WND + TCP_MSS - 1) / TCP_MSS;
+    return (UWORD)(NDIF_RX_HOLD_STREAMS * wndFrames + NDIF_RX_HOLD_SLACK);
 }
 
 APTR netdevif_dma_alloc(struct NetdevIf *ndi, ULONG size)
@@ -405,6 +509,7 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
     ndi->ndi_Caps = *caps;
     ndi->ndi_RxNoWrap = 0;
     ndi->ndi_TxOversize = 0;
+    ndi->ndi_VlanTci = -1; /* untagged by default; the opener overrides from prefs */
 
     /* RX wrappers: one per buffer the stack can possibly hold. The driver
      * advertises its pool size; a wrap count below it silently re-imposes

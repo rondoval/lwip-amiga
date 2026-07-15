@@ -86,12 +86,12 @@ const APTR bsdsocket_functable[] = {
     (APTR)LibStub, /* -426  ChangeRouteTagList */
     (APTR)LibStub, /* -432  FreeRouteInfo */
     (APTR)LibStubNull, /* -438  GetRouteInfo */
-    (APTR)LibStub, /* -444  AddInterfaceTagList */
-    (APTR)LibStub, /* -450  ConfigureInterfaceTagList */
-    (APTR)LibStub, /* -456  ReleaseInterfaceList */
-    (APTR)LibStubNull, /* -462  ObtainInterfaceList */
-    (APTR)LibStub, /* -468  QueryInterfaceTagList */
-    (APTR)LibStub, /* -474  CreateAddrAllocMessageA */
+    (APTR)bsd_InterfaceConfigUnsupported, /* -444  AddInterfaceTagList */
+    (APTR)bsd_InterfaceConfigUnsupported, /* -450  ConfigureInterfaceTagList */
+    (APTR)bsd_ReleaseInterfaceList, /* -456  ReleaseInterfaceList */
+    (APTR)bsd_ObtainInterfaceList, /* -462  ObtainInterfaceList */
+    (APTR)bsd_QueryInterfaceTagList, /* -468  QueryInterfaceTagList */
+    (APTR)LibStubNull, /* -474  CreateAddrAllocMessageA */
     (APTR)LibStub, /* -480  DeleteAddrAllocMessage */
     (APTR)LibStub, /* -486  BeginInterfaceConfig */
     (APTR)LibStub, /* -492  AbortInterfaceConfig */
@@ -134,7 +134,7 @@ const APTR bsdsocket_functable[] = {
     (APTR)LibStubNull, /* -714  ObtainRoadshowData */
     (APTR)LibStub, /* -720  ReleaseRoadshowData */
     (APTR)LibStub, /* -726  ChangeRoadshowData */
-    (APTR)LibStub, /* -732  RemoveInterface */
+    (APTR)bsd_InterfaceConfigUnsupported, /* -732  RemoveInterface */
     (APTR)bsd_gethostbyname_r, /* -738  gethostbyname_r */
     (APTR)bsd_gethostbyaddr_r, /* -744  gethostbyaddr_r */
     (APTR)LibStub, /* -750  (reserved) */

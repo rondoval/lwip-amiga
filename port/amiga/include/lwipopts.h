@@ -42,9 +42,23 @@
 
 #define LWIP_NETIF_LOOPBACK             1   /* 127.0.0.1 for local apps */
 #define LWIP_HAVE_LOOPIF                1
+#define LWIP_NETIF_HOSTNAME             1   /* netstack.prefs HOSTNAME; DHCP option 12 */
 #define LWIP_NETIF_STATUS_CALLBACK      1
 #define LWIP_NETIF_LINK_CALLBACK        1
 #define LWIP_SUPPORT_CUSTOM_PBUF        1   /* RX buffers are driver-owned */
+
+/* --- in-band 802.1Q VLAN ---
+ * Software VLAN: the tag rides inside the frame; the driver moves opaque
+ * bytes (no NIC HW VLAN offload). The VID is per-interface (netstack.prefs
+ * VLAN=), read from netif->state by the hooks in netstack_lwiphooks.h.
+ * LWIP_VLAN_PCP is deliberately OFF (its per-PCB tci path is dead once the
+ * SET hook is defined, and there is no LWIP_SOCKET API to set per-PCB tci).
+ * PBUF_LINK_HLEN must be pinned to 18 here: opt.h derives it BEFORE any .c
+ * sees LWIP_HOOK_FILENAME, so it would otherwise stay 14 and every tagged
+ * TX frame would fail pbuf_add_header(SIZEOF_VLAN_HDR). */
+#define ETHARP_SUPPORT_VLAN             1
+#define PBUF_LINK_HLEN                  (18 + ETH_PAD_SIZE)
+#define LWIP_HOOK_FILENAME              "netstack_lwiphooks.h"
 
 /* --- memory --- */
 #define MEM_ALIGNMENT                   4
@@ -69,14 +83,38 @@
 #define MEMP_NUM_SYS_TIMEOUT            (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8)
 #define PBUF_POOL_SIZE                  64   /* loopback traffic only */
 
+/* --- IP reassembly: each RX frame is one driver-owned custom pbuf, so one
+ * IP fragment costs one pbuf. lwIP's default cap of 10 held pbufs limits a
+ * reassembled datagram to ~10 x 1480 = 14.8 KB, silently dropping anything
+ * larger. Size for a full 64 KB datagram: ceil(65535/1480) = 45 fragments.
+ * RX-wrap headroom is ~784 (netdev_if.c), so this is comfortably covered. */
+#define IP_REASS_MAX_PBUFS              48
+
+/* --- IP fragmentation (TX): symmetric to reassembly. ip4_frag emits one
+ * PBUF_REF per fragment (MEMP_FRAG_PBUF pool), and the driver holds each
+ * frame's pbuf ref until async TX-done — so every fragment of a datagram is
+ * outstanding at once. lwIP's default pool of 15 caps a fragmented send at
+ * 15 x 1480 = ~21.7 KB, returning ERR_MEM (-> ENOBUFS) above it. Size for a
+ * full 64 KB datagram: ceil(65515/1480) = 45 fragments. The genet TX ring
+ * (TX_DESCS = 256) covers the descriptor side. */
+#define MEMP_NUM_FRAG_PBUF              48
+
 /* --- TCP, sized for the wire-speed goal: window scaling negotiates, and
  * recovery is fast-retransmit only — lwIP emits SACKs but does not use
  * received ones, so lossy paths degrade to RTO --- */
 #define TCP_MSS                         1460
 #define LWIP_WND_SCALE                  1
-#define TCP_RCV_SCALE                   4
-#define TCP_WND                         (256 * 1024)
-#define TCP_SND_BUF                     (256 * 1024)
+/* Window sized for high-BDP internet paths, not just LAN: throughput caps at
+ * TCP_WND/RTT, so 256 KB ceilinged a clean 30 ms path at ~70 Mbit. 1 MB covers
+ * ~1 Gbit up to ~8 ms RTT / ~270 Mbit at 30 ms. RCV_SCALE=5 (2 MB advertisable)
+ * clears the 65535<<4 = 1048560 ceiling so a full 1 MB window is advertised.
+ * Cost: the RX hold budget (4*ceil(TCP_WND/TCP_MSS)+64 wraps, netdev_if.c) and
+ * the send-side seg pool scale with this — ~6 MB of genet RX buffers now.
+ * Bigger is wasted until received-SACK recovery and the ns_Core lock ceiling
+ * land (docs/TODO.md). */
+#define TCP_RCV_SCALE                   5
+#define TCP_WND                         (1024 * 1024)
+#define TCP_SND_BUF                     (1024 * 1024)
 #define TCP_SND_QUEUELEN                ((4 * TCP_SND_BUF) / TCP_MSS)
 #define TCP_SNDLOWAT                    (8 * TCP_MSS)
 #define MEMP_NUM_TCP_SEG                TCP_SND_QUEUELEN
@@ -88,13 +126,6 @@
 #define TCP_LISTEN_BACKLOG              1
 #define LWIP_TCP_KEEPALIVE              1
 #define SO_REUSE                        1
-/* Initial RTO 500 ms (lwIP default 3000). Mitigation for a router-side
- * quirk: the first inbound packet of a fresh NAT flow after idle gets
- * dropped upstream (MIB-verified 2026-07-13 — frame never reaches the
- * MAC), so the first SYN retransmit must beat the 1 s connect timeout
- * common in apps. Harmless on the LAN (RTT ~15 ms); reconsider if the
- * router's flow-offload behavior ever gets fixed. */
-#define LWIP_TCP_RTO_TIME               500
 
 /* --- checksums: everything on at compile time, disabled per netif when
  * the driver's capabilities cover it (netdev_if.c) --- */

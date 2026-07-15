@@ -3,16 +3,16 @@
  * The stack task: owns netstack time/timers and the netdev interface.
  *
  * Started under root->openLock by the first OpenLibrary(). It is a DOS
- * Process, not a bare Task: the netdev attach path runs driver open code
- * on this context, which may do DOS I/O (genet reads ENV:genet.prefs),
- * and the planned static-config reads need DOS too. Initializes the
- * netstack (timer.device EClock), attaches genet.device over the netdev
- * ABI, brings the interface up with DHCP, then ticks lwIP timeouts every
- * 100 ms until told to quit (library expunge).
+ * Process, not a bare Task: it reads ENV:netstack.prefs, and the netdev
+ * attach path runs driver open code on this context, which may do DOS
+ * I/O too (genet reads ENV:genet.prefs). Initializes the netstack
+ * (timer.device EClock), attaches the configured network driver over the
+ * netdev ABI, brings the interface up (DHCP by default, static when
+ * configured), then ticks lwIP timeouts every 100 ms until told to quit
+ * (library expunge).
  *
  * No NIC is not fatal: the stack still runs with just the loopback
- * interface. Static configuration (env vars) is a planned follow-up —
- * DHCP-by-default is the concept's UX decision.
+ * interface.
  */
 
 #include "sb_base.h"
@@ -30,6 +30,7 @@
 #include <debug.h>
 
 #include <lwip/dhcp.h>
+#include <lwip/dns.h>
 #include <lwip/netif.h>
 
 #include <netdev.h>
@@ -54,6 +55,19 @@ struct SbStackCtx
 /* one instance; the library is a singleton and so is the stack */
 static struct SbStackCtx sb_stack;
 
+/* the node-name part of an OpenDevice path ("networks/genet.device" ->
+ * "genet.device") — resident/expansion modules register under it */
+static const char *sb_dev_basename(const char *name)
+{
+    const char *base = name;
+    for (const char *p = name; *p != '\0'; p++)
+    {
+        if (*p == '/' || *p == ':')
+            base = p + 1;
+    }
+    return base;
+}
+
 static BYTE sb_netdev_cmd(struct IOStdReq *io, UWORD cmd, APTR data, ULONG len)
 {
     KprintfH("[bsdsocket] %s: cmd 0x%04lx, len %lu\n", __func__, (ULONG)cmd, len);
@@ -67,15 +81,28 @@ static BYTE sb_netdev_cmd(struct IOStdReq *io, UWORD cmd, APTR data, ULONG len)
 
 static void sb_netdev_up(struct SbStackCtx *ctx)
 {
+    const struct SbNetConfig *cfg = &ctx->root->netCfg;
+
     ctx->devPort = CreateMsgPort();
     ctx->devIO = (struct IOStdReq *)CreateIORequest(ctx->devPort, sizeof(struct IOStdReq));
     if (ctx->devIO == NULL)
         return;
 
-    if (OpenDevice((CONST_STRPTR) "genet.device", 0, (struct IORequest *)ctx->devIO, 0) != 0)
+    /* the path form loads from DEVS: by convention (DEVS:Networks/...);
+     * a resident/expansion module registers under the bare node name, so
+     * retry with the basename before giving up */
+    if (OpenDevice((CONST_STRPTR)cfg->cfg_Device, cfg->cfg_Unit,
+                   (struct IORequest *)ctx->devIO, 0) != 0)
     {
-        Kprintf("[bsdsocket] no genet.device — loopback only\n");
-        return;
+        const char *base = sb_dev_basename(cfg->cfg_Device);
+        if (base == cfg->cfg_Device ||
+            OpenDevice((CONST_STRPTR)base, cfg->cfg_Unit,
+                       (struct IORequest *)ctx->devIO, 0) != 0)
+        {
+            Kprintf("[bsdsocket] no %s unit %ld — loopback only\n",
+                    cfg->cfg_Device, cfg->cfg_Unit);
+            return;
+        }
     }
     ctx->devOpen = TRUE;
 
@@ -83,6 +110,8 @@ static void sb_netdev_up(struct SbStackCtx *ctx)
     for (ULONG i = 0; i < sizeof(att); i++)
         ((UBYTE *)&att)[i] = 0;
     att.nda_AbiVersion = NETDEV_ABI_VERSION;
+    att.nda_RxHoldReq = netdevif_rx_hold_budget();
+    att.nda_MtuReq = 0; /* driver default MTU (no MTU prefs key this release) */
     att.nda_StackCtx = &ctx->ndi;
     att.nda_StackOps = netdevif_stack_ops();
 
@@ -100,8 +129,18 @@ static void sb_netdev_up(struct SbStackCtx *ctx)
         return;
     }
 
+    /* in-band 802.1Q VID (-1 = untagged); read per-packet by the VLAN hooks */
+    ctx->ndi.ndi_VlanTci = cfg->cfg_VlanTci;
+    if (cfg->cfg_VlanTci >= 0)
+        Kprintf("[bsdsocket] VLAN enabled: vid %ld pcp %ld\n",
+                (LONG)(cfg->cfg_VlanTci & 0xFFF), (LONG)((cfg->cfg_VlanTci >> 13) & 7));
+
     netstack_lock();
     netif_set_default(&ctx->ndi.ndi_Netif);
+    netif_set_hostname(&ctx->ndi.ndi_Netif, ctx->root->netCfg.cfg_Hostname);
+    if (!cfg->cfg_Dhcp)
+        netif_set_addr(&ctx->ndi.ndi_Netif, &cfg->cfg_Addr, &cfg->cfg_Mask,
+                       &cfg->cfg_Gateway);
     netif_set_up(&ctx->ndi.ndi_Netif);
     netstack_unlock();
 
@@ -114,9 +153,24 @@ static void sb_netdev_up(struct SbStackCtx *ctx)
     ctx->started = TRUE;
 
     netstack_lock();
-    dhcp_start(&ctx->ndi.ndi_Netif);
+    if (cfg->cfg_Dhcp)
+    {
+        dhcp_start(&ctx->ndi.ndi_Netif);
+    }
+    else
+    {
+        for (u8_t i = 0; i < 2; i++)
+        {
+            if (!ip4_addr_isany_val(cfg->cfg_Dns[i]))
+                dns_setserver(i, &cfg->cfg_Dns[i]);
+        }
+    }
     netstack_unlock();
-    Kprintf("[bsdsocket] interface up, DHCP running\n");
+    if (cfg->cfg_Dhcp)
+        Kprintf("[bsdsocket] interface up, DHCP running\n");
+    else
+        Kprintf("[bsdsocket] interface up, static %s\n",
+                ip4addr_ntoa(&cfg->cfg_Addr));
 }
 
 static void sb_netdev_down(struct SbStackCtx *ctx)
@@ -177,6 +231,7 @@ static void SbStackTask(void)
     netstack_init(tick->tr_node.io_Device);
     /* build banner: ties every log to the exact library binary */
     Kprintf("[bsdsocket] stack task up, build " __DATE__ " " __TIME__ "\n");
+    sb_config_load(&ctx->root->netCfg);
     sb_netdev_up(ctx);
 
     ctx->startResult = 0;

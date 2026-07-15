@@ -17,7 +17,16 @@ A clean-break SANA-II replacement: direct-call, context-based, batched, and zero
 both directions, with capability negotiation (checksum offload, interrupt coalescing, link
 events). RX buffers are driver-owned and returned via a release hook; TX memory is drawn
 from a driver-provided DMA allocator, so nothing is copied and every buffer is
-DMA-reachable. The header is the open, permissively-licensed public contract.
+DMA-reachable. The header is the open, permissively-licensed public contract. The v1 layout
+is finalized: it negotiates the MTU at ATTACH (`nda_MtuReq`/`ndc_Mtu`) and reserves the
+surface for jumbo frames (multi-buffer RX scatter) and hardware VLAN offload, so those can
+land later without an ABI break.
+
+### In-band 802.1Q VLAN
+
+The stack tags and filters a single configured VID (`VLAN = vid[,pcp]` in `netstack.prefs`)
+through lwIP's software VLAN path — GENET carries the tag in-band, and the L4 checksum
+offloads stay active on tagged frames.
 
 ### TCP/IP core — lwIP + AmigaOS port layer
 

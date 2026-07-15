@@ -52,7 +52,7 @@ See [docs/architecture.md](docs/architecture.md) for how the stack works, and
   (lwIP netif ⇄ `netdev` glue: zero-copy TX scatter-gather + L4 checksum offsets, RX
   `pbuf_custom` recycle, link events).
 - `src/bsdsocket/` — `bsdsocket.library` (socket layer, LVO table, stack task).
-- `src/sockbench/` — LAN TCP throughput benchmark over `bsdsocket.library` (developer
+- `src/sockbench/` — LAN TCP/UDP throughput benchmark over `bsdsocket.library` (developer
   tool; built but not shipped).
 - `sfd/`, `scripts/gen-vectors.py` — the NDK `bsdsocket` SFD and the generator that emits
   the full 139-slot LVO vector table from it.
@@ -90,6 +90,27 @@ wakeups; break signals (Ctrl-C by default) surface as `EINTR`.
 
 See [docs/TODO.md](docs/TODO.md) for the full LVO scoreboard (what's stubbed and why).
 
+## Configuration
+
+The stack reads **`ENV:netstack.prefs`** once at startup (the first `OpenLibrary` of
+`bsdsocket.library`); keep the master copy in `ENVARC:`. Flat `KEY = VALUE` lines,
+case-insensitive keys, `#`/`;` comments, unknown keys ignored. Every key is optional —
+with no file at all the stack runs DHCP on `networks/genet.device` unit 0. A commented
+template ships as `ENVARC:netstack.prefs.default`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `DEVICE` | `networks/genet.device` | netdev driver to open (path form loads from `DEVS:`) |
+| `UNIT` | `0` | device unit |
+| `MODE` | `DHCP` | `DHCP` or `STATIC` |
+| `ADDRESS`, `NETMASK` | — | required for `STATIC` (else the stack falls back to DHCP) |
+| `GATEWAY` | — | optional default gateway (`STATIC`) |
+| `DNS1`, `DNS2` | — | optional DNS servers (`STATIC`; DHCP supplies its own) |
+| `HOSTNAME` | `amiga` | DHCP option 12 and `gethostname()` |
+
+Additional interfaces are a reserved extension (`IF1_`-prefixed keys); see
+[docs/architecture.md](docs/architecture.md).
+
 ## Building
 
 ### Amiga (m68k) binaries
@@ -115,33 +136,32 @@ The superproject orders `lwip-amiga` before `genet.device` (which depends on the
 exported `Netdev` package) and shares the stack-wide debug backend / `EMU68_DEBUG_HIGH`
 options — `lwip-amiga` is a valid `EMU68_DEBUG_HIGH` component name.
 
-## Test tools
+## Tools
 
+- **`netinfo`** (`C/`, shipped) — read-only ifconfig-like interface status: address,
+  netmask, broadcast, MTU, MAC, link state, DHCP/static and DNS. A `bsdsocket.library`
+  client using the Roadshow interface-query LVOs (`ObtainInterfaceList` /
+  `QueryInterfaceTagList`). Display only — the stack is configured via `netstack.prefs`.
 - **`netdev-stats`** (`C/`, shipped) — a second `netdev` opener beside the running stack
   that reads live loss-point counters (`GET_STATS`/`GET_LINK`) and drives interrupt
   coalescing (`SET_COALESCE`) — no ATTACH needed. The release-build replacement for the
   debug driver's serial counters.
-- **`sockbench`** (developer tool, built but not shipped) — LAN TCP throughput benchmark
-  over the NDK BSD socket API (`bsdsocket.library`): `sockbench rx|tx <host> [streams]
-  [seconds] [bufKB]` runs N nonblocking sockets from one `WaitSelect` loop against
-  `scripts/tcp-bench-peer.py` and reports per-stream + aggregate Mb/s. Exercises DHCP +
-  DNS + TCP through the whole zero-copy `netdev` path with hardware checksums active.
+- **`sockbench`** (developer tool, built but not shipped) — LAN TCP/UDP throughput benchmark
+  over the NDK BSD socket API (`bsdsocket.library`): `sockbench rx|tx|udprx|udptx <host>
+  [streams] [seconds] [sizeKB]` runs N nonblocking sockets from one `WaitSelect` loop against
+  `scripts/tcp-bench-peer.py` and reports per-stream + aggregate Mb/s (`rx`/`tx` are TCP,
+  `udprx`/`udptx` are UDP; `sizeKB` is the TCP buffer or the UDP datagram size). Exercises
+  DHCP + DNS + TCP/UDP through the whole zero-copy `netdev` path with hardware checksums active.
 
 ## Known limitations
 
 - **Throughput is still being optimized** — download runs below line rate; the ceiling is
   serialized stack-side work under the core lock. See [docs/TODO.md](docs/TODO.md).
-- **Router-side first-packet drop (under investigation)** — the first inbound packet of
-  a fresh through-NAT flow after a few seconds of TX-idle can be lost *upstream* of the
-  NIC (MIB counters show it never reaches the MAC); local-LAN flows are unaffected.
-  Suspected router hardware-NAT / flow-offload. Mitigated with a 500 ms initial TCP RTO in
-  `lwipopts.h` (the SYN retransmit beats apps' 1 s connect timeouts). See
-  [docs/TODO.md](docs/TODO.md).
 - **TCP loss handling** — lwIP emits SACKs but does not act on received ones, so ~2%
   loss can trigger RTO collapse. Fine for a clean wired LAN.
-- Stubbed LVOs include the Roadshow interface-config/route/monitor families, `mbuf_*`,
-  `bpf_*`, and (intentionally) the private `ipf_*` filter. No reverse DNS yet
-  (`gethostbyaddr` returns the dotted quad).
+- Declined/stubbed LVOs include the Roadshow interface-*config* family (the interface
+  *query* subset is implemented — see `netinfo` above), the route/monitor families,
+  `mbuf_*`, `bpf_*`, and (intentionally) the private `ipf_*` filter.
 
 ## License
 

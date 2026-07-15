@@ -325,14 +325,18 @@ static ULONG sb_vformat(char *dst, ULONG max, const char *fmt, const ULONG *args
 VOID bsd_vsyslog(LONG pri asm("d0"), STRPTR msg asm("a0"), APTR args asm("a1"),
                  struct SocketBase *base asm("a6"))
 {
-    (void)base;
-    (void)pri;
     char buf[256];
 
     if (msg == NULL)
         return;
+    /* drop priorities the opener masked off via SBTC_LOGMASK (setlogmask) */
+    if (base != NULL && !(base->logMask & SB_LOG_MASK(pri)))
+        return;
     sb_vformat(buf, sizeof(buf), (const char *)msg, args);
-    Kprintf("[syslog:%ld] %s\n", pri, (ULONG)buf);
+    STRPTR tag = base != NULL ? base->logTagPtr : NULL;
+    Kprintf("[syslog:%ld] %s%s%s\n", pri,
+            tag != NULL ? (ULONG)tag : (ULONG)"",
+            tag != NULL ? (ULONG)": " : (ULONG)"", (ULONG)buf);
 }
 
 /* --------------------------------------- ObtainSocket / ReleaseSocket --- */

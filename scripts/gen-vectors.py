@@ -94,13 +94,21 @@ IMPLEMENTED = {
     "gai_strerror": "bsd_gai_strerror",
     "getnameinfo": "bsd_getnameinfo",
     "GetSocketEvents": "bsd_GetSocketEvents",
+    # interface API: read-only status implemented; the config family is
+    # declined and shares a graceful EINVAL stub (see sb_ifquery.c).
+    "ObtainInterfaceList": "bsd_ObtainInterfaceList",
+    "ReleaseInterfaceList": "bsd_ReleaseInterfaceList",
+    "QueryInterfaceTagList": "bsd_QueryInterfaceTagList",
+    "AddInterfaceTagList": "bsd_InterfaceConfigUnsupported",
+    "ConfigureInterfaceTagList": "bsd_InterfaceConfigUnsupported",
+    "RemoveInterface": "bsd_InterfaceConfigUnsupported",
 }
 
 # Unimplemented LVOs that return POINTERS get the NULL stub; handing an app
 # LibStub's -1 where it checks for NULL would be a crash.
 NULL_STUBS = {
     "mbuf_copym", "mbuf_free", "mbuf_get", "mbuf_gethdr", "mbuf_prepend",
-    "mbuf_pullup", "GetRouteInfo", "ObtainInterfaceList", "ObtainRoadshowData",
+    "mbuf_pullup", "GetRouteInfo", "CreateAddrAllocMessageA", "ObtainRoadshowData",
 }
 
 HEADER = """\

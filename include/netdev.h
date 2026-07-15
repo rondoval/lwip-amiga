@@ -36,6 +36,9 @@
 **     DMA, hands them up via nso_RxInput() and gets each one back through
 **     ndo_RxRelease(cookie). Buffer geometry (size, headroom, ring depth,
 **     copy-break policy) is driver-internal and never crosses this ABI.
+**     Only a COUNT crosses it: the stack states its concurrent-hold budget
+**     at ATTACH (nda_RxHoldReq) and the driver answers with the enforced
+**     bound (ndc_RxPoolBufs).
 **   - TX memory is STACK-owned but comes from the driver's allocator
 **     (ndo_DmaAlloc/ndo_DmaFree), which guarantees DMA reachability. Every
 **     TX segment MUST lie in memory obtained from ndo_DmaAlloc of the same
@@ -49,9 +52,12 @@
 **  packet memory as plain memory at all times.
 **
 **  Threading rules:
-**   - Stack -> driver entries (ndo_*) are callable from ANY task, never from
-**     interrupts. They do not block. ndo_RxRelease and ndo_TxSubmit must be
-**     safe to call concurrently from different tasks than the driver's own.
+**   - Stack -> driver entries (ndo_*) are callable from ANY task (not just
+**     the driver's own), never from interrupts. They do not block. The
+**     CALLER serializes its own calls to ndo_RxRelease / ndo_TxSubmit — a
+**     driver may recycle and submit through single-producer rings, so these
+**     need not be re-entrant against themselves. The stack's core lock
+**     provides that serialization; concurrent self-entry is not permitted.
 **   - Driver -> stack callbacks (nso_*) are called ONLY from the driver's
 **     unit task, never from interrupts, and must not block. A callback may
 **     re-enter ndo_TxSubmit / ndo_RxRelease.
@@ -72,13 +78,27 @@
 
 /* ------------------------------------------------------------------------ */
 /* ABI version. NETDEV_CMD_ATTACH negotiates min(stack, driver); struct
- * growth and new ops append and are gated by the negotiated version. */
+ * growth and new ops append and are gated by the negotiated version.
+ *
+ * v1 is the frozen baseline. It carries reserved surface so the two open
+ * pre-freeze features can land later WITHOUT another layout break:
+ *   - Jumbo frames: nda_MtuReq/ndc_Mtu negotiate the MTU; NDCF_RX_SCATTER +
+ *     NDRF_SOP/NDRF_EOP reserve multi-buffer RX for frames past a single
+ *     descriptor. A v1 driver may still cap the MTU at 1500.
+ *   - Hardware VLAN offload: ntd_VlanTci/nrd_VlanTci + NDTF_VLAN_INSERT/
+ *     NDRF_VLAN_STRIPPED + NDCF_VLAN_TX_INSERT/NDCF_VLAN_RX_STRIP. A driver
+ *     without these caps carries 802.1Q tags in-band (the stack tags in
+ *     software); the reserved fields let a future NIC offload insert/strip.
+ * All reserved bits/fields read 0 and are unimplemented in v1. */
 #define NETDEV_ABI_VERSION      1
 
 /* ------------------------------------------------------------------------ */
-/* Commands — a reserved block in the NewStyle (NSCMD_*) pool.
+/* Commands — a block in the third-party command area. The NSD standard
+ * keeps 0x4000-0x7FFF and 0xC000-0xFFFF for the OS; third parties get
+ * 0x0000-0x3FFF and 0x8000-0xBFFF. Fleet allocations: nvme passthrough
+ * 0x8020..0x8024, xhci context ops 0x8800..0x881f, netdev here.
  * The netdev block occupies NETDEV_CMD_BASE + 0x00..0x1f. */
-#define NETDEV_CMD_BASE         0x4900
+#define NETDEV_CMD_BASE         0x8900
 
 #define NETDEV_CMD_ATTACH       (NETDEV_CMD_BASE + 0x00)  /* NetDevAttach */
 #define NETDEV_CMD_DETACH       (NETDEV_CMD_BASE + 0x01)  /* no payload */
@@ -123,7 +143,9 @@ struct NetDevCaps
                                    always satisfies it; this matters when the
                                    stack points segments INTO such a buffer */
     UWORD   ndc_Pad;
-    ULONG   ndc_RxPoolBufs;     /* total driver RX buffers (ring + spares);
+    ULONG   ndc_RxPoolBufs;     /* total driver RX buffers (ring + spares),
+                                   sized at ATTACH from ring depth plus the
+                                   stack's nda_RxHoldReq (driver-clamped);
                                    bounds how many the stack may hold — it
                                    sizes its wrap storage from this */
     ULONG   ndc_Reserved[3];    /* 0 until a future ABI version claims them */
@@ -135,6 +157,13 @@ struct NetDevCaps
 #define NDCF_COALESCE       (1UL << 3)  /* SET_COALESCE is honored */
 #define NDCF_MCAST_FILTER   (1UL << 4)  /* exact multicast filtering in HW */
 #define NDCF_LINK_EVENTS    (1UL << 5)  /* nso_LinkChange will be called */
+/* Reserved capabilities — defined so the frozen v1 layout can express them later without an
+ * ABI break; no v1 driver advertises them and no v1 stack acts on them. */
+#define NDCF_RX_SCATTER     (1UL << 6)  /* reserved: multi-buffer RX frames (see NDRF_SOP/EOP) */
+#define NDCF_VLAN_TX_INSERT (1UL << 7)  /* reserved: HW inserts ntd_VlanTci (see NDTF_VLAN_INSERT).
+                                           Absent = the stack tags in software (in-band 802.1Q) */
+#define NDCF_VLAN_RX_STRIP  (1UL << 8)  /* reserved: HW strips the tag into nrd_VlanTci (see
+                                           NDRF_VLAN_STRIPPED). Absent = tag stays in the frame */
 
 /* ------------------------------------------------------------------------ */
 /* TX descriptors. A packet is a scatter-gather list of segments, each in
@@ -151,7 +180,12 @@ struct NetDevCaps
  * engines such as GENET's TSB require). This matches TCP/UDP over
  * IPv4/IPv6. The IPv4 header checksum is NOT offloaded — the stack
  * computes it (20 bytes, cheap, and lwIP does it inline). Without
- * NDCF_TX_L4CSUM the flag must not be set. */
+ * NDCF_TX_L4CSUM the flag must not be set.
+ *
+ * ntd_CsumStart/ntd_CsumOffset are absolute byte offsets from the frame
+ * start, so when the frame carries an in-band 802.1Q tag they already
+ * include the 4-byte tag (the L4 position is simply shifted): the offset-
+ * based engine needs no VLAN awareness. */
 
 struct NetDevSg
 {
@@ -166,6 +200,7 @@ struct NetDevTxDesc
     UWORD   ntd_Flags;          /* NDTF_* */
     UWORD   ntd_CsumStart;      /* valid with NDTF_L4CSUM */
     UWORD   ntd_CsumOffset;     /* valid with NDTF_L4CSUM */
+    UWORD   ntd_VlanTci;        /* reserved: 802.1Q TCI to insert with NDTF_VLAN_INSERT */
     APTR    ntd_Cookie;         /* returned verbatim by nso_TxDone */
 };
 
@@ -173,6 +208,10 @@ struct NetDevTxDesc
 #define NDTF_L4_UDP         (1 << 1)   /* with NDTF_L4CSUM: the L4 protocol is
                                           UDP, so the engine applies the UDP
                                           zero-checksum rewrite (0 -> 0xFFFF) */
+#define NDTF_VLAN_INSERT    (1 << 2)   /* reserved (NDCF_VLAN_TX_INSERT): the driver inserts the
+                                          802.1Q tag ntd_VlanTci. Unused in v1 — the stack builds
+                                          tagged frames in software, so segments already carry the
+                                          tag and this flag is never set. */
 
 /* ------------------------------------------------------------------------ */
 /* RX descriptors, delivered by the driver to nso_RxInput. nrd_Data points at
@@ -198,6 +237,7 @@ struct NetDevRxDesc
     ULONG   nrd_Len;
     UWORD   nrd_Flags;          /* NDRF_* */
     UWORD   nrd_CsumRaw;        /* valid with NDRF_CSUM_RAW */
+    UWORD   nrd_VlanTci;        /* reserved: 802.1Q TCI stripped by HW with NDRF_VLAN_STRIPPED */
     APTR    nrd_Cookie;         /* the buffer's handle for ndo_RxRelease */
 };
 
@@ -205,6 +245,15 @@ struct NetDevRxDesc
 #define NDRF_CSUM_RAW       (1 << 1)
 #define NDRF_BCAST          (1 << 2)   /* informational */
 #define NDRF_MCAST          (1 << 3)   /* informational */
+/* Reserved RX flags — unimplemented in v1 (see the reserved NDCF_* capabilities). */
+#define NDRF_VLAN_STRIPPED  (1 << 4)   /* reserved (NDCF_VLAN_RX_STRIP): HW stripped the 802.1Q
+                                          tag into nrd_VlanTci. Unused in v1 — the tag stays in
+                                          the frame and the stack parses it. */
+#define NDRF_SOP            (1 << 5)   /* reserved (NDCF_RX_SCATTER): start-of-frame buffer */
+#define NDRF_EOP            (1 << 6)   /* reserved (NDCF_RX_SCATTER): end-of-frame buffer. v1
+                                          delivers one buffer per frame (implicit SOP+EOP); a
+                                          future version may deliver a frame as a chain of
+                                          buffers, only the last carrying NDRF_EOP. */
 
 /* ------------------------------------------------------------------------ */
 /* The direct-call tables. Both stay valid from ATTACH to DETACH completion;
@@ -221,8 +270,10 @@ struct NetDevDrvOps             /* driver provides, stack calls */
      * Every accepted cookie returns via nso_TxDone exactly once. */
     LONG    (*ndo_TxSubmit)(APTR drvctx, const struct NetDevTxDesc *descs, ULONG count);
 
-    /* Return one RX buffer to the driver. Foreign-task-safe and cheap (the
-     * driver batches refills internally). */
+    /* Return one RX buffer to the driver. Callable from any task and cheap
+     * (the driver batches refills internally); the caller serializes its
+     * own calls — a single-producer recycle ring is a valid implementation
+     * (see the threading rules above). */
     VOID    (*ndo_RxRelease)(APTR drvctx, APTR cookie);
 
     /* The TX memory allocator: DMA-reachable for this unit, aligned to at
@@ -263,12 +314,29 @@ struct NetDevStackOps           /* stack provides, driver calls */
  * RX buffers held by the stack stay valid; the stack releases them at its
  * own pace. NETDEV_CMD_DETACH requires: stopped, all RX cookies released,
  * all ndo_DmaAlloc memory freed. After DETACH replies, neither side calls
- * the other again. */
+ * the other again.
+ *
+ * RX pool sizing: the stack may pin one full receive window per bulk
+ * stream in socket queues, so its hold budget is roughly
+ *   streams x (TCP_WND / TCP_MSS) + in-flight slack.
+ * The driver adds its RX ring depth and recycle-latency slack, clamps to
+ * its own bounds, allocates the pool during ATTACH, and reports the
+ * result in ndc_RxPoolBufs. */
 
 struct NetDevAttach
 {
     UWORD   nda_AbiVersion;     /* IN: stack's version; OUT: negotiated */
-    UWORD   nda_Pad;
+    UWORD   nda_RxHoldReq;      /* IN: max RX buffers the stack intends to
+                                   hold concurrently (its receive-queue
+                                   budget); 0 = no estimate. The driver
+                                   covers ring + this in its RX pool and
+                                   reports the enforced bound in
+                                   ndc_RxPoolBufs */
+    UWORD   nda_MtuReq;         /* IN: stack's desired payload MTU, 0 = driver
+                                   default. The driver clamps to what its
+                                   buffers support and returns the actual value
+                                   in ndc_Mtu (OUT). Mirrors the nda_RxHoldReq
+                                   -> ndc_RxPoolBufs negotiation. */
     APTR    nda_StackCtx;       /* IN: first arg of every nso_* call */
     const struct NetDevStackOps *nda_StackOps;  /* IN */
     APTR    nda_DrvCtx;         /* OUT: first arg of every ndo_* call */
@@ -351,10 +419,10 @@ struct NetDevStats
 /* ------------------------------------------------------------------------ */
 /* layout freeze */
 NETDEV_ABI_ASSERT(sizeof(struct NetDevSg) == 8);
-NETDEV_ABI_ASSERT(sizeof(struct NetDevTxDesc) == 16);
-NETDEV_ABI_ASSERT(sizeof(struct NetDevRxDesc) == 16);
+NETDEV_ABI_ASSERT(sizeof(struct NetDevTxDesc) == 18);
+NETDEV_ABI_ASSERT(sizeof(struct NetDevRxDesc) == 18);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevCaps) == 40);
-NETDEV_ABI_ASSERT(sizeof(struct NetDevAttach) == 60);
+NETDEV_ABI_ASSERT(sizeof(struct NetDevAttach) == 62);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevRxFilter) == 8);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevCoalesce) == 8);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevLinkState) == 4);

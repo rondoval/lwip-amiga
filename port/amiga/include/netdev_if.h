@@ -35,6 +35,9 @@ struct NetdevIf
     APTR ndi_Drv;                       /* nda_DrvCtx */
     const struct NetDevDrvOps *ndi_Ops; /* nda_DrvOps */
     struct NetDevCaps ndi_Caps;
+    LONG ndi_VlanTci;                   /* in-band 802.1Q: -1 = no VLAN, else
+                                           (pcp<<13)|(vid&0xFFF); read by the
+                                           lwIP VLAN hooks. Set before create. */
 
     struct NdRxWrap *ndi_FreeWraps;     /* under the core lock */
     APTR ndi_WrapStorage;
@@ -48,6 +51,11 @@ struct NetdevIf
 /* The stack-side callback table to pass in NetDevAttach.nda_StackOps; use
  * the struct NetdevIf pointer as nda_StackCtx. */
 const struct NetDevStackOps *netdevif_stack_ops(void);
+
+/* The RX-hold budget to declare in NetDevAttach.nda_RxHoldReq: how many
+ * driver buffers the stack may pin at once, derived from the lwIP receive
+ * window (port-layer knowledge the exec-side opener doesn't have). */
+UWORD netdevif_rx_hold_budget(void);
 
 /* Wire the attach results into lwIP: allocates the RX wrapper pool, adds
  * the netif (down, unconfigured), programs per-netif checksum switches

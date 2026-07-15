@@ -189,6 +189,10 @@ struct SocketBase *LibOpen(ULONG version asm("d0"), struct SocketBase *base asm(
     b->errnoSize = sizeof(LONG);
     b->hErrno = 0;
     b->hErrnoPtr = &b->hErrno;
+    b->logStat = 0;
+    b->logTagPtr = NULL;
+    b->logFacility = 0;
+    b->logMask = SB_LOGMASK_ALL;
     b->timerPort = CreateMsgPort();
     b->timerReq = (struct timerequest *)CreateIORequest(b->timerPort, sizeof(struct timerequest));
     b->timerOpen = FALSE;

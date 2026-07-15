@@ -64,12 +64,14 @@ target_link_libraries(netstack
 add_executable(bsdsocket_library
     bsdsocket/main.c
     bsdsocket/vectors.c
+    bsdsocket/sb_config.c
     bsdsocket/sb_stack.c
     bsdsocket/sb_socket.c
     bsdsocket/sb_api.c
     bsdsocket/sb_select.c
     bsdsocket/sb_misc.c
     bsdsocket/sb_misc2.c
+    bsdsocket/sb_ifquery.c
     bsdsocket/sb_gai.c
     bsdsocket/sb_rdns.c
     bsdsocket/end.c
@@ -200,8 +202,39 @@ emu68_debug_backend_finalize(sockbench)
 # sockbench is a developer benchmark — built for local HW testing but deliberately
 # not installed, so it stays out of the shipped package.
 
+# --- netinfo: read-only ifconfig-like interface status ----------------------
+# A bsdsocket.library client that prints interface address/mask/MTU/MAC/link/
+# DNS via the Roadshow interface-query API (ObtainInterfaceList /
+# QueryInterfaceTagList). Shipped alongside the library.
+add_executable(netinfo
+    netinfo/netinfo.c
+)
+
+target_compile_options(netinfo PRIVATE -O2 ${LWIP_WARN})
+
+target_link_libraries(netinfo
+    PRIVATE
+        Emu68Common::common
+)
+
+emu68_debug_backend_finalize(netinfo)
+
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/netinfo
+    DESTINATION C
+)
+
 # The shippable library.
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/bsdsocket.library
     DESTINATION LIBS
+)
+
+# Config template. Staged under the .default name so the dev-loop upload and
+# a manual unpack can never clobber a user's live ENVARC:netstack.prefs; the
+# Installer materializes the real name only when absent.
+install(
+    FILES ${CMAKE_SOURCE_DIR}/prefs/netstack.prefs
+    DESTINATION ENVARC
+    RENAME netstack.prefs.default
 )

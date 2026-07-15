@@ -1,14 +1,17 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 /*
- * sockbench — repeatable LAN TCP throughput benchmark over bsdsocket.library.
+ * sockbench — repeatable LAN TCP/UDP throughput benchmark over bsdsocket.library.
  *
  * Runs against scripts/tcp-bench-peer.py (start it on a PC; port 5001 discards
- * what we send, port 5002 blasts data at us):
+ * what we send, port 5002 blasts data at us — same ports for TCP and UDP):
  *
- *   sockbench rx|tx <host> [streams] [seconds] [bufKB]
+ *   sockbench rx|tx|udprx|udptx <host> [streams] [seconds] [sizeKB]
  *
- * N nonblocking sockets driven from one WaitSelect loop; per-stream and
- * aggregate Mb/s from ReadEClock. Defaults: 1 stream, 10 s, 64 KB buffer.
+ * rx/tx are TCP; udprx/udptx are UDP. N nonblocking sockets driven from one
+ * WaitSelect loop; per-stream and aggregate Mb/s from ReadEClock. Defaults:
+ * 1 stream, 10 s; TCP 64 KB buffer, UDP one 1500-MTU frame per datagram.
+ * For UDP the size arg sets the datagram size (fragmented above one frame),
+ * and the aggregate is best-effort — the peer's own count shows any loss.
  *
  * A developer tool, so it just uses the NDK bsdsocket headers (BSD sockets +
  * the library's inline glue) rather than open-coding LVO stubs.
@@ -44,6 +47,7 @@ struct Device *TimerBase;
 #define BENCH_SINK_PORT 5001   /* peer discards what we send (tx test) */
 #define BENCH_SOURCE_PORT 5002 /* peer blasts at us (rx test) */
 #define BENCH_MAX_STREAMS 8
+#define BENCH_UDP_DGRAM 1472   /* default UDP payload: one 1500-MTU frame */
 
 static ULONG bench_resolve(const char *host)
 {
@@ -87,23 +91,49 @@ static void bench_report(const char *tag, unsigned long long bytes,
 
 static int run_bench(int argc, char **argv)
 {
-    /* argv: [0]=sockbench [1]=rx|tx [2]=host [3]=streams [4]=secs [5]=bufKB */
-    if (argc < 3 || (strcmp(argv[1], "rx") != 0 && strcmp(argv[1], "tx") != 0))
+    /* argv: [0]=sockbench [1]=rx|tx|udprx|udptx [2]=host [3]=streams [4]=secs [5]=sizeKB */
+    const char *dir = (argc > 1) ? argv[1] : "";
+    BOOL rx = FALSE, udp = FALSE, dir_ok = TRUE;
+    if (strcmp(dir, "rx") == 0)         rx = TRUE;
+    else if (strcmp(dir, "tx") == 0)    rx = FALSE;
+    else if (strcmp(dir, "udprx") == 0) { rx = TRUE;  udp = TRUE; }
+    else if (strcmp(dir, "udptx") == 0) { rx = FALSE; udp = TRUE; }
+    else                                dir_ok = FALSE;
+
+    if (!dir_ok || argc < 3)
     {
-        printf("usage: sockbench rx|tx <host> [streams<=%d] [seconds] [bufKB]\n",
+        printf("usage: sockbench rx|tx|udprx|udptx <host> [streams<=%d] [seconds] [sizeKB]\n"
+               "  rx/tx = TCP; udprx/udptx = UDP. sizeKB is the TCP buffer or the UDP\n"
+               "  datagram size (default: TCP 64 KB, UDP one 1500-MTU frame).\n",
                BENCH_MAX_STREAMS);
         return 5;
     }
-    BOOL rx = (strcmp(argv[1], "rx") == 0);
     LONG streams = (argc > 3) ? atoi(argv[3]) : 1;
     LONG seconds = (argc > 4) ? atoi(argv[4]) : 10;
-    LONG bufKB = (argc > 5) ? atoi(argv[5]) : 64;
-    if (streams < 1 || streams > BENCH_MAX_STREAMS || seconds < 1 || bufKB < 1 || bufKB > 512)
+    LONG sizeKB = (argc > 5) ? atoi(argv[5]) : 0; /* 0 = per-protocol default */
+    if (streams < 1 || streams > BENCH_MAX_STREAMS || seconds < 1)
     {
         printf("sockbench: bad parameters\n");
         return 5;
     }
-    ULONG buflen = (ULONG)bufKB * 1024;
+    /* bytes per send()/recv(): a TCP working buffer, or one UDP datagram */
+    ULONG buflen;
+    if (udp)
+    {
+        buflen = (sizeKB > 0) ? (ULONG)sizeKB * 1024 : BENCH_UDP_DGRAM;
+        if (buflen > 65507)
+            buflen = 65507; /* max UDP payload */
+    }
+    else
+    {
+        LONG bufKB = (sizeKB > 0) ? sizeKB : 64;
+        if (bufKB > 512)
+        {
+            printf("sockbench: bad parameters\n");
+            return 5;
+        }
+        buflen = (ULONG)bufKB * 1024;
+    }
 
     /* args are good — now bring the stack up (OpenLibrary starts DHCP) */
     SocketBase = OpenLibrary((CONST_STRPTR) "bsdsocket.library", 4);
@@ -148,7 +178,7 @@ static int run_bench(int argc, char **argv)
     buf = AllocVec(buflen, MEMF_PUBLIC);
     if (buf == NULL)
     {
-        printf("sockbench: no memory for %lu KB buffer\n", (unsigned long)bufKB);
+        printf("sockbench: no memory for %lu byte buffer\n", (unsigned long)buflen);
         goto bench_out;
     }
     if (!rx)
@@ -164,7 +194,9 @@ static int run_bench(int argc, char **argv)
 
     for (LONG i = 0; i < streams; i++)
     {
-        sock[i] = socket(AF_INET, SOCK_STREAM, 0);
+        sock[i] = socket(AF_INET, udp ? SOCK_DGRAM : SOCK_STREAM, 0);
+        /* connect() on a UDP socket just pins the peer (no handshake), so
+         * send()/recv() work for both and recv() accepts only the peer. */
         if (sock[i] < 0 || connect(sock[i], (struct sockaddr *)&sin, sizeof(sin)) != 0)
         {
             printf("sockbench: stream %ld connect failed, errno %ld\n", (long)i, (long)Errno());
@@ -175,17 +207,21 @@ static int run_bench(int argc, char **argv)
     }
     if (rx)
     {
-        /* start gun — the peer's source blasts only after this byte, so no
-         * stream floods the RX pool while later handshakes are still in
-         * flight (a dry pool eats SYN-ACKs; seen live as errno 53 with 4
-         * streams). One byte always fits the fresh send buffer; content is
-         * irrelevant, the peer just waits for it. */
+        /* start gun — the peer's source blasts only after this, so no stream
+         * floods the RX pool while later handshakes are still in flight (a dry
+         * pool eats SYN-ACKs; seen live as errno 53 with 4 TCP streams). TCP
+         * sends one 'G' byte; UDP sends "G<bytes>" so the peer also learns
+         * where to send and how big to make each datagram. */
+        LONG glen = 1;
         buf[0] = 'G';
+        if (udp)
+            glen = sprintf((char *)buf, "G%lu", (unsigned long)buflen);
         for (LONG i = 0; i < streams; i++)
-            send(sock[i], buf, 1, 0);
+            send(sock[i], buf, glen, 0);
     }
-    printf("bench %s: %ld stream(s) to port %u, %ld s, %ld KB buffer\n",
-           rx ? "rx" : "tx", (long)streams, port, (long)seconds, (long)bufKB);
+    printf("bench %s %s: %ld stream(s) to port %u, %ld s, %lu byte %s\n",
+           udp ? "udp" : "tcp", rx ? "rx" : "tx", (long)streams, port, (long)seconds,
+           (unsigned long)buflen, udp ? "datagrams" : "buffer");
 
     struct EClockVal ev;
     ULONG freq = ReadEClock(&ev);
@@ -237,9 +273,13 @@ static int run_bench(int argc, char **argv)
                         break;
                     continue;
                 }
-                if (r == 0 || Errno() != SB_EWOULDBLOCK)
+                /* r<=0: EWOULDBLOCK means "nothing more right now" (retry on
+                 * the next readiness). A real error, or a TCP r==0 (EOF), ends
+                 * the stream; a UDP r==0 is just an empty datagram, so keep it. */
+                BOOL failed = (r < 0 && Errno() != SB_EWOULDBLOCK);
+                if (failed || (r == 0 && !udp))
                 {
-                    if (r != 0)
+                    if (failed)
                         printf("sockbench: stream %ld errno %ld\n", (long)i, (long)Errno());
                     CloseSocket(sock[i]);
                     sock[i] = -1;
@@ -248,6 +288,17 @@ static int run_bench(int argc, char **argv)
                 break;
             }
         }
+    }
+
+    /* UDP has no close handshake: nudge the peer to stop and report its side.
+     * Sent a few times per stream, since a lone datagram may be dropped. */
+    if (udp)
+    {
+        buf[0] = 'S';
+        for (LONG i = 0; i < streams; i++)
+            if (sock[i] >= 0)
+                for (LONG k = 0; k < 3; k++)
+                    send(sock[i], buf, 1, 0);
     }
 
     unsigned long long ticks = now - start;
@@ -261,7 +312,8 @@ static int run_bench(int argc, char **argv)
     }
     bench_report("total", total, ticks, freq);
     if (!rx)
-        printf("(tx counts bytes accepted into send buffers; ~256 KB/stream tail margin)\n");
+        printf(udp ? "(udp tx counts datagrams the stack accepted; the peer's count shows loss)\n"
+                   : "(tx counts bytes accepted into send buffers; ~256 KB/stream tail margin)\n");
     rc = 0;
 
 bench_close:

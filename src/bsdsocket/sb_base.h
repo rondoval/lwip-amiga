@@ -49,6 +49,8 @@
 
 #include <netdev_if.h>
 
+#include "sb_config.h"
+
 struct tcp_pcb;
 struct udp_pcb;
 struct raw_pcb;
@@ -257,6 +259,19 @@ struct sb_addrinfo
 #define SBTC_ERRNO 6
 #define SBTC_HERRNO 7
 #define SBTC_DTABLESIZE 8
+/* syslog configuration (openlog/setlogmask). The C runtimes wire these at
+ * startup — clib2 sets SBTC_LOGTAGPTR to the program name during its socket
+ * init, so failing them here aborts every clib2-linked networked program with
+ * "bsdsocket.library could not be initialized". Consumed by bsd_vsyslog. */
+#define SBTC_LOGSTAT 10
+#define SBTC_LOGTAGPTR 11
+#define SBTC_LOGFACILITY 12
+#define SBTC_LOGMASK 13
+/* <sys/syslog.h>: a message of priority p is logged when its bit is set in the
+ * mask; the default mask enables all eight priorities. */
+#define SB_LOG_PRIMASK 0x07
+#define SB_LOG_MASK(pri) (1UL << ((pri) & SB_LOG_PRIMASK))
+#define SB_LOGMASK_ALL 0xFFUL
 #define SBTC_ERRNOBYTEPTR 21
 #define SBTC_ERRNOWORDPTR 22
 #define SBTC_ERRNOLONGPTR 24
@@ -277,6 +292,42 @@ struct sb_addrinfo
 #define SBTC_HAVE_SERVER_API 63
 #define SBTC_HAVE_ROADSHOWDATA_API 67
 #define SBTC_HAVE_GETHOSTADDR_R_API 69
+
+/* QueryInterfaceTagList tags (netinclude/libraries/bsdsocket.h). Only the
+ * read-only address/config/link subset this stack answers is copied here;
+ * IFQ_BASE = TAG_USER + 1900. Each tag's ti_Data points to caller storage
+ * to fill (per the autodoc): a STRPTR/LONG/ULONG pointer for scalars, a raw
+ * byte buffer for the hardware address, and a struct sb_sockaddr_in pointer
+ * for the address tags. */
+#define IFQ_BASE (TAG_USER + 1900)
+#define IFQ_DeviceName (IFQ_BASE + 1)          /* STRPTR *  */
+#define IFQ_DeviceUnit (IFQ_BASE + 2)          /* LONG *    */
+#define IFQ_HardwareAddressSize (IFQ_BASE + 3) /* LONG * (bits) */
+#define IFQ_HardwareAddress (IFQ_BASE + 4)     /* UBYTE * (<=16) */
+#define IFQ_MTU (IFQ_BASE + 5)                 /* LONG *    */
+#define IFQ_HardwareType (IFQ_BASE + 7)        /* LONG *    */
+#define IFQ_Address (IFQ_BASE + 14)            /* struct sockaddr * */
+#define IFQ_DestinationAddress (IFQ_BASE + 15) /* struct sockaddr * */
+#define IFQ_BroadcastAddress (IFQ_BASE + 16)   /* struct sockaddr * */
+#define IFQ_NetMask (IFQ_BASE + 17)            /* struct sockaddr_in * */
+#define IFQ_State (IFQ_BASE + 19)              /* LONG * (SM_*) */
+#define IFQ_AddressBindType (IFQ_BASE + 20)    /* LONG * (IFABT_*) */
+#define IFQ_PrimaryDNSAddress (IFQ_BASE + 22)  /* struct sockaddr_in * */
+#define IFQ_SecondaryDNSAddress (IFQ_BASE + 23) /* struct sockaddr_in * */
+
+/* IFQ_AddressBindType values */
+#define IFABT_Unknown 0
+#define IFABT_Static 1
+#define IFABT_Dynamic 2
+
+/* IFQ_State values (subset: this stack reports only down/up) */
+#define SM_Offline 0
+#define SM_Online 1
+#define SM_Down 2
+#define SM_Up 3
+
+/* SANA-II hardware type reported for Ethernet interfaces (S2WireType_Ethernet) */
+#define SB_S2WIRETYPE_ETHERNET 1
 
 /* --- sockets -------------------------------------------------------------- */
 
@@ -382,6 +433,10 @@ struct SocketBase
     struct MinList releasedSockets; /* ReleaseSocket parking lot (core lock) */
     LONG nextSockId;
     char defaultDomain[SB_HOSTNAME_MAX];
+    /* startup configuration: written once by the stack task before
+     * sb_stack_start() returns (i.e. before the first OpenLibrary()
+     * completes), read-only afterwards — no locking needed */
+    struct SbNetConfig netCfg;
 
     /* --- per-opener state (child bases; garbage in the root) --- */
     struct Task *task;
@@ -397,6 +452,14 @@ struct SocketBase
     ULONG errnoSize; /* 1, 2 or 4 */
     LONG hErrno;
     LONG *hErrnoPtr; /* defaults to &hErrno */
+
+    /* syslog configuration (SBTC_LOG*; see bsd_vsyslog). logMask defaults to
+     * SB_LOGMASK_ALL so an opener that never calls setlogmask logs every
+     * priority, matching BSD. */
+    ULONG logStat;     /* openlog() options (LOG_PID, ...) — advisory */
+    STRPTR logTagPtr;  /* ident string prefixed to each message */
+    ULONG logFacility; /* default facility — advisory */
+    ULONG logMask;     /* setlogmask() priority bitmask */
 
     struct SbSocket **fd; /* SB_FD_COUNT entries */
 
@@ -554,6 +617,13 @@ APTR bsd_ObtainDomainNameServerList(struct SocketBase *base asm("a6"));
 VOID bsd_ReleaseDomainNameServerList(APTR list asm("a0"), struct SocketBase *base asm("a6"));
 LONG bsd_GetDefaultDomainName(STRPTR buffer asm("a0"), LONG bufferSize asm("d0"), struct SocketBase *base asm("a6"));
 VOID bsd_SetDefaultDomainName(STRPTR buffer asm("a0"), struct SocketBase *base asm("a6"));
+
+/* sb_ifquery.c — read-only interface status (the config family is declined) */
+APTR bsd_ObtainInterfaceList(struct SocketBase *base asm("a6"));
+VOID bsd_ReleaseInterfaceList(APTR list asm("a0"), struct SocketBase *base asm("a6"));
+LONG bsd_QueryInterfaceTagList(STRPTR name asm("a0"), struct TagItem *tags asm("a1"), struct SocketBase *base asm("a6"));
+/* shared graceful-refuse stub for the interface-config LVOs (errno = EINVAL) */
+LONG bsd_InterfaceConfigUnsupported(struct SocketBase *base asm("a6"));
 
 /* sb_gai.c */
 LONG bsd_getaddrinfo(STRPTR hostname asm("a0"), STRPTR servname asm("a1"), struct sb_addrinfo *hints asm("a2"), struct sb_addrinfo **res asm("a3"), struct SocketBase *base asm("a6"));

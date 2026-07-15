@@ -13,42 +13,29 @@ For how the stack is put together, see [architecture.md](architecture.md).
   done and the decision on each stub — is [bsdsocket-lvo-coverage.md](bsdsocket-lvo-coverage.md).
   Throughput is being actively optimized (see below) and a few of the later LVO waves
   still want a HW retest.
-- **ABI freeze** — the `netdev` ABI is still a pre-freeze internal prototype (v1); several
-  questions below should be settled before it is frozen.
+- **ABI freeze** — the two open pre-freeze questions (VLAN, jumbo) are now settled; the v1
+  layout carries the reserved surface both need, so it can be frozen (see below).
 
-## `netdev` ABI — questions to settle before freeze
+## `netdev` ABI — pre-freeze questions, resolved
 
-- **RX pool sizing guidance** — the stack can hold up to `TCP_WND` per socket in receive
-  queues; the driver's RX pool must cover ring + expected holding. Driver-internal, but
-  worth a sizing note in the header before freeze. (Now runtime-configurable in genet via
-  `RX_POOL_BUFS`; see throughput work below.)
-- **RAW-mode RX checksum folding** — currently done in software in the glue for
-  `CSUM_RAW`-only frames; a glue-local optimization, no ABI change.
-- **VLAN** — unsupported in v1. Would be a TX flag + tag field and an RX flag + stripped-tag
-  field in the reserved descriptor space.
-- **Jumbo frames** — `ndc_Mtu` carries the capability; GENET can do 9k but v1 pins 1500.
-  Enabling later is a driver matter plus an MTU-negotiation op.
-- **Multi-queue** — descriptor and caps layouts leave room (reserved fields); revisit only
-  when profiling shows the single unit task saturated.
-- **`SET_MAC` while STARTed** — currently applied immediately; revisit if a driver needs a
-  quiesce for it.
-- **Header portability** — `netdev.h` uses NDK types (`ULONG`/`APTR`); a mock netdev driver
-  on a host harness would need a small typedef shim.
-- **Command numbering** — `0x4900` assumes no collision in the NSCMD space used on this
-  platform (xhci holds `0x4800..0x481f`). Confirm before freeze.
+- **VLAN** — implemented in-band via lwIP's software VLAN (single VID, `VLAN = vid[,pcp]`
+  prefs key). GENET has no hardware tag insert/strip, so the 802.1Q tag rides inside the frame;
+  the L4 checksum offloads stay on because the TX/RX offset helpers are tag-aware
+  (`ndif_l4_offsets`/`ndif_rx_csum_ok`), matching how mainline Linux drives GENET. The frozen
+  ABI also *reserves* hardware-offload surface for a future NIC: `ntd_VlanTci`/`nrd_VlanTci`,
+  `NDTF_VLAN_INSERT`/`NDRF_VLAN_STRIPPED`, and `NDCF_VLAN_TX_INSERT`/`NDCF_VLAN_RX_STRIP`.
+- **Jumbo frames** — ABI surface finalized: `nda_MtuReq` (IN) / `ndc_Mtu` (OUT) negotiate the
+  MTU at ATTACH, and `NDCF_RX_SCATTER` + `NDRF_SOP`/`NDRF_EOP` reserve multi-buffer RX for
+  frames past a single descriptor. GENET still pins `ndc_Mtu` at 1500 (no datapath work this
+  release); a future jumbo-capable build raises it with no further ABI break.
 
-## Configuration UX & driver selection
+## Configuration UX & tools
 
-- **Driver selection.** The stack task currently hardcodes `OpenDevice("genet.device")`
-  (`src/bsdsocket/sb_stack.c`). Needed: let the user configure *which* network driver to
-  load, and load it from **`DEVS:Networks/`** — the standard AmigaOS location for network
-  device drivers — rather than assuming a single built-in name. Only one driver exists
-  today, but the mechanism must not preclude others.
-- **Config file & tools.** A fresh, minimal config (one file in `ENVARC:`, DHCP by default)
-  and a small set of CLI tools; interface-config LVOs vs pure DHCP self-config; tool
-  naming; release branding. No Roadshow file-format compatibility.
-- **Static-IP config.** The stack task self-configures via DHCP; a static-IP override
-  (env config read by the stack task at startup) is still to be added.
+Still open:
+
+- **`GetNetworkStatistics` / `SBTC_HAVE_STATUS_API`** — protocol-level counters
+  (ipstat/tcpstat/…), fakeable from lwIP's own stats; separate from the interface query.
+- **Release branding.** No Roadshow file-format compatibility.
 
 ## Ongoing investigations
 
@@ -66,13 +53,20 @@ Levers in flight / planned:
 - **Lock-scope reduction** — copy received data out with the lock released; chunk `tcp_write`
   and break the lock between chunks *only when another task is waiting* (whole-MSS chunks,
   to avoid runt segments). These reduce the unit task's lock-wait and the RX ring
-  starvation caused by long TX holds. (HW retest pending.)
-- **RX pool sizing** — the driver's RX pool is runtime-configurable (`RX_POOL_BUFS`), sized
-  to cover multiple full receive windows so parallel streams don't dry the pool and starve
-  the ring.
+  starvation caused by long TX holds. (HW retest pending.) The RAW RX checksum fold now
+  also runs before the lock (HW retest pending).
+- **RX pool sizing** — autonegotiated at ATTACH: the stack declares its hold budget
+  (`nda_RxHoldReq`, windows × streams + slack) and the driver sizes ring + budget;
+  `RX_POOL_BUFS` in `genet.prefs` remains as an absolute operator override.
 - **Coalescing tuning** — interrupt moderation (usecs/frames) via `SET_COALESCE`.
-- **Next candidates** — batching `tcp_recved`, folding the RX checksum outside the lock,
-  larger `ND_RX_BATCH`, and a larger `TCP_WND` coupled with a larger pool.
+- **Window sizing (done)** — `TCP_WND`/`TCP_SND_BUF` raised 256 KB → 1 MB with
+  `TCP_RCV_SCALE = 5` (advertises the full 1 MB past the 65535<<4 = 1048560 ceiling).
+  The hold budget (`4*ceil(TCP_WND/TCP_MSS)+64` wraps) auto-scaled with it, so the
+  genet RX pool grew ~1.6 MB → ~5.9 MB. This lifts only the *clean-path* window
+  ceiling (throughput = `TCP_WND/RTT`): ~70 → ~270 Mbit at 30 ms RTT. It does
+  nothing for the LAN download ceiling (still `ns_Core`-bound) or for lossy paths
+  (still RTO recovery, see below). Going past 1 MB is wasted until those two land.
+- **Next candidates** — batching `tcp_recved`, larger `ND_RX_BATCH`.
 
 ### TCP loss handling
 
@@ -81,18 +75,6 @@ recovers by RTO rather than selective retransmission. This is acceptable for the
 wired LAN this stack targets (loss ≈ 0), and pre-SACK Amiga stacks share the ceiling, but
 bulk transfers over lossy/congested paths will underperform. Fixing it is upstream lwIP
 work, not ABI work — revisit only if real-world use hits it.
-
-### Router-side first-packet drop (re-examine)
-
-The original symptom was the first inbound packet of a fresh through-NAT flow after some
-TX-idle being lost *upstream* of the NIC (it never reaches the MAC), suspected to be router
-hardware-NAT / flow-offload. Part of the early evidence turned out to rest on a probe host
-that is unreachable for every device on the LAN, so before pursuing the router theory the
-idle-then-connect case should be re-measured against hosts that verifiably answer. A 500 ms
-initial TCP RTO in `lwipopts.h` mitigates it for now (the first SYN retransmit beats apps'
-1 s connect timeouts). Note this can look like the (now-fixed) core-lock freeze at the app
-level — distinguish via the MIB counters (a real router drop shows the frame never reaching
-the MAC).
 
 ## Resolved, with caveats
 

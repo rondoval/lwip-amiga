@@ -155,6 +155,32 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
             else
                 *valp = (ULONG)base->hErrno;
             break;
+        /* syslog config (openlog/setlogmask). Stored per-opener and honoured by
+         * bsd_vsyslog; the C runtimes set LOGTAGPTR at socket-init time. */
+        case SBTC_LOGSTAT:
+            if (isSet)
+                base->logStat = *valp;
+            else
+                *valp = base->logStat;
+            break;
+        case SBTC_LOGTAGPTR:
+            if (isSet)
+                base->logTagPtr = (STRPTR)*valp;
+            else
+                *valp = (ULONG)base->logTagPtr;
+            break;
+        case SBTC_LOGFACILITY:
+            if (isSet)
+                base->logFacility = *valp;
+            else
+                *valp = base->logFacility;
+            break;
+        case SBTC_LOGMASK:
+            if (isSet)
+                base->logMask = *valp;
+            else
+                *valp = base->logMask;
+            break;
         case SBTC_DTABLESIZE:
             if (isSet)
                 return index; /* fixed in this implementation */
@@ -199,6 +225,10 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
         case SBTC_HAVE_LOCAL_DATABASE_API:
         case SBTC_HAVE_ADDRESS_CONVERSION_API:
         case SBTC_HAVE_GETHOSTADDR_R_API:
+        /* interface API: the read-only query subset (ObtainInterfaceList /
+         * QueryInterfaceTagList) is implemented; the config LVOs refuse
+         * gracefully with EINVAL (sb_ifquery.c). */
+        case SBTC_HAVE_INTERFACE_API:
             if (isSet)
                 return index;
             *valp = TRUE;
@@ -207,7 +237,6 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
          * reports zero channels. Answering keeps the taglist succeeding
          * rather than erroring on an unrecognised tag. */
         case SBTC_HAVE_ROUTING_API:
-        case SBTC_HAVE_INTERFACE_API:
         case SBTC_HAVE_MONITORING_API:
         case SBTC_HAVE_STATUS_API:
         case SBTC_HAVE_SERVER_API:
@@ -479,12 +508,11 @@ LONG bsd_gethostname(STRPTR name asm("a0"), LONG namelen asm("d0"),
                      struct SocketBase *base asm("a6"))
 {
     KprintfH("[bsdsocket] %s: namelen=%ld\n", __func__, namelen);
-    (void)base;
-    static const char hostname[] = "amiga";
+    const char *hostname = SB_ROOT(base)->netCfg.cfg_Hostname;
     if (name == NULL || namelen <= 0)
         return -1;
     ULONG i;
-    for (i = 0; i < sizeof(hostname) && (LONG)i < namelen - 1; i++)
+    for (i = 0; hostname[i] != '\0' && (LONG)i < namelen - 1; i++)
         name[i] = hostname[i];
     name[i] = '\0';
     return 0;

@@ -55,15 +55,23 @@ table included — so every opening task gets its own `errno`, fd table, wait si
   default) surface as `EINTR` and are re-posted. `SO_SNDTIMEO`/`SO_RCVTIMEO` add a
   per-call deadline via the opener's `timer.device` request (`sb_wait_to`).
 - **The in-library stack task** (`sb_stack.c`) is a DOS process started under the root's
-  open lock by the first `OpenLibrary()`. It initializes `netstack`, attaches the network
-  driver over the netdev ABI, brings the interface up with DHCP, then ticks
-  `sys_check_timeouts()` every 100 ms until library expunge. It runs at **priority 10**
-  (above the dynamic-scheduler band, matching the driver's unit task) so it is not starved
-  by CPU-bound application tasks.
+  open lock by the first `OpenLibrary()`. It reads `ENV:netstack.prefs` (`sb_config.c`:
+  driver selection from `DEVS:Networks/`, DHCP or a static address, DNS, hostname — flat
+  `KEY = VALUE`, every key optional, missing file = DHCP on `networks/genet.device`
+  unit 0), initializes `netstack`, attaches the configured driver over the netdev ABI,
+  brings the interface up, then ticks `sys_check_timeouts()` every 100 ms until library
+  expunge. It runs at **priority 10** (above the dynamic-scheduler band, matching the
+  driver's unit task) so it is not starved by CPU-bound application tasks.
 
 The socket-call surface, resolver, event API and inet utilities live in `sb_api.c`,
 `sb_select.c`, `sb_misc.c`, `sb_misc2.c` and `sb_gai.c`; the generated LVO jump table is
 `vectors.c` (139 slots emitted from the SFD by `scripts/gen-vectors.py`).
+
+Interface **status** is read-only (`sb_ifquery.c`): the Roadshow interface-query LVOs
+(`ObtainInterfaceList` / `QueryInterfaceTagList`) report the live netif's address, mask,
+MTU, MAC, link state and DNS, which the bundled `netinfo` CLI prints ifconfig-style. The
+interface-*config* LVOs are declined (the stack is configured only from
+`ENVARC:netstack.prefs`); they refuse with `EINVAL`.
 
 ## Layer 2 — lwIP core + Amiga port layer (`lwip/`, `port/amiga/`)
 
@@ -91,15 +99,20 @@ all Amiga-specific code lives in the port layer, which lwIP is designed to keep 
 This binds a lwIP `netif` to a netdev driver. `netdevif_create` allocates the RX wrapper
 pool (sized from the driver's advertised `ndc_RxPoolBufs`), adds the netif with
 `ethernet_input`, and programs the per-netif checksum switches from the negotiated caps
-(disabling lwIP's own TCP/UDP checksum gen/check where the hardware offloads it).
+(disabling lwIP's own TCP/UDP checksum gen/check where the hardware offloads it). The
+glue also computes the RX-hold budget the opener declares at ATTACH
+(`netdevif_rx_hold_budget`: receive windows × expected streams + slack — port-layer
+knowledge the exec side doesn't have).
 
 - **TX** (`ndif_linkoutput`): converts a pbuf chain into a `NetDevSg[]` scatter-gather
   list, computes the L4 checksum start/insert offsets and seeds the pseudo-header,
   `pbuf_ref`s the frame as the completion cookie, and calls `ndo_TxSubmit`. `nso_TxDone`
   frees completed cookies.
-- **RX** (`ndif_rx_input`): wraps each driver buffer as a zero-copy `pbuf_custom`,
-  optionally folds/verifies the RAW checksum, and feeds `ethernet_input`. Freeing the
-  pbuf calls `ndo_RxRelease(cookie)`, recycling the buffer to the driver.
+- **RX** (`ndif_rx_input`): folds/verifies the RAW checksum of each frame in a pre-pass
+  *before* taking the core lock (the fold reads only frame bytes, and `nso_RxInput` runs
+  on the driver's unit task alone), then, under the lock, wraps each surviving buffer as
+  a zero-copy `pbuf_custom` and feeds `ethernet_input`. Freeing the pbuf calls
+  `ndo_RxRelease(cookie)`, recycling the buffer to the driver.
 - **Link**: `nso_LinkChange` drives `netif_set_link_up`/`down`.
 
 ---
@@ -112,14 +125,24 @@ implement it. It follows the fleet's context-ABI idiom (proven by `xhci.device`)
 drivers carry no writable globals, so every exported call takes an explicit context as its
 first argument.
 
-- **Control ops are synchronous `IOStdReq` commands** (`NETDEV_CMD_*`, base `0x4900`):
+- **Control ops are synchronous `IOStdReq` commands** (`NETDEV_CMD_*`, base `0x8900`):
   ATTACH, START, STOP, DETACH, GET_LINK, GET_STATS, SET_COALESCE, SET_MAC, and the
-  declarative RX filter. They are serialized by the driver's unit task.
+  declarative RX filter. They are serialized by the driver's unit task. The base sits in
+  the NSD third-party command area (the NSD standard reserves `0x4000-0x7FFF` and
+  `0xC000-0xFFFF` for the OS); fleet allocations: nvme passthrough `0x8020..0x8024`,
+  xhci context ops `0x8800..0x881f`, netdev `0x8900..0x891f`.
 - **The datapath is direct C calls**, exchanged once at ATTACH. Two tables cross the
   boundary: `NetDevDrvOps` (driver provides `ndo_TxSubmit`, `ndo_RxRelease`,
   `ndo_DmaAlloc`, `ndo_DmaFree`) and `NetDevStackOps` (stack provides `nso_RxInput`,
-  `nso_TxDone`, `nso_LinkChange`). ATTACH negotiates the ABI version and returns
-  `NetDevCaps`, including `ndc_RxPoolBufs` (how many RX buffers the stack may hold).
+  `nso_TxDone`, `nso_LinkChange`). ATTACH negotiates the ABI version and the RX pool:
+  the stack declares its concurrent-hold budget (`nda_RxHoldReq`, derived from receive
+  windows × expected streams) and the driver answers with the enforced bound in
+  `NetDevCaps.ndc_RxPoolBufs` (ring + budget, clamped to its own limits — how many RX
+  buffers the stack may hold). Buffer *geometry* stays driver-internal; only the count
+  crosses the ABI. ATTACH likewise negotiates the MTU (`nda_MtuReq` in, `ndc_Mtu` out):
+  GENET pins 1500, but the field lets a jumbo-capable driver raise it, and
+  `NDCF_RX_SCATTER` + `NDRF_SOP`/`NDRF_EOP` reserve multi-buffer RX for frames larger than
+  one descriptor — so the frozen ABI covers jumbo without a future layout break.
 
 Design choices worth knowing:
 
@@ -141,6 +164,13 @@ Design choices worth knowing:
   `CSUM_VALID` for engines that verify and `CSUM_RAW` for engines that just sum (GENET);
   the glue folds RAW sums against the pseudo-header. The IPv4 header checksum stays in
   software.
+- **VLAN is in-band software (802.1Q), with hardware offload reserved.** GENET has no HW
+  tag insert/strip, so the tag rides inside the frame and lwIP's VLAN hooks tag/filter a
+  single configured VID (`VLAN =` prefs key). The checksum offloads stay on for tagged
+  frames because the offset helpers key off the VLAN-shifted L3 position (as mainline Linux
+  does). The ABI reserves `ntd_VlanTci`/`nrd_VlanTci` + the `NDTF_VLAN_INSERT`/
+  `NDRF_VLAN_STRIPPED` flags + `NDCF_VLAN_TX_INSERT`/`NDCF_VLAN_RX_STRIP` caps so a future
+  NIC with hardware insert/strip needs no layout break.
 - **Cache maintenance is driver-side only** — the driver knows DMA timing and the platform
   contract (68040 cache-line ownership), keeping the port layer platform-agnostic.
 - **Quiesce is exact.** STOP completes every in-flight TX cookie before replying; DETACH
@@ -153,6 +183,8 @@ Design choices worth knowing:
 |---|---|
 | `NDTF_L4CSUM` + csum start/offset | TSB (transmit status block) offset-based checksum engine (`DMA_TX_DO_CSUM`) |
 | `NDRF_CSUM_RAW` + raw sum | RXCHK raw checksum in the 64-byte RSB (`RBUF_64B_EN`) |
+| VLAN (`NDCF_VLAN_*` caps) | not advertised — no HW tag offload; tags handled in-band by lwIP |
+| `ndc_Mtu` / `nda_MtuReq` | pinned at 1500 (`ENET_MAX_MTU_SIZE` budgets the tag; jumbo not wired) |
 | RX headroom for the RSB | driver-internal, never crosses the ABI |
 | `ndo_TxSubmit` SG segments | one GENET descriptor per segment; `ndc_TxMaxSegs` bounds a packet |
 | `ndo_DmaAlloc` | emu68-common `dma_mem` pool (Emu68 expansion RAM only) |
@@ -177,6 +209,44 @@ These are inputs to every decision above:
 
 ---
 
+## Multiple interfaces — design headroom
+
+v1 drives exactly one NIC, but the design deliberately leaves multi-interface support
+unblocked. What is already multi-ready:
+
+- **The ABI is fully per-context**: every `ndo_*`/`nso_*` call carries a context, ATTACH
+  is per-unit, and the only identity the ABI carries is `ndc_Mac`. Interface selection —
+  (device name, unit) — correctly lives outside the ABI, in the opener.
+- **The glue is parameterized**: `netdev_if.c` recovers its `NetdevIf` from `nif->state`
+  everywhere; multiple instances would coexist as-is.
+- **lwIP and the socket layer iterate**: the multi-netif list is compiled in
+  (`NETIF_FOREACH` is already used), DHCP is per-netif, DNS is global by design.
+- **The config schema reserves the extension**: unprefixed `netstack.prefs` keys are
+  interface 0; a future `IFn_` prefix (`IF1_DEVICE`, `IF1_MODE`, ...) adds interfaces
+  without a format break (unknown keys are ignored today).
+
+The blockers, in ascending difficulty:
+
+1. *Cosmetic*: the fixed netif name `"nd"` and the unconditional `netif_set_default` —
+   index the name, make the default route config-driven.
+2. *Structural, small*: the single `NetdevIf` embedded in the stack task's context and
+   the one-shot up/down path — becomes an array of interface slots driven by an `IFn_`
+   config loop.
+3. *The hard one*: `netstack.ns_ActiveNetdev` routes the **entire** lwIP heap — every
+   `PBUF_RAM`/TX allocation — to one driver's DMA allocator, and lwIP allocates TX pbufs
+   *before* routing picks the egress netif. Preferred resolution: a shared stack-owned
+   DMA pool — every candidate NIC on this platform shares the PiStorm PCIe reachability
+   constraint and emu68-common's `dma_mem` already encapsulates the predicate + pool —
+   at the cost of bending the "TX memory comes from the driver's allocator" doctrine
+   (would need an attach-time compatible-allocator capability in the ABI). Fallbacks:
+   copy at `linkoutput` when the egress unit differs from the allocating one, or forbid
+   heterogeneous DMA domains.
+
+The gating item is a second netdev driver existing at all (genet is hard-limited to
+unit 0), not the stack refactor — revisit when one is real.
+
+---
+
 ## Build outputs
 
 Built on the m68k cross-toolchain through the **emu68-driver-stack** superproject (which
@@ -189,7 +259,7 @@ supplies the toolchain and `emu68-common`); see the [README](../README.md) for c
 - The **`Netdev`** cmake package — `include/netdev.h` exported as
   `Netdev::netdev_headers`; this is how `genet.device` consumes the contract.
 - Diagnostics: `netdev-stats` (a second netdev opener reading live loss-point counters and
-  driving `SET_COALESCE`) and `sockbench` (a LAN TCP throughput benchmark; built but not
+  driving `SET_COALESCE`) and `sockbench` (a LAN TCP/UDP throughput benchmark; built but not
   shipped).
 
 **Versioning.** The component/release version lives in the top-level
