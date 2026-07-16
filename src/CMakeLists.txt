@@ -19,6 +19,11 @@ math(EXPR BSDSOCKET_REVISION "${lwip-amiga_VERSION_MAJOR} * 100 + ${lwip-amiga_V
 string(TIMESTAMP CURRENT_DATE "(%d.%m.%Y)")
 set(VERSTRING "$VER: ${PROJECT_NAME} ${BSDSOCKET_ABI_MAJOR}.${BSDSOCKET_REVISION} ${CURRENT_DATE}")
 
+# SBTC_RELEASESTRPTR: identifies the STACK (component release), not the library
+# ABI — what Roadshow reports as "Roadshow 4.364". Apps and conformance suites
+# display it and match known behavior by prefix, so keep "lwip-amiga" stable.
+set(RELEASE_STRING "lwip-amiga ${lwip-amiga_VERSION_MAJOR}.${lwip-amiga_VERSION_MINOR}")
+
 # Shared warning flags. -m68040 / -fomit-frame-pointer are set stack-wide by the
 # toolchain (cmake/toolchain.cmake) and are not repeated per target.
 set(LWIP_WARN -Wall -Wextra)
@@ -83,6 +88,7 @@ target_compile_definitions(bsdsocket_library
         LIBRARY_VERSION=${BSDSOCKET_ABI_MAJOR}
         LIBRARY_REVISION=${BSDSOCKET_REVISION}
         LIBRARY_NAME="${PROJECT_NAME}"
+        RELEASE_STRING="${RELEASE_STRING}"
 )
 
 target_compile_options(bsdsocket_library

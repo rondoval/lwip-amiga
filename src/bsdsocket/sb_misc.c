@@ -15,6 +15,9 @@
 
 #include "netstack.h"
 
+/* SBTC_RELEASESTRPTR (RELEASE_STRING from the build): "lwip-amiga x.y" */
+static const char releaseString[] = RELEASE_STRING;
+
 /* --------------------------------------------------------------- errno --- */
 
 void sb_set_errno(struct SocketBase *base, LONG code)
@@ -216,6 +219,11 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
             if (!isSet)
                 return index;
             base->hErrnoPtr = (APTR)*valp != NULL ? (LONG *)*valp : &base->hErrno;
+            break;
+        case SBTC_RELEASESTRPTR:
+            if (isSet)
+                return index;
+            *valp = (ULONG)releaseString;
             break;
 
         /* Roadshow feature-capability probes (read-only): report which

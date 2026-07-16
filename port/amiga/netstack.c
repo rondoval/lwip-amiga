@@ -13,6 +13,7 @@
 #include <timing.h> /* get_time(): BCM 1 MHz system timer, lock profiling */
 
 #include <lwip/init.h>
+#include <lwip/netif.h>
 #include <lwip/sys.h>
 #include <lwip/timeouts.h>
 
@@ -61,8 +62,31 @@ void netstack_lock(void)
 #endif
 }
 
+static BOOL netstack_loopback_pending(void)
+{
+    struct netif *nif;
+    NETIF_FOREACH(nif)
+    {
+        if (nif->loop_first != NULL)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 void netstack_unlock(void)
 {
+    /* Loopback delivery. NO_SYS=1 means nothing schedules netif_poll():
+     * every packet lwIP routes to 127.0.0.1 (or a netif's own address)
+     * just sits on that netif's loop queue. Drain it at the outermost
+     * unlock — still under the lock, in whatever context produced the
+     * packets — so loopback traffic completes synchronously. netif_poll()
+     * drains same-netif chains itself; the outer while covers packets a
+     * drained one enqueues on another netif. */
+    if (netstack.ns_Core.ss_NestCount == 1)
+    {
+        while (netstack_loopback_pending())
+            netif_poll_all();
+    }
 #ifdef DEBUG
     if (netstack.ns_Core.ss_NestCount == 1)
     {

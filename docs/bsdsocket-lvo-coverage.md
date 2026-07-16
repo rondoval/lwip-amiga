@@ -96,7 +96,7 @@ All 46 are implemented.
 | `recvmsg` | −276 | ✅ | ✅ done | |
 | `gethostname` | −282 | ✅ | ✅ done | |
 | `gethostid` | −288 | ✅ | ✅ done | |
-| `SocketBaseTagList` (+ `SocketBaseTags`) | −294 | ✅ | ✅ done | errno/h_errno wiring, signal masks, syslog config (`SBTC_LOG*`), and `SBTC_HAVE_*` capability probes (see note above). The C runtimes set `SBTC_LOGTAGPTR` at socket-init — declining it aborts init. |
+| `SocketBaseTagList` (+ `SocketBaseTags`) | −294 | ✅ | ✅ done | errno/h_errno wiring, signal masks, syslog config (`SBTC_LOG*`), `SBTC_RELEASESTRPTR` (GET-only, "lwip-amiga x.y"), and `SBTC_HAVE_*` capability probes (see note above). The C runtimes set `SBTC_LOGTAGPTR` at socket-init — declining it aborts init. |
 | `GetSocketEvents` | −300 | ✅ | ✅ done | |
 
 *(LVOs −306…−360 are 10 reserved slots.)*

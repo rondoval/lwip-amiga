@@ -276,6 +276,7 @@ struct sb_addrinfo
 #define SBTC_ERRNOWORDPTR 22
 #define SBTC_ERRNOLONGPTR 24
 #define SBTC_HERRNOLONGPTR 25
+#define SBTC_RELEASESTRPTR 29 /* GET-only: stack-identifying version string */
 
 /* Roadshow feature-capability tags (SBTM_GETREF(...) probes): an opener reads
  * these through SocketBaseTagList to learn which extension LVO groups this
