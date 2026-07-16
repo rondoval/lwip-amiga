@@ -30,7 +30,22 @@ struct NdRxWrap
 
 #define NDIF_MAX_STACK_SEGS 16
 #define NDIF_MIN_WRAPS      64
-#define NDIF_RX_CHUNK       32 /* covers genet's RX batch in one lock hold */
+/* Upper bound on frames processed per netstack_lock() hold. Kept >= the
+ * driver's ND_RX_BATCH so a whole driver batch lands in ONE lock hold (no
+ * mid-batch re-lock). This is a ceiling, not a target: the RX lock cadence is
+ * swept driver-side via ND_RX_BATCH + budget (see bcmgenet.c). 64 leaves head-
+ * room for that sweep without ever splitting a batch. Sizes the drop[] VLA. */
+#define NDIF_RX_CHUNK       64
+
+/* Fairness yield stride: during an unflow-controlled RX flood (a UDP blast at
+ * line rate) the unit task processes every frame under ns_Core while the app
+ * task queues on the lock to drain its socket — starving it, so its recv queue
+ * overflows and ~everything is dropped past the app. Every this-many frames,
+ * IF a task is actually queued on ns_Core, hand the FIFO lock over so the app
+ * drains (and frees pool buffers) before we fill its queue with drops. Gated on
+ * ss_QueueCount, so the uncontended fast path never pays. Tunable: smaller =
+ * fairer to the app but more lock handoffs (2 context switches each). */
+#define NDIF_RX_YIELD_STRIDE 8u
 
 static BOOL ndif_rx_csum_ok(const struct NetDevRxDesc *d, ULONG raw);
 #ifdef DEBUG
@@ -56,6 +71,7 @@ static ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULON
     // KprintfH("[netdevif] %s: count %lu\n", __func__, count);
     struct NetdevIf *ndi = stackctx;
     ULONG consumed = 0;
+    ULONG since_yield = 0;
 
     while (consumed < count)
     {
@@ -129,6 +145,18 @@ static ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULON
 
             if (ndi->ndi_Netif.input(p, &ndi->ndi_Netif) != ERR_OK)
                 pbuf_free(p);
+
+            /* Fairness yield (see NDIF_RX_YIELD_STRIDE): under contention, hand
+             * the FIFO lock to a queued app task so it drains its socket queue
+             * mid-batch instead of starving. The loop head re-reads
+             * ndi_FreeWraps after the relock, so wraps freed meanwhile are seen. */
+            if (++since_yield >= NDIF_RX_YIELD_STRIDE &&
+                netstack.ns_Core.ss_QueueCount > 0)
+            {
+                since_yield = 0;
+                netstack_unlock();
+                netstack_lock();
+            }
         }
         netstack_unlock();
     }

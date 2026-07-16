@@ -765,6 +765,7 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
          * are trusted — the chain-wide tot_len is u16 and the backlog
          * under a 256 KB window overflows it (the old single-counter
          * consume spun forever under the core lock exactly there). */
+        ULONG acked = 0;
         while (copied < len && s->rxq != NULL)
         {
             struct pbuf *run = s->rxq;
@@ -788,8 +789,7 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
                 copied += (LONG)n;
                 s->rxBytes -= n;
                 pbuf_remove_header(h, n);
-                if (s->pcb.tcp != NULL)
-                    tcp_recved(s->pcb.tcp, (u16_t)n);
+                acked += n;
                 continue; /* copied == len now; the loop exits */
             }
 
@@ -818,8 +818,20 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
                 pbuf_free(p);
                 p = nx;
             }
-            if (s->pcb.tcp != NULL)
-                tcp_recved(s->pcb.tcp, (u16_t)take);
+            acked += take;
+        }
+
+        /* One window update for the whole drain pass instead of one per run:
+         * shortens the app-task lock hold (which starves RX injection) and
+         * coalesces the ACK/tcp_output burst. Flushed here — before the loop
+         * either blocks in sb_wait_to or breaks to return — so the receive
+         * window never stays closed across a wait. tcp_recved takes a u16, so
+         * a >64 KB drain is emitted in <=0xFFFF chunks. */
+        while (acked > 0 && s->pcb.tcp != NULL)
+        {
+            u16_t n = (acked > 0xFFFF) ? 0xFFFF : (u16_t)acked;
+            tcp_recved(s->pcb.tcp, n);
+            acked -= n;
         }
 
         if (copied >= len || !waitall)

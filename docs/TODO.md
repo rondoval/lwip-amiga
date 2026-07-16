@@ -13,21 +13,7 @@ For how the stack is put together, see [architecture.md](architecture.md).
   done and the decision on each stub — is [bsdsocket-lvo-coverage.md](bsdsocket-lvo-coverage.md).
   Throughput is being actively optimized (see below) and a few of the later LVO waves
   still want a HW retest.
-- **ABI freeze** — the two open pre-freeze questions (VLAN, jumbo) are now settled; the v1
-  layout carries the reserved surface both need, so it can be frozen (see below).
 
-## `netdev` ABI — pre-freeze questions, resolved
-
-- **VLAN** — implemented in-band via lwIP's software VLAN (single VID, `VLAN = vid[,pcp]`
-  prefs key). GENET has no hardware tag insert/strip, so the 802.1Q tag rides inside the frame;
-  the L4 checksum offloads stay on because the TX/RX offset helpers are tag-aware
-  (`ndif_l4_offsets`/`ndif_rx_csum_ok`), matching how mainline Linux drives GENET. The frozen
-  ABI also *reserves* hardware-offload surface for a future NIC: `ntd_VlanTci`/`nrd_VlanTci`,
-  `NDTF_VLAN_INSERT`/`NDRF_VLAN_STRIPPED`, and `NDCF_VLAN_TX_INSERT`/`NDCF_VLAN_RX_STRIP`.
-- **Jumbo frames** — ABI surface finalized: `nda_MtuReq` (IN) / `ndc_Mtu` (OUT) negotiate the
-  MTU at ATTACH, and `NDCF_RX_SCATTER` + `NDRF_SOP`/`NDRF_EOP` reserve multi-buffer RX for
-  frames past a single descriptor. GENET still pins `ndc_Mtu` at 1500 (no datapath work this
-  release); a future jumbo-capable build raises it with no further ABI break.
 
 ## Configuration UX & tools
 
@@ -66,7 +52,34 @@ Levers in flight / planned:
   ceiling (throughput = `TCP_WND/RTT`): ~70 → ~270 Mbit at 30 ms RTT. It does
   nothing for the LAN download ceiling (still `ns_Core`-bound) or for lossy paths
   (still RTO recovery, see below). Going past 1 MB is wasted until those two land.
-- **Next candidates** — batching `tcp_recved`, larger `ND_RX_BATCH`.
+- **Cheap RX cluster (HW-measured 2026-07-16: TCP a few % up)** — levers landed:
+  - *`tcp_recved` batched across the whole `recv()` drain pass* (one window update per
+    pass instead of one per detached run, u16-chunked, flushed before any wait/return) —
+    shortens the app-task lock hold that starves RX injection.
+  - *RX lock-cadence sweep knobs made explicit.* `NDIF_RX_CHUNK` raised to 64 as the
+    per-hold ceiling so a whole driver batch always lands in one lock hold; the sweep is
+    now driver-only via `ND_RX_BATCH` + `budget` (both documented as the knobs). Values
+    left at 32/64 — the 32→48→64 sweep is a HW step (watch rxprof `us/fr` vs `maxflush`).
+  - *Recycle `CachePreDMA` elision — attempted, REVERTED, do not retry.* Eliding the
+    pre-arm clean+invalidate collapsed `sockbench udprx` to ~1% while netdev-stats showed
+    line rate arriving with zero driver drops. RX pbufs are **not** read-only: lwIP's
+    `ip4_reass` writes its helper struct over the IP header of every queued fragment,
+    leaving dirty lines; a dirty line at DMA time corrupts the frame regardless of the
+    post-DMA invalidate (eviction writes it back over the payload, and Cortex-A cores
+    execute `dc ivac` on a dirty line as clean+invalidate). The pre-arm
+    clean+invalidate is the platform-wide device-writes-RAM contract (same as nvme's
+    `nvme_cache_flush(to_device=FALSE)` and xhci's IN-transfer flush + whole-line gate).
+- **Socket-layer RX visibility + fairness (implemented with the above)** —
+  `ns_DgramRxDrops` counts UDP/RAW datagrams dropped at the socket queue
+  (`SB_DGRAM_QMAX`) — a loss point netdev-stats cannot see — printed by `netstack_tick`
+  under DEBUG; and `ndif_rx_input` yields `ns_Core` every `NDIF_RX_YIELD_STRIDE` frames
+  when a task is queued on the lock, so an unflow-controlled RX blast cannot starve the
+  draining app.
+- **Remaining big-ticket lever (chosen, not yet taken)** — the dominant RX cost is
+  per-segment lwIP protocol processing under `ns_Core` (~58 % of wall, ~23 µs/segment);
+  none of the cheap cluster touches it. Software RX coalescing (GRO-lite: merge in-order
+  same-flow segments within an RX batch, feed lwIP once) is the structural way to cut how
+  often the protocol stack is traversed. Pre-lock csum offload removes GRO's hardest part.
 
 ### TCP loss handling
 
