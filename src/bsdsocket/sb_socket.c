@@ -401,6 +401,7 @@ static void sb_dgram_queue(struct SbSocket *s, struct pbuf *p, const ip_addr_t *
 
     if (s->ndgrams >= SB_DGRAM_QMAX)
     {
+        root->dgramRxDrops++; /* socket queue full (udpstat fullsock) */
         pbuf_free(p);
         return;
     }
@@ -408,6 +409,7 @@ static void sb_dgram_queue(struct SbSocket *s, struct pbuf *p, const ip_addr_t *
     struct SbDgram *d = AllocPooled(root->sockPool, sizeof(struct SbDgram));
     if (d == NULL)
     {
+        root->dgramRxDrops++;
         pbuf_free(p);
         return;
     }
@@ -509,8 +511,8 @@ void sb_sock_free(struct SocketBase *base, struct SbSocket *s)
                 tcp_recv(pcb, NULL);
                 tcp_sent(pcb, NULL);
                 tcp_err(pcb, NULL);
-                if (s->lingerOn && s->lingerTime == 0)
-                    tcp_abort(pcb); /* SO_LINGER(0): hard close, RST */
+                if ((s->lingerOn && s->lingerTime == 0) || s->forceRst)
+                    tcp_abort(pcb); /* SO_LINGER(0) or expired linger: RST */
                 else if (tcp_close(pcb) != ERR_OK)
                     tcp_abort(pcb);
             }

@@ -29,12 +29,39 @@
 #include <lwip/dns.h>
 #include <lwip/ip4_addr.h>
 #include <lwip/netif.h>
+#include <lwip/stats.h>
 
 #include "netstack.h"
 
 static BOOL sb_if_is_loopback(const struct netif *nif)
 {
     return nif->name[0] == 'l' && nif->name[1] == 'o';
+}
+
+/* Tags whose answers come from the NIC-stats cache / driver caps — data that
+ * describes only the active netdev's interface, never e.g. loopback. */
+static BOOL sb_ifq_is_nic_tag(ULONG tag)
+{
+    switch (tag)
+    {
+    case IFQ_PacketsReceived:
+    case IFQ_PacketsSent:
+    case IFQ_BadData:
+    case IFQ_Overruns:
+    case IFQ_InputDrops:
+    case IFQ_OutputDrops:
+    case IFQ_InputErrors:
+    case IFQ_OutputErrors:
+    case IFQ_GetBytesIn:
+    case IFQ_GetBytesOut:
+    case IFQ_LastStart:
+    case IFQ_BPS:
+    case IFQ_NumReadRequests:
+    case IFQ_NumWriteRequests:
+        return TRUE;
+    default:
+        return FALSE;
+    }
 }
 
 /* Fill a caller-provided sockaddr as an AF_INET sockaddr_in. addr is in
@@ -110,7 +137,8 @@ LONG bsd_QueryInterfaceTagList(STRPTR name asm("a0"), struct TagItem *tags asm("
         return -1;
     }
 
-    struct SbNetConfig *cfg = &SB_ROOT(base)->netCfg;
+    struct SocketBase *root = SB_ROOT(base);
+    struct SbNetConfig *cfg = &root->netCfg;
     LONG result = 0;
 
     netstack_lock();
@@ -124,6 +152,12 @@ LONG bsd_QueryInterfaceTagList(STRPTR name asm("a0"), struct TagItem *tags asm("
 
     ULONG addr = ip4_addr_get_u32(netif_ip4_addr(nif));
     ULONG mask = ip4_addr_get_u32(netif_ip4_netmask(nif));
+    /* The NIC-stats cache and driver caps describe exactly one netif — the
+     * active netdev's. Counter/link tags are answered only for that interface
+     * (and skipped for e.g. loopback), so a query never gets another NIC's
+     * numbers. */
+    BOOL isNic = netstack.ns_ActiveNetdev != NULL &&
+                 nif == &netstack.ns_ActiveNetdev->ndi_Netif;
 
     for (struct TagItem *t = tags; t->ti_Tag != TAG_END;)
     {
@@ -140,6 +174,11 @@ LONG bsd_QueryInterfaceTagList(STRPTR name asm("a0"), struct TagItem *tags asm("
         if (t->ti_Tag == TAG_IGNORE || !(t->ti_Tag & TAG_USER))
         {
             t++;
+            continue;
+        }
+        if (!isNic && sb_ifq_is_nic_tag(t->ti_Tag))
+        {
+            t++; /* counters describe the NIC only; leave storage untouched */
             continue;
         }
 
@@ -178,7 +217,9 @@ LONG bsd_QueryInterfaceTagList(STRPTR name asm("a0"), struct TagItem *tags asm("
             sb_if_set_sockaddr(d, mask);
             break;
         case IFQ_State:
-            *(LONG *)d = netif_is_link_up(nif) ? SM_Up : SM_Down;
+            /* operational readiness: admin-up AND link-up (the autodoc's
+             * "ready to receive and transmit" axis, not admin state alone) */
+            *(LONG *)d = (netif_is_up(nif) && netif_is_link_up(nif)) ? SM_Up : SM_Down;
             break;
         case IFQ_AddressBindType:
             *(LONG *)d = cfg->cfg_Dhcp ? IFABT_Dynamic : IFABT_Static;
@@ -189,8 +230,85 @@ LONG bsd_QueryInterfaceTagList(STRPTR name asm("a0"), struct TagItem *tags asm("
         case IFQ_SecondaryDNSAddress:
             sb_if_set_sockaddr(d, ip4_addr_get_u32(ip_2_ip4(dns_getserver(1))));
             break;
+
+        /* --- counters: from the once-a-second NIC-stats cache (zero until
+         * the first poll); answered only for the active NIC's netif — the
+         * isNic gate above skips them for any other interface --- */
+        case IFQ_PacketsReceived:
+            *(ULONG *)d = root->netStats.nds_RxPackets.ndu_Lo;
+            break;
+        case IFQ_PacketsSent:
+            *(ULONG *)d = root->netStats.nds_TxPackets.ndu_Lo;
+            break;
+        case IFQ_BadData:
+            *(ULONG *)d = root->netStats.nds_RxErrors.ndu_Lo;
+            break;
+        case IFQ_Overruns:
+            *(ULONG *)d = root->netStats.nds_RxOverruns + root->netStats.nds_RxFifoOvfl;
+            break;
+        case IFQ_UnknownTypes:
+            *(ULONG *)d = nif->mib2_counters.ifinunknownprotos;
+            break;
+        case IFQ_InputDrops:
+            *(LONG *)d = (LONG)root->netStats.nds_RxDropped.ndu_Lo;
+            break;
+        case IFQ_OutputDrops:
+            *(LONG *)d = (LONG)(root->netStats.nds_TxDropped.ndu_Lo + root->netStats.nds_TxBad);
+            break;
+        case IFQ_InputErrors:
+            *(LONG *)d = (LONG)root->netStats.nds_RxErrors.ndu_Lo;
+            break;
+        case IFQ_OutputErrors:
+            *(LONG *)d = (LONG)root->netStats.nds_TxErrors.ndu_Lo;
+            break;
+        case IFQ_IPDrops:
+            *(LONG *)d = (LONG)lwip_stats.ip.drop;
+            break;
+        case IFQ_ARPDrops:
+            *(LONG *)d = (LONG)lwip_stats.etharp.drop;
+            break;
+        case IFQ_GetBytesIn:
+            sb_squad_from_u64(d, root->netStats.nds_RxBytes);
+            break;
+        case IFQ_GetBytesOut:
+            sb_squad_from_u64(d, root->netStats.nds_TxBytes);
+            break;
+        case IFQ_LastStart:
+        {
+            struct sb_timeval *tv = d;
+            tv->tv_secs = root->netLastStart.tv_secs;
+            tv->tv_micro = root->netLastStart.tv_micro;
+            break;
+        }
+
+        /* --- link/driver-derived scalars --- */
+        case IFQ_BPS:
+            *(LONG *)d = (LONG)root->netLink.ndls_SpeedMbps * 1000000;
+            break;
+        case IFQ_HardwareMTU:
+            *(LONG *)d = isNic ? netstack.ns_ActiveNetdev->ndi_Caps.ndc_Mtu
+                               : nif->mtu;
+            break;
+        /* isNic (checked above) guarantees ns_ActiveNetdev != NULL here */
+        case IFQ_NumReadRequests:
+            *(LONG *)d = netstack.ns_ActiveNetdev->ndi_Caps.ndc_RxRingSlots;
+            break;
+        case IFQ_NumWriteRequests:
+            *(LONG *)d = netstack.ns_ActiveNetdev->ndi_Caps.ndc_TxRingSlots;
+            break;
+        case IFQ_Metric:
+            *(LONG *)d = 0; /* single-homed host, no routing metric */
+            break;
+        case IFQ_GetDebugMode:
+            *(LONG *)d = FALSE;
+            break;
+
         default:
-            break; /* unrecognized query tag: ignore */
+            /* Unanswerable here (documented): the Max/Pending request tags,
+             * Input/OutputMulticasts (MIB-2 lumps broadcast+multicast, so a
+             * value would be wrong), AddressLeaseExpires, GetSANA2CopyStats.
+             * Caller storage is left untouched. */
+            break;
         }
         t++;
     }

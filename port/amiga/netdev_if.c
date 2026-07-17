@@ -363,9 +363,28 @@ static err_t ndif_linkoutput(struct netif *nif, struct pbuf *p)
         }
     }
 
+    /* Zero-copy aliasing guard. A ref beyond the owner's single hold means a
+     * previous transmission of this very pbuf is still armed in the TX ring
+     * (our in-flight ref is the extra one). lwIP rewrites TCP headers of
+     * queued segments IN PLACE on retransmit (ackno/wnd, plus our checksum
+     * seed below) — submitting the same memory again would let the NIC
+     * DMA-read a torn header and checksum it into wire-validity, which the
+     * peer answers with RST. Transmit a private copy instead; only the rare
+     * retransmit-while-armed pays it (Linux clones on retransmit for the
+     * same reason). */
+    struct pbuf *frame = p;
+    BOOL cloned = FALSE;
+    if (p->ref > 1)
+    {
+        frame = pbuf_clone(PBUF_RAW, PBUF_RAM, p);
+        if (frame == NULL)
+            return ERR_MEM; /* retry later; the armed copy stays intact */
+        cloned = TRUE;
+    }
+
     struct NetDevSg segs[NDIF_MAX_STACK_SEGS];
     UWORD nsegs = 0;
-    for (struct pbuf *q = p; q != NULL; q = q->next)
+    for (struct pbuf *q = frame; q != NULL; q = q->next)
     {
         segs[nsegs].nsg_Data = q->payload;
         segs[nsegs].nsg_Len = q->len;
@@ -378,11 +397,11 @@ static err_t ndif_linkoutput(struct netif *nif, struct pbuf *p)
     desc.ntd_Flags = 0;
     desc.ntd_CsumStart = 0;
     desc.ntd_CsumOffset = 0;
-    desc.ntd_Cookie = p;
+    desc.ntd_Cookie = frame;
 
     if (ndi->ndi_Caps.ndc_Features & NDCF_TX_L4CSUM)
     {
-        ULONG proto = ndif_l4_offsets(p, &desc.ntd_CsumStart, &desc.ntd_CsumOffset);
+        ULONG proto = ndif_l4_offsets(frame, &desc.ntd_CsumStart, &desc.ntd_CsumOffset);
         if (proto != 0xFFFF)
         {
             desc.ntd_Flags |= NDTF_L4CSUM;
@@ -394,13 +413,15 @@ static err_t ndif_linkoutput(struct netif *nif, struct pbuf *p)
     }
 
     /* The driver owns the frame until nso_TxDone; lwIP may free its
-     * reference right after we return. */
-    pbuf_ref(p);
+     * reference right after we return. A clone is born with the one ref
+     * that nso_TxDone's pbuf_free consumes. */
+    if (!cloned)
+        pbuf_ref(frame);
 
     LONG accepted = ndi->ndi_Ops->ndo_TxSubmit(ndi->ndi_Drv, &desc, 1);
     if (accepted != 1)
     {
-        pbuf_free(p);
+        pbuf_free(frame);
         return ERR_MEM; /* ring full; TCP retries on timer */
     }
 

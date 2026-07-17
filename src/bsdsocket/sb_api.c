@@ -30,7 +30,7 @@ static LONG sb_fail(struct SocketBase *base, LONG code)
 }
 
 /* parse an app sockaddr (4.4BSD, sin_len first) */
-static LONG sb_addr_in(const struct sb_sockaddr_in *sa, LONG salen, ip_addr_t *ip, u16_t *port)
+LONG sb_addr_in(const struct sb_sockaddr_in *sa, LONG salen, ip_addr_t *ip, u16_t *port)
 {
     KprintfH("[bsdsocket] %s: sa 0x%08lx salen %ld\n", __func__, (ULONG)sa, salen);
     if (sa == NULL || salen < 8)
@@ -851,14 +851,14 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
     return copied;
 }
 
-static LONG sb_dgram_recv(struct SocketBase *base, struct SbSocket *s,
-                          UBYTE *buf, LONG len, LONG flags,
-                          APTR from, LONG *fromlen)
+/* Block until a datagram is queued on @s. On success returns the head SbDgram
+ * with the core lock HELD — the caller consumes it and calls netstack_unlock().
+ * On failure returns NULL with the lock released and *err set. */
+static struct SbDgram *sb_dgram_wait(struct SocketBase *base, struct SbSocket *s,
+                                     LONG flags, LONG *err)
 {
-    KprintfH("[bsdsocket] %s: len %ld flags 0x%lx\n", __func__, len, (ULONG)flags);
+    KprintfH("[bsdsocket] %s: flags 0x%lx\n", __func__, (ULONG)flags);
     BOOL dontwait = s->nonblock || (flags & SB_MSG_DONTWAIT);
-    BOOL peek = (flags & SB_MSG_PEEK) != 0;
-    struct SocketBase *root = SB_ROOT(base);
     struct SbTimedWait tw = { 0, FALSE };
 
     netstack_lock();
@@ -866,25 +866,41 @@ static LONG sb_dgram_recv(struct SocketBase *base, struct SbSocket *s,
     {
         if (s->err != 0)
         {
-            LONG e = s->err;
+            *err = s->err;
             s->err = 0;
             netstack_unlock();
-            return sb_fail(base, e);
+            return NULL;
         }
         if (dontwait)
         {
             netstack_unlock();
-            return sb_fail(base, SB_EWOULDBLOCK);
+            *err = SB_EWOULDBLOCK;
+            return NULL;
         }
         LONG we = sb_wait_to(base, s->rcvTimeoMs, &tw);
         if (we != 0)
         {
             netstack_unlock();
-            return sb_fail(base, we);
+            *err = we;
+            return NULL;
         }
     }
+    return (struct SbDgram *)s->dgrams.mlh_Head;
+}
 
-    struct SbDgram *d = (struct SbDgram *)s->dgrams.mlh_Head;
+static LONG sb_dgram_recv(struct SocketBase *base, struct SbSocket *s,
+                          UBYTE *buf, LONG len, LONG flags,
+                          APTR from, LONG *fromlen)
+{
+    KprintfH("[bsdsocket] %s: len %ld flags 0x%lx\n", __func__, len, (ULONG)flags);
+    BOOL peek = (flags & SB_MSG_PEEK) != 0;
+    struct SocketBase *root = SB_ROOT(base);
+    LONG err = 0;
+
+    struct SbDgram *d = sb_dgram_wait(base, s, flags, &err);
+    if (d == NULL)
+        return sb_fail(base, err);
+
     ULONG n = d->p->tot_len;
     if (n > (ULONG)len)
         n = (ULONG)len; /* excess is discarded, BSD-style */
@@ -904,6 +920,62 @@ static LONG sb_dgram_recv(struct SocketBase *base, struct SbSocket *s,
 
     sb_addr_out(from, fromlen, addr, port);
     return (LONG)n;
+}
+
+/* recvmsg for datagram sockets: scatter the head datagram straight from its
+ * pbuf chain across the caller's iovs — no bounce buffer, no size cap. Excess
+ * beyond the total iov space is dropped and flagged with MSG_TRUNC. */
+LONG sb_dgram_recvmsg(struct SocketBase *base, struct SbSocket *s,
+                      struct sb_msghdr *mh, LONG flags)
+{
+    KprintfH("[bsdsocket] %s: flags 0x%lx\n", __func__, (ULONG)flags);
+    BOOL peek = (flags & SB_MSG_PEEK) != 0;
+    struct SocketBase *root = SB_ROOT(base);
+    LONG err = 0;
+
+    struct SbDgram *d = sb_dgram_wait(base, s, flags, &err);
+    if (d == NULL)
+        return sb_fail(base, err);
+
+    ULONG total = d->p->tot_len; /* datagram length is u16-bounded */
+    ULONG addr = d->addr;
+    UWORD port = d->port;
+
+    ULONG off = 0;
+    for (ULONG i = 0; i < mh->msg_iovlen && off < total; i++)
+    {
+        struct sb_iovec *iv = &mh->msg_iov[i];
+        if (iv->iov_len == 0)
+            continue;
+        ULONG want = total - off;
+        ULONG chunk = iv->iov_len < want ? iv->iov_len : want;
+        pbuf_copy_partial(d->p, iv->iov_base, (u16_t)chunk, (u16_t)off);
+        off += chunk;
+    }
+    if (off < total)
+        mh->msg_flags |= SB_MSG_TRUNC;
+
+    if (!peek)
+    {
+        RemoveMinNode(&d->node);
+        s->ndgrams--;
+        pbuf_free(d->p);
+        FreePooled(root->sockPool, d, sizeof(struct SbDgram));
+    }
+    netstack_unlock();
+
+    /* sender address, value-result: honour the caller's namelen */
+    if (mh->msg_name != NULL)
+    {
+        LONG namelen = (LONG)mh->msg_namelen;
+        sb_addr_out(mh->msg_name, &namelen, addr, port);
+        mh->msg_namelen = (ULONG)namelen;
+    }
+    else
+    {
+        mh->msg_namelen = 0;
+    }
+    return (LONG)off;
 }
 
 LONG bsd_recvfrom(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
@@ -1003,6 +1075,29 @@ LONG bsd_CloseSocket(LONG sock asm("d0"), struct SocketBase *base asm("a6"))
         return sb_fail(base, SB_EBADF);
 
     netstack_lock();
+    /* SO_LINGER with a non-zero timeout, on the last reference of a connected,
+     * blocking TCP socket: wait (bounded by lingerTime seconds) for queued
+     * data to drain and be acked before teardown. Each ACK wakes the opener
+     * via sb_tcp_sent_cb; on timeout forceRst makes sb_sock_free abort (RST)
+     * instead of closing gracefully. A non-blocking socket never blocks here —
+     * lwIP still drains gracefully in the background. */
+    if (s->type == SBT_TCP && s->refs == 1 && s->lingerOn && s->lingerTime > 0 &&
+        !s->nonblock && s->connected && base->timerReq != NULL && s->pcb.tcp != NULL)
+    {
+        struct SbTimedWait tw = { 0, FALSE };
+        while (s->pcb.tcp != NULL &&
+               (s->pcb.tcp->unsent != NULL || s->pcb.tcp->unacked != NULL))
+        {
+            LONG we = sb_wait_to(base, (ULONG)s->lingerTime * 1000, &tw);
+            if (we == SB_EWOULDBLOCK)
+            {
+                s->forceRst = TRUE; /* deadline expired: unsent data dies */
+                break;
+            }
+            if (we == SB_EINTR)
+                break; /* interrupted: proceed with a graceful close */
+        }
+    }
     sb_sock_free(base, s);
     netstack_unlock();
     base->fd[sock] = NULL;

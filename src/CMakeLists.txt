@@ -79,6 +79,7 @@ add_executable(bsdsocket_library
     bsdsocket/sb_ifquery.c
     bsdsocket/sb_gai.c
     bsdsocket/sb_rdns.c
+    bsdsocket/sb_netstat.c
     bsdsocket/end.c
 )
 

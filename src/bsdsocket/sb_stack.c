@@ -50,6 +50,13 @@ struct SbStackCtx
     BOOL devOpen;
     BOOL attached;
     BOOL started;
+
+    /* async NIC-stats poll: devIO cycles GET_STATS -> GET_LINK via SendIO so
+     * the 100 ms tick never blocks on the driver unit task; results publish
+     * into the root cache when the GET_LINK reply lands */
+    UBYTE statsPhase; /* 0 idle, 1 GET_STATS out, 2 GET_LINK out */
+    struct NetDevStats statsBuf;
+    struct NetDevLinkState linkBuf;
 };
 
 /* one instance; the library is a singleton and so is the stack */
@@ -209,6 +216,64 @@ static void sb_netdev_down(struct SbStackCtx *ctx)
     }
 }
 
+/* NIC-stats poll, asynchronous: the tick loop must never block on the driver
+ * unit task (a DoIO here would stall lwIP timer servicing by the driver's
+ * round-trip — worst exactly when the link is busy), and a netdev command must
+ * never be issued under netstack_lock (the unit task takes that lock in its RX
+ * path — deadlock). So the requests go out via SendIO and the replies are
+ * harvested from devPort: GET_STATS, then GET_LINK, then one brief locked
+ * publish into the root cache. */
+static void sb_netdev_send(struct IOStdReq *io, UWORD cmd, APTR data, ULONG len)
+{
+    KprintfH("[bsdsocket] %s: cmd 0x%04lx, len %lu\n", __func__, (ULONG)cmd, len);
+    io->io_Command = cmd;
+    io->io_Data = data;
+    io->io_Length = len;
+    io->io_Actual = 0;
+    SendIO((struct IORequest *)io);
+}
+
+static void sb_stats_kick(struct SbStackCtx *ctx)
+{
+    if (!ctx->started || ctx->statsPhase != 0)
+        return; /* previous cycle still in flight: skip this second */
+    sb_netdev_send(ctx->devIO, NETDEV_CMD_GET_STATS, &ctx->statsBuf, sizeof(ctx->statsBuf));
+    ctx->statsPhase = 1;
+}
+
+static void sb_stats_reply(struct SbStackCtx *ctx)
+{
+    if (ctx->statsPhase == 0 || CheckIO((struct IORequest *)ctx->devIO) == NULL)
+        return;
+    BYTE err = WaitIO((struct IORequest *)ctx->devIO);
+
+    if (ctx->statsPhase == 1 && err == 0)
+    {
+        sb_netdev_send(ctx->devIO, NETDEV_CMD_GET_LINK, &ctx->linkBuf, sizeof(ctx->linkBuf));
+        ctx->statsPhase = 2;
+        return;
+    }
+    if (ctx->statsPhase == 2 && err == 0)
+    {
+        netstack_lock();
+        ctx->root->netStats = ctx->statsBuf;
+        ctx->root->netLink = ctx->linkBuf;
+        ctx->root->netStatsValid = TRUE;
+        netstack_unlock();
+    }
+    ctx->statsPhase = 0; /* cycle done (or failed): idle until the next kick */
+}
+
+/* reclaim a stats request still in flight before devIO is reused (STOP/DETACH) */
+static void sb_stats_drain(struct SbStackCtx *ctx)
+{
+    if (ctx->statsPhase == 0)
+        return;
+    AbortIO((struct IORequest *)ctx->devIO);
+    WaitIO((struct IORequest *)ctx->devIO);
+    ctx->statsPhase = 0;
+}
+
 static void SbStackTask(void)
 {
     struct SbStackCtx *ctx = &sb_stack;
@@ -232,7 +297,19 @@ static void SbStackTask(void)
     /* build banner: ties every log to the exact library binary */
     Kprintf("[bsdsocket] stack task up, build " __DATE__ " " __TIME__ "\n");
     sb_config_load(&ctx->root->netCfg);
+    /* seed the resolver search domain from prefs via the LVO that owns the
+     * field's truncation contract; apps may override it later the same way */
+    bsd_SetDefaultDomainName((STRPTR)ctx->root->netCfg.cfg_Domain, ctx->root);
     sb_netdev_up(ctx);
+    /* stamp interface-start time for IFQ_LastStart (UNIT_MICROHZ answers
+     * TR_GETSYSTIME); harmless if no NIC came up */
+    if (ctx->started)
+    {
+        tick->tr_node.io_Command = TR_GETSYSTIME;
+        DoIO(&tick->tr_node);
+        ctx->root->netLastStart.tv_secs = tick->tr_time.tv_secs;
+        ctx->root->netLastStart.tv_micro = tick->tr_time.tv_micro;
+    }
 
     ctx->startResult = 0;
     ctx->root->stackTask = FindTask(NULL);
@@ -243,9 +320,14 @@ static void SbStackTask(void)
     tick->tr_time.tv_micro = SB_STACK_TICK_US;
     SendIO(&tick->tr_node);
 
+    ULONG statTick = 0;
+    ULONG devSig = ctx->devOpen ? (1UL << ctx->devPort->mp_SigBit) : 0;
     for (;;)
     {
-        ULONG sigs = Wait((1UL << timerPort->mp_SigBit) | SIGBREAKF_CTRL_C);
+        ULONG sigs = Wait((1UL << timerPort->mp_SigBit) | devSig | SIGBREAKF_CTRL_C);
+
+        if (sigs & devSig)
+            sb_stats_reply(ctx); /* harvest GET_STATS/GET_LINK, publish cache */
 
         if (sigs & (1UL << timerPort->mp_SigBit))
         {
@@ -256,6 +338,14 @@ static void SbStackTask(void)
             tick->tr_time.tv_secs = 0;
             tick->tr_time.tv_micro = SB_STACK_TICK_US;
             SendIO(&tick->tr_node);
+
+            /* refresh the NIC stats cache once per second (10 * 100 ms);
+             * fire-and-forget — the reply lands via devSig above */
+            if (++statTick >= 10)
+            {
+                statTick = 0;
+                sb_stats_kick(ctx);
+            }
         }
 
         if (sigs & SIGBREAKF_CTRL_C)
@@ -266,6 +356,7 @@ static void SbStackTask(void)
         }
     }
 
+    sb_stats_drain(ctx); /* devIO must be idle before STOP/DETACH reuse it */
     sb_netdev_down(ctx);
     CloseDevice(&tick->tr_node);
 

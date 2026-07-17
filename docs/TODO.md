@@ -9,7 +9,7 @@ For how the stack is put together, see [architecture.md](architecture.md).
   ICMP is answered, TCP flows, and the TSB/RSB checksum offloads are active. The zero-copy
   vertical slice works end to end.
 - **`bsdsocket.library`** — exercised on hardware (speed tests, Amiga Explorer, browser
-  traffic) and functional; 72 of 121 LVOs implemented. The full per-LVO map — what is
+  traffic) and functional; 76 of 121 LVOs implemented. The full per-LVO map — what is
   done and the decision on each stub — is [bsdsocket-lvo-coverage.md](bsdsocket-lvo-coverage.md).
   Throughput is being actively optimized (see below) and a few of the later LVO waves
   still want a HW retest.
@@ -19,8 +19,6 @@ For how the stack is put together, see [architecture.md](architecture.md).
 
 Still open:
 
-- **`GetNetworkStatistics` / `SBTC_HAVE_STATUS_API`** — protocol-level counters
-  (ipstat/tcpstat/…), fakeable from lwIP's own stats; separate from the interface query.
 - **Release branding.** No Roadshow file-format compatibility.
 
 ## Ongoing investigations
@@ -70,9 +68,9 @@ Levers in flight / planned:
     clean+invalidate is the platform-wide device-writes-RAM contract (same as nvme's
     `nvme_cache_flush(to_device=FALSE)` and xhci's IN-transfer flush + whole-line gate).
 - **Socket-layer RX visibility + fairness (implemented with the above)** —
-  `ns_DgramRxDrops` counts UDP/RAW datagrams dropped at the socket queue
-  (`SB_DGRAM_QMAX`) — a loss point netdev-stats cannot see — printed by `netstack_tick`
-  under DEBUG; and `ndif_rx_input` yields `ns_Core` every `NDIF_RX_YIELD_STRIDE` frames
+  the root base's `dgramRxDrops` counts UDP/RAW datagrams dropped at the socket queue
+  (`SB_DGRAM_QMAX`) — a loss point netdev-stats cannot see — surfaced as `udps_fullsock`
+  in `GetNetworkStatistics(NETSTATUS_udp)`; and `ndif_rx_input` yields `ns_Core` every `NDIF_RX_YIELD_STRIDE` frames
   when a task is queued on the lock, so an unflow-controlled RX blast cannot starve the
   draining app.
 - **Remaining big-ticket lever (chosen, not yet taken)** — the dominant RX cost is

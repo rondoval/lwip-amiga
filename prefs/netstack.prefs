@@ -9,6 +9,8 @@
 ; UNIT = 0
 ; MODE = DHCP                       ; DHCP or STATIC
 ; HOSTNAME = amiga                  ; DHCP option 12 / gethostname()
+; DOMAIN = example.com              ; resolver search domain: dot-less names
+;                                   ; are retried as "name.DOMAIN" on a miss
 ; VLAN = 100,3                      ; in-band 802.1Q: vid[,pcp] (vid 1..4094,
 ;                                   ; pcp 0..7); absent = untagged
 ;

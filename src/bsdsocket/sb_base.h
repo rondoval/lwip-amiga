@@ -48,12 +48,20 @@
 #include <lwip/pbuf.h>
 
 #include <netdev_if.h>
+#include <strutil.h>
 
 #include "sb_config.h"
 
 struct tcp_pcb;
 struct udp_pcb;
 struct raw_pcb;
+
+/* case-insensitive ASCII string equality — the one comparer for every
+ * netdb/config table (protocols, services, networks) */
+static inline BOOL sb_strieq(const char *a, const char *b)
+{
+    return _Stricmp((CONST_STRPTR)a, (CONST_STRPTR)b) == 0;
+}
 
 /* --- wire-format structures (the app ABI; 4.4BSD with length bytes) ------ */
 
@@ -161,6 +169,8 @@ struct sb_timeval
 
 #define SB_MSG_OOB 0x01
 #define SB_MSG_PEEK 0x02
+#define SB_MSG_TRUNC 0x10  /* recvmsg: datagram was longer than the iov space */
+#define SB_MSG_CTRUNC 0x20 /* recvmsg: ancillary data was truncated (never set) */
 #define SB_MSG_WAITALL 0x40
 #define SB_MSG_DONTWAIT 0x80
 
@@ -302,6 +312,21 @@ struct sb_addrinfo
 #define SBTC_HAVE_ROADSHOWDATA_API 67
 #define SBTC_HAVE_GETHOSTADDR_R_API 69
 
+/* status query tags (GET-only). SYSTEM_STATUS returns a bitmask of SBSYSSTAT_*;
+ * GET_BYTES_* return an SBQUAD_T by reference (a 64-bit value cannot go by
+ * value, so a VAL request is refused). */
+#define SBTC_SYSTEM_STATUS 56
+#define SBTC_GET_BYTES_RECEIVED 64
+#define SBTC_GET_BYTES_SENT 65
+
+/* SBTC_SYSTEM_STATUS result bits (loopback is not counted as an interface) */
+#define SBSYSSTAT_Interfaces (1UL << 0)
+#define SBSYSSTAT_PTP_Interfaces (1UL << 1)
+#define SBSYSSTAT_BCast_Interfaces (1UL << 2)
+#define SBSYSSTAT_Resolver (1UL << 3)
+#define SBSYSSTAT_Routes (1UL << 4)
+#define SBSYSSTAT_DefaultRoute (1UL << 5)
+
 /* QueryInterfaceTagList tags (netinclude/libraries/bsdsocket.h). Only the
  * read-only address/config/link subset this stack answers is copied here;
  * IFQ_BASE = TAG_USER + 1900. Each tag's ti_Data points to caller storage
@@ -323,6 +348,42 @@ struct sb_addrinfo
 #define IFQ_AddressBindType (IFQ_BASE + 20)    /* LONG * (IFABT_*) */
 #define IFQ_PrimaryDNSAddress (IFQ_BASE + 22)  /* struct sockaddr_in * */
 #define IFQ_SecondaryDNSAddress (IFQ_BASE + 23) /* struct sockaddr_in * */
+/* counter/status tags backed by the NIC-stats cache and lwIP stats */
+#define IFQ_BPS (IFQ_BASE + 6)               /* LONG * (bits/second) */
+#define IFQ_PacketsReceived (IFQ_BASE + 8)   /* ULONG *   */
+#define IFQ_PacketsSent (IFQ_BASE + 9)       /* ULONG *   */
+#define IFQ_BadData (IFQ_BASE + 10)          /* ULONG *   */
+#define IFQ_Overruns (IFQ_BASE + 11)         /* ULONG *   */
+#define IFQ_UnknownTypes (IFQ_BASE + 12)     /* ULONG *   */
+#define IFQ_LastStart (IFQ_BASE + 13)        /* struct timeval * */
+#define IFQ_Metric (IFQ_BASE + 18)           /* LONG *    */
+#define IFQ_NumReadRequests (IFQ_BASE + 24)  /* LONG *    */
+#define IFQ_NumWriteRequests (IFQ_BASE + 26) /* LONG *    */
+#define IFQ_GetBytesIn (IFQ_BASE + 28)       /* SBQUAD_T * */
+#define IFQ_GetBytesOut (IFQ_BASE + 29)      /* SBQUAD_T * */
+#define IFQ_GetDebugMode (IFQ_BASE + 30)     /* LONG * (bool) */
+#define IFQ_HardwareMTU (IFQ_BASE + 34)      /* LONG *    */
+#define IFQ_OutputDrops (IFQ_BASE + 35)      /* LONG *    */
+#define IFQ_InputDrops (IFQ_BASE + 36)       /* LONG *    */
+#define IFQ_OutputErrors (IFQ_BASE + 37)     /* LONG *    */
+#define IFQ_InputErrors (IFQ_BASE + 38)      /* LONG *    */
+#define IFQ_IPDrops (IFQ_BASE + 41)          /* LONG *    */
+#define IFQ_ARPDrops (IFQ_BASE + 42)         /* LONG *    */
+
+/* SBQUAD_T (libraries/bsdsocket.h): a 64-bit counter, high word first. Used
+ * by the IFQ_GetBytes* tags and the SBTC_GET_BYTES_* SocketBaseTagList tags. */
+struct sb_squad
+{
+    ULONG sbq_High;
+    ULONG sbq_Low;
+};
+
+/* the one NetDevU64 -> SBQUAD_T mapping, shared by both byte-counter surfaces */
+static inline void sb_squad_from_u64(struct sb_squad *q, struct NetDevU64 v)
+{
+    q->sbq_High = v.ndu_Hi;
+    q->sbq_Low = v.ndu_Lo;
+}
 
 /* IFQ_AddressBindType values */
 #define IFABT_Unknown 0
@@ -401,8 +462,8 @@ struct SbSocket
     UBYTE shut_rd;
     UBYTE shut_wr;
 
-    UBYTE lingerOn; /* SO_LINGER; on + time 0 => abort (RST) on close */
-    UBYTE pad2;
+    UBYTE lingerOn;  /* SO_LINGER; on + time 0 => abort (RST) on close */
+    UBYTE forceRst;  /* linger deadline expired: teardown must abort (RST) */
     UWORD lingerTime; /* seconds */
 
     union
@@ -460,6 +521,19 @@ struct SocketBase
      * completes), read-only afterwards — no locking needed */
     struct SbNetConfig netCfg;
 
+    /* NIC statistics cache. Refreshed once/second by the stack task, which
+     * owns devIO and holds NO core lock while polling. NEVER issue a netdev
+     * DoIO (GET_STATS/GET_LINK) under netstack_lock: the driver's unit task
+     * also takes that lock in its RX path, so a DoIO-under-lock deadlocks.
+     * Readers take the core lock. netStatsValid is FALSE until the first good
+     * poll and whenever no NIC is attached (counters then read zero). */
+    struct NetDevStats netStats;
+    struct NetDevLinkState netLink;
+    struct sb_timeval netLastStart; /* IFQ_LastStart; zero until NETDEV_CMD_START */
+    ULONG dgramRxDrops;    /* datagrams dropped at the socket queue (udpstat fullsock) */
+    UBYTE netStatsValid;
+    UBYTE pad2[3];
+
     /* --- per-opener state (child bases; garbage in the root) --- */
     struct Task *task;  /* the opener; the Signal() target of every wake */
     BYTE sigBit;        /* the wait bit of the header's blocking pattern; -1 if AllocSignal failed */
@@ -506,7 +580,7 @@ struct SocketBase
     struct sb_protoent proto; /* getprotobyname/bynumber/getprotoent result */
     char *protoAliases[1];    /* always { NULL } */
     struct sb_servent serv;   /* getservbyname/byport/getservent result */
-    char *servAliases[1];     /* always { NULL } */
+    char *servAliases[3];     /* up to 2 aliases + NULL terminator */
     struct sb_netent net;     /* getnetbyname/byaddr/getnetent result */
     char *netAliases[1];      /* always { NULL } */
     ULONG protoIdx; /* get*ent iterators */
@@ -558,6 +632,14 @@ void sb_raw_wire(struct SbSocket *s);
 BOOL sb_sock_readable(const struct SbSocket *s);
 BOOL sb_sock_writable(struct SbSocket *s);
 LONG sb_map_err(signed char lwip_err);
+
+/* datagram recvmsg: scatter the head datagram across mh's iovs (sb_api.c) */
+LONG sb_dgram_recvmsg(struct SocketBase *base, struct SbSocket *s,
+                      struct sb_msghdr *mh, LONG flags);
+/* getprotoent iterator over the sb_protos table (sb_misc.c); NULL past the end */
+struct sb_protoent *sb_proto_at(struct SocketBase *base, ULONG idx);
+/* parse an app sockaddr_in (sb_api.c); shared with sendmsg */
+LONG sb_addr_in(const struct sb_sockaddr_in *sa, LONG salen, ip_addr_t *ip, u16_t *port);
 
 /* library plumbing (main.c) */
 extern const APTR bsdsocket_functable[];
@@ -653,6 +735,9 @@ VOID bsd_ReleaseInterfaceList(APTR list asm("a0"), struct SocketBase *base asm("
 LONG bsd_QueryInterfaceTagList(STRPTR name asm("a0"), struct TagItem *tags asm("a1"), struct SocketBase *base asm("a6"));
 /* shared graceful-refuse stub for the interface-config LVOs (errno = EINVAL) */
 LONG bsd_InterfaceConfigUnsupported(struct SocketBase *base asm("a6"));
+
+/* sb_netstat.c */
+LONG bsd_GetNetworkStatistics(LONG type asm("d0"), LONG version asm("d1"), APTR destination asm("a0"), LONG size asm("d2"), struct SocketBase *base asm("a6"));
 
 /* sb_gai.c */
 LONG bsd_getaddrinfo(STRPTR hostname asm("a0"), STRPTR servname asm("a1"), struct sb_addrinfo *hints asm("a2"), struct sb_addrinfo **res asm("a3"), struct SocketBase *base asm("a6"));

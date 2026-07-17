@@ -86,6 +86,11 @@ LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
         sb_set_errno(base, SB_EINVAL);
         return -1;
     }
+    /* ancillary data (SCM_RIGHTS etc.) is not supported; like 4.4BSD's
+     * datagram output paths we free/ignore it rather than fail the send */
+    if (mh->msg_control != NULL && mh->msg_controllen != 0)
+        KprintfH("[bsdsocket] %s: msg_control ignored (%lu bytes)\n", __func__,
+                 mh->msg_controllen);
 
     if (s->type == SBT_TCP)
     {
@@ -138,18 +143,35 @@ LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
     err_t r = ERR_VAL;
     if (mh->msg_name != NULL)
     {
-        const struct sb_sockaddr_in *sa = mh->msg_name;
         ip_addr_t ip;
-        ip_addr_set_ip4_u32(&ip, sa->sin_addr);
+        u16_t port;
+        LONG e = sb_addr_in(mh->msg_name, (LONG)mh->msg_namelen, &ip, &port);
+        if (e != 0)
+        {
+            pbuf_free(p);
+            netstack_unlock();
+            sb_set_errno(base, e);
+            return -1;
+        }
         if (s->type == SBT_UDP && s->pcb.udp != NULL)
-            r = udp_sendto(s->pcb.udp, p, &ip, sa->sin_port);
+            r = udp_sendto(s->pcb.udp, p, &ip, port);
         else if (s->type == SBT_RAW && s->pcb.raw != NULL)
             r = raw_sendto(s->pcb.raw, p, &ip);
     }
     else
     {
+        /* no destination: valid only on a connected datagram socket */
         if (s->type == SBT_UDP && s->pcb.udp != NULL)
+        {
+            if (!(s->pcb.udp->flags & UDP_FLAGS_CONNECTED))
+            {
+                pbuf_free(p);
+                netstack_unlock();
+                sb_set_errno(base, SB_EDESTADDRREQ);
+                return -1;
+            }
             r = udp_send(s->pcb.udp, p);
+        }
         else if (s->type == SBT_RAW && s->pcb.raw != NULL)
             r = raw_send(s->pcb.raw, p);
     }
@@ -182,6 +204,7 @@ LONG bsd_recvmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
         return -1;
     }
 
+    /* no ancillary data is ever produced */
     mh->msg_flags = 0;
     mh->msg_controllen = 0;
 
@@ -201,32 +224,13 @@ LONG bsd_recvmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
             if (n == 0 || (ULONG)n < iv->iov_len)
                 break;
         }
+        mh->msg_namelen = 0; /* stream sockets report no sender address */
         return total;
     }
 
-    /* datagram: one message scattered across the iovs; the excess is
-     * discarded, BSD-style */
-    LONG addrlen = (LONG)sizeof(struct sb_sockaddr_in);
-    static const ULONG bounce_max = 2048;
-    UBYTE bounce[2048];
-    LONG n = bsd_recvfrom(sock, bounce,
-                          (LONG)(bounce_max < 0x7FFFFFFF ? bounce_max : bounce_max),
-                          flags, mh->msg_name,
-                          mh->msg_name != NULL ? &addrlen : NULL, base);
-    if (n < 0)
-        return -1;
-    if (mh->msg_name != NULL)
-        mh->msg_namelen = (ULONG)addrlen;
-
-    LONG off = 0;
-    for (ULONG i = 0; i < mh->msg_iovlen && off < n; i++)
-    {
-        struct sb_iovec *iv = &mh->msg_iov[i];
-        LONG chunk = (LONG)iv->iov_len < n - off ? (LONG)iv->iov_len : n - off;
-        CopyMem(bounce + off, iv->iov_base, (ULONG)chunk);
-        off += chunk;
-    }
-    return off;
+    /* datagram: scatter the whole datagram across the iovs straight from its
+     * pbuf chain, flagging (MSG_TRUNC) and dropping any excess */
+    return sb_dgram_recvmsg(base, s, mh, flags);
 }
 
 /* -------------------------------------------------------------- syslog --- */
@@ -248,9 +252,39 @@ static ULONG sb_vformat(char *dst, ULONG max, const char *fmt, const ULONG *args
             continue;
         }
         fmt++;
-        while (*fmt == 'l' || *fmt == 'h' || (*fmt >= '0' && *fmt <= '9') ||
-               *fmt == '-' || *fmt == '.')
-            fmt++; /* field widths are ignored */
+
+        /* %[-][0][width][.prec] — flags, then the length modifiers we accept
+         * but do not act on (all varargs cells are promoted to 32-bit). */
+        BOOL leftJust = FALSE;
+        BOOL zeroPad = FALSE;
+        while (*fmt == '-' || *fmt == '0')
+        {
+            if (*fmt == '-')
+                leftJust = TRUE;
+            else
+                zeroPad = TRUE;
+            fmt++;
+        }
+        LONG width = 0;
+        while (*fmt >= '0' && *fmt <= '9')
+            width = width * 10 + (*fmt++ - '0');
+        LONG prec = -1;
+        if (*fmt == '.')
+        {
+            fmt++;
+            prec = 0;
+            while (*fmt >= '0' && *fmt <= '9')
+                prec = prec * 10 + (*fmt++ - '0');
+        }
+        while (*fmt == 'l' || *fmt == 'h')
+            fmt++;
+
+        /* Format the converted body into tmp, then emit it padded to width.
+         * pad = '0' only for right-justified numeric conversions. */
+        char tmp[24];
+        const char *body = tmp;
+        LONG blen = 0;
+        char pad = (zeroPad && !leftJust) ? '0' : ' ';
 
         char conv = *fmt != '\0' ? *fmt++ : '\0';
         switch (conv)
@@ -260,31 +294,32 @@ static ULONG sb_vformat(char *dst, ULONG max, const char *fmt, const ULONG *args
             const char *sp = (const char *)args[ai++];
             if (sp == NULL)
                 sp = "(null)";
-            while (*sp != '\0' && o < max - 1)
-                dst[o++] = *sp++;
+            body = sp;
+            while (sp[blen] != '\0' && (prec < 0 || blen < prec))
+                blen++;
+            pad = ' '; /* strings never zero-pad */
             break;
         }
         case 'c':
-            dst[o++] = (char)args[ai++];
+            tmp[blen++] = (char)args[ai++];
             break;
         case 'd':
         case 'i':
         {
             LONG v = (LONG)args[ai++];
-            if (v < 0 && o < max - 1)
-            {
-                dst[o++] = '-';
-                v = -v;
-            }
-            char tmp[12];
+            BOOL neg = v < 0;
+            ULONG uv = neg ? (ULONG)(-v) : (ULONG)v;
+            char digs[12];
             int t = 0;
             do
             {
-                tmp[t++] = (char)('0' + (v % 10));
-                v /= 10;
-            } while (v != 0);
-            while (t > 0 && o < max - 1)
-                dst[o++] = tmp[--t];
+                digs[t++] = (char)('0' + (uv % 10));
+                uv /= 10;
+            } while (uv != 0);
+            if (neg)
+                tmp[blen++] = '-';
+            while (t > 0)
+                tmp[blen++] = digs[--t];
             break;
         }
         case 'u':
@@ -294,29 +329,47 @@ static ULONG sb_vformat(char *dst, ULONG max, const char *fmt, const ULONG *args
         {
             ULONG v = args[ai++];
             ULONG radix = (conv == 'u') ? 10 : 16;
-            char tmp[12];
+            char digs[12];
             int t = 0;
             do
             {
                 ULONG digit = v % radix;
-                tmp[t++] = (char)(digit < 10 ? '0' + digit : 'a' + digit - 10);
+                digs[t++] = (char)(digit < 10 ? '0' + digit : 'a' + digit - 10);
                 v /= radix;
             } while (v != 0);
-            while (t > 0 && o < max - 1)
-                dst[o++] = tmp[--t];
+            while (t > 0)
+                tmp[blen++] = digs[--t];
             break;
         }
         case '%':
-            dst[o++] = '%';
+            tmp[blen++] = '%';
             break;
         default:
-            if (o < max - 2)
-            {
-                dst[o++] = '%';
-                dst[o++] = conv;
-            }
+            tmp[blen++] = '%';
+            if (conv != '\0')
+                tmp[blen++] = conv;
             break;
         }
+
+        LONG padlen = width - blen;
+        if (!leftJust)
+        {
+            /* zero-fill goes between the sign and the digits: "%05d" of -12
+             * is "-0012", never "00-12" (the sign still counts toward width) */
+            if (pad == '0' && blen > 0 && body[0] == '-' && o < max - 1)
+            {
+                dst[o++] = '-';
+                body++;
+                blen--;
+            }
+            while (padlen-- > 0 && o < max - 1)
+                dst[o++] = pad;
+        }
+        for (LONG i = 0; i < blen && o < max - 1; i++)
+            dst[o++] = body[i];
+        if (leftJust)
+            while (padlen-- > 0 && o < max - 1)
+                dst[o++] = ' ';
     }
     dst[o] = '\0';
     return o;
@@ -480,36 +533,61 @@ LONG bsd_ObtainSocket(LONG id asm("d0"), LONG domain asm("d1"), LONG type asm("d
 
 /* --------------------------------------------------------------- netdb --- */
 
+/* Built-in /etc/services equivalent (no file on this platform). Each row may
+ * carry up to two aliases, matched by getservbyname and the getaddrinfo
+ * service lookup. Ordered by port for readability. */
 static const struct
 {
     const char *name;
     UWORD port;
     const char *proto;
+    const char *alias[2];
 } sb_services[] = {
-    {"echo", 7, "tcp"},    {"ftp-data", 20, "tcp"}, {"ftp", 21, "tcp"},
-    {"ssh", 22, "tcp"},    {"telnet", 23, "tcp"},   {"smtp", 25, "tcp"},
-    {"domain", 53, "udp"}, {"domain", 53, "tcp"},   {"http", 80, "tcp"},
-    {"pop3", 110, "tcp"},  {"nntp", 119, "tcp"},    {"ntp", 123, "udp"},
-    {"imap", 143, "tcp"},  {"snmp", 161, "udp"},    {"irc", 194, "tcp"},
-    {"https", 443, "tcp"}, {"submission", 587, "tcp"},
-    {NULL, 0, NULL}};
+    {"echo", 7, "tcp", {0}},       {"echo", 7, "udp", {0}},
+    {"discard", 9, "tcp", {"sink", "null"}},
+    {"discard", 9, "udp", {"sink", "null"}},
+    {"daytime", 13, "tcp", {0}},   {"daytime", 13, "udp", {0}},
+    {"chargen", 19, "tcp", {"ttytst", "source"}},
+    {"chargen", 19, "udp", {"ttytst", "source"}},
+    {"ftp-data", 20, "tcp", {0}},  {"ftp", 21, "tcp", {0}},
+    {"ssh", 22, "tcp", {0}},       {"telnet", 23, "tcp", {0}},
+    {"smtp", 25, "tcp", {"mail"}},
+    {"time", 37, "tcp", {"timserver"}},
+    {"time", 37, "udp", {"timserver"}},
+    {"whois", 43, "tcp", {"nicname"}},
+    {"domain", 53, "udp", {"nameserver"}},
+    {"domain", 53, "tcp", {"nameserver"}},
+    {"tftp", 69, "udp", {0}},      {"gopher", 70, "tcp", {0}},
+    {"finger", 79, "tcp", {0}},
+    {"http", 80, "tcp", {"www", "www-http"}},
+    {"pop3", 110, "tcp", {"postoffice"}},
+    {"auth", 113, "tcp", {"ident", "tap"}},
+    {"nntp", 119, "tcp", {"usenet"}},
+    {"ntp", 123, "udp", {0}},
+    {"imap", 143, "tcp", {"imap2"}},
+    {"snmp", 161, "udp", {0}},     {"snmptrap", 162, "udp", {0}},
+    {"irc", 194, "tcp", {0}},      {"ldap", 389, "tcp", {0}},
+    {"https", 443, "tcp", {0}},
+    {"smtps", 465, "tcp", {"urd", "submissions"}},
+    {"shell", 514, "tcp", {"cmd"}},
+    {"syslog", 514, "udp", {0}},
+    {"printer", 515, "tcp", {"spooler"}},
+    {"router", 520, "udp", {"route"}},
+    {"submission", 587, "tcp", {0}}, {"ipp", 631, "tcp", {0}},
+    {"rsync", 873, "tcp", {0}},    {"ftps", 990, "tcp", {0}},
+    {"telnets", 992, "tcp", {0}},  {"imaps", 993, "tcp", {0}},
+    {"pop3s", 995, "tcp", {0}},    {"socks", 1080, "tcp", {0}},
+    {NULL, 0, NULL, {0}}};
 
-static BOOL sb_streq_nocase(const char *a, const char *b)
+/* match @name against a service row's canonical name or either alias */
+static BOOL sb_serv_name_matches(ULONG idx, const char *name)
 {
-    KprintfH("[bsdsocket] %s\n", __func__);
-    while (*a != '\0' && *b != '\0')
-    {
-        char ca = *a, cb = *b;
-        if (ca >= 'A' && ca <= 'Z')
-            ca = (char)(ca + 32);
-        if (cb >= 'A' && cb <= 'Z')
-            cb = (char)(cb + 32);
-        if (ca != cb)
-            return FALSE;
-        a++;
-        b++;
-    }
-    return *a == *b;
+    if (sb_strieq(name, sb_services[idx].name))
+        return TRUE;
+    for (ULONG a = 0; a < 2 && sb_services[idx].alias[a] != NULL; a++)
+        if (sb_strieq(name, sb_services[idx].alias[a]))
+            return TRUE;
+    return FALSE;
 }
 
 /* getaddrinfo/getnameinfo service lookups (sb_gai.c) — same table, no
@@ -519,9 +597,9 @@ LONG sb_serv_port_by_name(const char *name, const char *proto)
     KprintfH("[bsdsocket] %s: name=%s\n", __func__, (ULONG)name);
     for (ULONG i = 0; sb_services[i].name != NULL; i++)
     {
-        if (!sb_streq_nocase(name, sb_services[i].name))
+        if (!sb_serv_name_matches(i, name))
             continue;
-        if (proto != NULL && !sb_streq_nocase(proto, sb_services[i].proto))
+        if (proto != NULL && !sb_strieq(proto, sb_services[i].proto))
             continue;
         return sb_services[i].port;
     }
@@ -535,7 +613,7 @@ const char *sb_serv_name_by_port(UWORD port, const char *proto)
     {
         if (sb_services[i].port != port)
             continue;
-        if (proto != NULL && !sb_streq_nocase(proto, sb_services[i].proto))
+        if (proto != NULL && !sb_strieq(proto, sb_services[i].proto))
             continue;
         return sb_services[i].name;
     }
@@ -546,7 +624,10 @@ static struct sb_servent *sb_serv_fill(struct SocketBase *base, ULONG idx)
 {
     KprintfH("[bsdsocket] %s: name=%s port=%lu\n", __func__, (ULONG)sb_services[idx].name, (ULONG)sb_services[idx].port);
     base->serv.s_name = (char *)sb_services[idx].name;
-    base->servAliases[0] = NULL;
+    ULONG n = 0;
+    for (ULONG a = 0; a < 2 && sb_services[idx].alias[a] != NULL; a++)
+        base->servAliases[n++] = (char *)sb_services[idx].alias[a];
+    base->servAliases[n] = NULL;
     base->serv.s_aliases = base->servAliases;
     base->serv.s_port = sb_services[idx].port;
     base->serv.s_proto = (char *)sb_services[idx].proto;
@@ -561,9 +642,9 @@ APTR bsd_getservbyname(STRPTR name asm("a0"), STRPTR proto asm("a1"),
         return NULL;
     for (ULONG i = 0; sb_services[i].name != NULL; i++)
     {
-        if (!sb_streq_nocase((const char *)name, sb_services[i].name))
+        if (!sb_serv_name_matches(i, (const char *)name))
             continue;
-        if (proto != NULL && !sb_streq_nocase((const char *)proto, sb_services[i].proto))
+        if (proto != NULL && !sb_strieq((const char *)proto, sb_services[i].proto))
             continue;
         return sb_serv_fill(base, i);
     }
@@ -578,7 +659,7 @@ APTR bsd_getservbyport(LONG port asm("d0"), STRPTR proto asm("a0"),
     {
         if (sb_services[i].port != (UWORD)port)
             continue;
-        if (proto != NULL && !sb_streq_nocase((const char *)proto, sb_services[i].proto))
+        if (proto != NULL && !sb_strieq((const char *)proto, sb_services[i].proto))
             continue;
         return sb_serv_fill(base, i);
     }
@@ -620,12 +701,12 @@ APTR bsd_getnetbyname(STRPTR name asm("a0"), struct SocketBase *base asm("a6"))
     const struct SbNetConfig *cfg = &SB_ROOT(base)->netCfg;
     for (ULONG i = 0; i < cfg->cfg_NumNetworks; i++)
     {
-        if (sb_streq_nocase((const char *)name, cfg->cfg_Networks[i].name))
+        if (sb_strieq((const char *)name, cfg->cfg_Networks[i].name))
             return sb_net_fill(base, cfg->cfg_Networks[i].name, cfg->cfg_Networks[i].net);
     }
     for (ULONG i = 0; sb_networks[i].name != NULL; i++)
     {
-        if (sb_streq_nocase((const char *)name, sb_networks[i].name))
+        if (sb_strieq((const char *)name, sb_networks[i].name))
             return sb_net_fill(base, sb_networks[i].name, sb_networks[i].net);
     }
     return NULL;
@@ -698,11 +779,12 @@ VOID bsd_endprotoent(struct SocketBase *base asm("a6"))
 APTR bsd_getprotoent(struct SocketBase *base asm("a6"))
 {
     KprintfH("[bsdsocket] %s: idx=%lu\n", __func__, (ULONG)base->protoIdx);
-    /* iterate the same table getprotobynumber uses (0/1/6/17/255) */
-    static const LONG protos[] = {0, 1, 6, 17, 255};
-    if (base->protoIdx >= sizeof(protos) / sizeof(protos[0]))
-        return NULL;
-    return bsd_getprotobynumber(protos[base->protoIdx++], base);
+    /* walk the same sb_protos table getprotobyname/-number use — no parallel
+     * list to drift out of sync */
+    struct sb_protoent *pe = sb_proto_at(base, base->protoIdx);
+    if (pe != NULL)
+        base->protoIdx++;
+    return pe;
 }
 
 VOID bsd_setservent(LONG stayOpen asm("d0"), struct SocketBase *base asm("a6"))
@@ -818,9 +900,22 @@ LONG bsd_In_LocalAddr(ULONG address asm("d0"), struct SocketBase *base asm("a6")
 LONG bsd_In_CanForward(ULONG address asm("d0"), struct SocketBase *base asm("a6"))
 {
     KprintfH("[bsdsocket] %s: addr=0x%08lx\n", __func__, address);
-    (void)address;
     (void)base;
-    return 0; /* this stack does not forward */
+    /* 4.3BSD in_canforward(): a datagram to this address may be forwarded
+     * unless it is class D (multicast) or class E (experimental) space, or a
+     * class A datagram for net 0 or net 127 (loopback). The address arrives
+     * as a network-order u32; on big-endian 68k that equals the host-order
+     * integer used by the classful masks, so no byte swap is needed. */
+    if ((address & 0xF0000000UL) == 0xE0000000UL || /* class D multicast */
+        (address & 0xF0000000UL) == 0xF0000000UL)   /* class E / experimental */
+        return 0;
+    if ((address & 0x80000000UL) == 0) /* class A */
+    {
+        ULONG net = address & 0xFF000000UL;
+        if (net == 0 || net == (127UL << 24))
+            return 0;
+    }
+    return 1;
 }
 
 /* --------------------------------------------------- DNS configuration --- */

@@ -131,6 +131,13 @@
  * the driver's capabilities cover it (netdev_if.c) --- */
 #define LWIP_CHECKSUM_CTRL_PER_NETIF    1
 
+/* --- statistics: back GetNetworkStatistics and the IFQ / SBTC byte counters.
+ * LWIP_STATS_LARGE makes the protocol counters 32-bit (u16 would wrap under
+ * load); MIB2_STATS adds the SNMP MIB-2 counters (per-protocol + per-netif,
+ * e.g. ifinunknownprotos) that the BSD stat structs are mapped from. */
+#define LWIP_STATS_LARGE                1
+#define MIB2_STATS                      1
+
 /* --- platform glue --- */
 unsigned int netstack_lwip_rand(void);
 void *netstack_malloc(unsigned int size);

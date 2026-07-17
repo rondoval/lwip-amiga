@@ -94,14 +94,13 @@ IMPLEMENTED = {
     "gai_strerror": "bsd_gai_strerror",
     "getnameinfo": "bsd_getnameinfo",
     "GetSocketEvents": "bsd_GetSocketEvents",
-    # interface API: read-only status implemented; the config family is
-    # declined and shares a graceful EINVAL stub (see sb_ifquery.c).
     "ObtainInterfaceList": "bsd_ObtainInterfaceList",
     "ReleaseInterfaceList": "bsd_ReleaseInterfaceList",
     "QueryInterfaceTagList": "bsd_QueryInterfaceTagList",
     "AddInterfaceTagList": "bsd_InterfaceConfigUnsupported",
     "ConfigureInterfaceTagList": "bsd_InterfaceConfigUnsupported",
     "RemoveInterface": "bsd_InterfaceConfigUnsupported",
+    "GetNetworkStatistics": "bsd_GetNetworkStatistics",
 }
 
 # Unimplemented LVOs that return POINTERS get the NULL stub; handing an app

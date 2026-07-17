@@ -18,6 +18,9 @@
  *   DNS1     = a.b.c.d
  *   DNS2     = a.b.c.d
  *   HOSTNAME = amiga                   DHCP option 12 / gethostname()
+ *   DOMAIN   = example.com             resolver search domain; unqualified
+ *                                      (dot-less) names are retried as
+ *                                      "name.DOMAIN" when the bare lookup fails
  *   VLAN     = vid[,pcp]               in-band 802.1Q (vid 1..4094, pcp 0..7);
  *                                      absent = untagged
  *   NETWORK  = name number             networks-database entry (repeatable,
@@ -58,6 +61,7 @@ struct SbNetConfig
     ip4_addr_t cfg_Gateway;
     ip4_addr_t cfg_Dns[2];
     char       cfg_Hostname[SB_CFG_HOSTNAME_MAX];
+    char       cfg_Domain[SB_CFG_HOSTNAME_MAX]; /* resolver search domain; "" = none */
     LONG       cfg_VlanTci;   /* -1 = no VLAN; else (pcp<<13)|(vid&0xFFF) */
     struct SbCfgNetwork cfg_Networks[SB_CFG_NETWORKS_MAX];
     ULONG      cfg_NumNetworks;

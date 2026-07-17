@@ -181,6 +181,10 @@ void sb_config_load(struct SbNetConfig *cfg)
         {
             sb_cfg_copy(cfg->cfg_Hostname, sizeof(cfg->cfg_Hostname), val);
         }
+        else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "DOMAIN") == 0)
+        {
+            sb_cfg_copy(cfg->cfg_Domain, sizeof(cfg->cfg_Domain), val);
+        }
         else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "VLAN") == 0)
         {
             /* VLAN = <vid>[,<pcp>]  (in-band 802.1Q; vid 1..4094, pcp 0..7) */

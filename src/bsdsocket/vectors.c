@@ -97,7 +97,7 @@ const APTR bsdsocket_functable[] = {
     (APTR)LibStub, /* -492  AbortInterfaceConfig */
     (APTR)LibStub, /* -498  AddNetMonitorHookTagList */
     (APTR)LibStub, /* -504  RemoveNetMonitorHook */
-    (APTR)LibStub, /* -510  GetNetworkStatistics */
+    (APTR)bsd_GetNetworkStatistics, /* -510  GetNetworkStatistics */
     (APTR)bsd_AddDomainNameServer, /* -516  AddDomainNameServer */
     (APTR)bsd_RemoveDomainNameServer, /* -522  RemoveDomainNameServer */
     (APTR)bsd_ReleaseDomainNameServerList, /* -528  ReleaseDomainNameServerList */

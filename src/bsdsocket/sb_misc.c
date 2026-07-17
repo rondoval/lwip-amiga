@@ -282,6 +282,8 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
         case SBTC_HAVE_LOCAL_DATABASE_API:
         case SBTC_HAVE_ADDRESS_CONVERSION_API:
         case SBTC_HAVE_GETHOSTADDR_R_API:
+        /* status API: GetNetworkStatistics is implemented (sb_netstat.c). */
+        case SBTC_HAVE_STATUS_API:
         /* interface API: the read-only query subset (ObtainInterfaceList /
          * QueryInterfaceTagList) is implemented; the config LVOs refuse
          * gracefully with EINVAL (sb_ifquery.c). */
@@ -295,7 +297,6 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
          * rather than erroring on an unrecognised tag. */
         case SBTC_HAVE_ROUTING_API:
         case SBTC_HAVE_MONITORING_API:
-        case SBTC_HAVE_STATUS_API:
         case SBTC_HAVE_SERVER_API:
         case SBTC_HAVE_ROADSHOWDATA_API:
         case SBTC_HAVE_KERNEL_MEMORY_API:
@@ -308,6 +309,45 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
                 return index;
             *valp = 0;
             break;
+        case SBTC_SYSTEM_STATUS:
+        {
+            if (isSet)
+                return index;
+            ULONG st = 0;
+            netstack_lock();
+            struct netif *nif;
+            NETIF_FOREACH(nif)
+            {
+                if (nif->name[0] == 'l' && nif->name[1] == 'o')
+                    continue; /* loopback is not an "interface" here */
+                if (netif_is_up(nif) && ip4_addr_get_u32(netif_ip4_addr(nif)) != 0)
+                    st |= SBSYSSTAT_Interfaces | SBSYSSTAT_BCast_Interfaces;
+            }
+            if (ip4_addr_get_u32(ip_2_ip4(dns_getserver(0))) != 0)
+                st |= SBSYSSTAT_Resolver;
+            if (netif_default != NULL &&
+                ip4_addr_get_u32(netif_ip4_gw(netif_default)) != 0)
+                st |= SBSYSSTAT_Routes | SBSYSSTAT_DefaultRoute;
+            netstack_unlock();
+            *valp = st;
+            break;
+        }
+        case SBTC_GET_BYTES_RECEIVED:
+        case SBTC_GET_BYTES_SENT:
+        {
+            /* 64-bit counters: GET by reference only (an SBQUAD_T can't fit a
+             * VAL slot). Sourced from the once-a-second NIC-stats cache. */
+            if (isSet || !isRef)
+                return index;
+            struct SocketBase *root = SB_ROOT(base);
+            netstack_lock();
+            struct NetDevU64 v = (code == SBTC_GET_BYTES_RECEIVED)
+                                     ? root->netStats.nds_RxBytes
+                                     : root->netStats.nds_TxBytes;
+            netstack_unlock();
+            sb_squad_from_u64((struct sb_squad *)valp, v);
+            break;
+        }
         default:
             return index; /* unknown tag: report its 1-based position */
         }
@@ -422,11 +462,72 @@ ULONG bsd_Inet_MakeAddr(ULONG net asm("d0"), ULONG host asm("d1"),
 ULONG bsd_inet_network(STRPTR cp asm("a0"), struct SocketBase *base asm("a6"))
 {
     KprintfH("[bsdsocket] %s: cp=%s\n", __func__, cp != NULL ? (ULONG)cp : (ULONG)"(null)");
-    /* like inet_addr but host byte order — the full 32-bit value
-     * ("10.0.0.0" -> 0x0a000000), NOT the classful network number.
-     * On big-endian 68k host order == network order, so this is the
-     * inet_addr value unchanged (INADDR_NONE passes through). */
-    return bsd_inet_addr(cp, base);
+    (void)base;
+    if (cp == NULL)
+        return 0xFFFFFFFF; /* INADDR_NONE */
+
+    /* Classic 4.4BSD inet_network(): up to four dot-separated parts, each in
+     * C notation (leading 0x hex, leading 0 octal, else decimal). Each part
+     * contributes one byte, packed right-aligned into the low bytes in host
+     * order — "192.168" -> 0xC0A8, "10.0.0.0" -> 0x0A000000, "127" -> 0x7F.
+     * Parts are masked to a byte (BSD behaviour), not rejected when > 255. */
+    const char *s = (const char *)cp;
+    ULONG parts[4];
+    ULONG nparts = 0;
+
+    for (;;)
+    {
+        ULONG radix = 10;
+        if (*s == '0')
+        {
+            radix = 8;
+            s++;
+            if (*s == 'x' || *s == 'X')
+            {
+                radix = 16;
+                s++;
+            }
+        }
+
+        ULONG val = 0;
+        BOOL any = (radix != 10); /* a consumed leading '0' is itself digit 0 */
+        for (;;)
+        {
+            char c = *s;
+            ULONG digit;
+            if (c >= '0' && c <= '9')
+                digit = (ULONG)(c - '0');
+            else if (radix == 16 && c >= 'a' && c <= 'f')
+                digit = (ULONG)(c - 'a' + 10);
+            else if (radix == 16 && c >= 'A' && c <= 'F')
+                digit = (ULONG)(c - 'A' + 10);
+            else
+                break;
+            if (digit >= radix)
+                break;
+            val = val * radix + digit;
+            any = TRUE;
+            s++;
+        }
+
+        if (!any || nparts >= 4)
+            return 0xFFFFFFFF;
+        parts[nparts++] = val;
+
+        if (*s != '.')
+            break;
+        s++;
+    }
+
+    while (*s == ' ' || *s == '\t')
+        s++;
+    if (*s != '\0')
+        return 0xFFFFFFFF;
+
+    ULONG result = 0;
+    for (ULONG i = 0; i < nparts; i++)
+        result = (result << 8) | (parts[i] & 0xFF);
+    return result;
 }
 
 /* ---------------------------------------------------------- DNS / netdb --- */
@@ -479,22 +580,12 @@ static struct sb_hostent *sb_host_fill(struct SocketBase *base, const char *name
     return &base->host;
 }
 
-/* Blocking resolver core shared with gethostbyname_r: resolves @name, fills
- * the per-base hostent, and reports the address/h_errno through the out
- * parameters. Returns the per-base hostent or NULL. */
-struct sb_hostent *sb_host_resolve(struct SocketBase *base, const char *name, ULONG *addrOut, LONG *herrOut)
+/* One blocking forward-DNS lookup of @name. Returns 0 with *addr filled on
+ * success; SB_TRY_AGAIN if interrupted (errno already set); or
+ * SB_HOST_NOT_FOUND on a negative or failed answer. */
+static LONG sb_dns_query(struct SocketBase *base, const char *name, ULONG *addr)
 {
-    KprintfH("[bsdsocket] %s: name=%s\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)");
-    LONG herr = 0;
-
-    if (name == NULL)
-    {
-        if (herrOut != NULL)
-            *herrOut = SB_HOST_NOT_FOUND;
-        sb_set_herrno(base, SB_HOST_NOT_FOUND);
-        return NULL;
-    }
-
+    KprintfH("[bsdsocket] %s: name=%s\n", __func__, (ULONG)name);
     netstack_lock();
     base->dnsDone = FALSE;
     base->dnsErr = 0;
@@ -509,10 +600,7 @@ struct sb_hostent *sb_host_resolve(struct SocketBase *base, const char *name, UL
             {
                 netstack_unlock();
                 sb_set_errno(base, we);
-                sb_set_herrno(base, SB_TRY_AGAIN);
-                if (herrOut != NULL)
-                    *herrOut = SB_TRY_AGAIN;
-                return NULL;
+                return SB_TRY_AGAIN;
             }
         }
         r = base->dnsErr == 0 ? ERR_OK : ERR_VAL;
@@ -520,20 +608,88 @@ struct sb_hostent *sb_host_resolve(struct SocketBase *base, const char *name, UL
     netstack_unlock();
 
     if (r != ERR_OK)
+        return SB_HOST_NOT_FOUND;
+
+    *addr = ip4_addr_get_u32(ip_2_ip4(&base->dnsAddr));
+    return 0;
+}
+
+/* If @name is unqualified (contains no dot) and @domain is set, compose
+ * "name.domain" into @out and return TRUE; otherwise FALSE. A dotted name is
+ * already qualified (or a literal) and is left alone. */
+static BOOL sb_qualify(const char *name, const char *domain, char *out, ULONG outmax)
+{
+    if (name == NULL || name[0] == '\0' || domain == NULL || domain[0] == '\0')
+        return FALSE;
+
+    ULONG nlen = 0;
+    while (name[nlen] != '\0')
     {
-        herr = base->dnsErr != 0 ? base->dnsErr : SB_HOST_NOT_FOUND;
-        sb_set_herrno(base, herr);
+        if (name[nlen] == '.')
+            return FALSE; /* already qualified */
+        nlen++;
+    }
+    ULONG dlen = 0;
+    while (domain[dlen] != '\0')
+        dlen++;
+    if (nlen + 1 + dlen + 1 > outmax)
+        return FALSE; /* would not fit */
+
+    ULONG o = 0;
+    for (ULONG i = 0; i < nlen; i++)
+        out[o++] = name[i];
+    out[o++] = '.';
+    for (ULONG i = 0; i < dlen; i++)
+        out[o++] = domain[i];
+    out[o] = '\0';
+    return TRUE;
+}
+
+/* Blocking resolver core shared with gethostbyname_r: resolves @name, fills
+ * the per-base hostent, and reports the address/h_errno through the out
+ * parameters. An unqualified name that misses is retried once as
+ * "name.<search-domain>" (Roadshow order: bare first, qualified fallback).
+ * Returns the per-base hostent or NULL. */
+struct sb_hostent *sb_host_resolve(struct SocketBase *base, const char *name, ULONG *addrOut, LONG *herrOut)
+{
+    KprintfH("[bsdsocket] %s: name=%s\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)");
+
+    if (name == NULL)
+    {
         if (herrOut != NULL)
-            *herrOut = herr;
+            *herrOut = SB_HOST_NOT_FOUND;
+        sb_set_herrno(base, SB_HOST_NOT_FOUND);
         return NULL;
     }
 
-    ULONG addr = ip4_addr_get_u32(ip_2_ip4(&base->dnsAddr));
+    ULONG addr = 0;
+    LONG rc = sb_dns_query(base, name, &addr);
+
+    const char *canon = name;
+    char qbuf[256]; /* DNS names are <= 253 chars */
+    if (rc == SB_HOST_NOT_FOUND &&
+        sb_qualify(name, SB_ROOT(base)->defaultDomain, qbuf, sizeof(qbuf)))
+    {
+        /* take the retry's verdict as-is: an interrupted retry must surface
+         * as TRY_AGAIN, not as the bare lookup's definitive NOT_FOUND */
+        rc = sb_dns_query(base, qbuf, &addr);
+        if (rc == 0)
+            canon = qbuf; /* report the name that actually resolved */
+    }
+
+    if (rc != 0)
+    {
+        sb_set_herrno(base, rc); /* SB_TRY_AGAIN or SB_HOST_NOT_FOUND */
+        if (herrOut != NULL)
+            *herrOut = rc;
+        return NULL;
+    }
+
     if (addrOut != NULL)
         *addrOut = addr;
     if (herrOut != NULL)
         *herrOut = 0;
-    return sb_host_fill(base, name, addr);
+    return sb_host_fill(base, canon, addr);
 }
 
 APTR bsd_gethostbyname(STRPTR name asm("a0"), struct SocketBase *base asm("a6"))
@@ -598,25 +754,7 @@ static const struct
     const char *name;
     LONG proto;
 } sb_protos[] = {
-    {"ip", 0}, {"icmp", 1}, {"tcp", 6}, {"udp", 17}, {"raw", 255}, {NULL, 0}};
-
-static BOOL sb_strieq(const char *a, const char *b)
-{
-    // KprintfH("[bsdsocket] %s\n", __func__);
-    while (*a != '\0' && *b != '\0')
-    {
-        char ca = *a, cb = *b;
-        if (ca >= 'A' && ca <= 'Z')
-            ca = (char)(ca + 32);
-        if (cb >= 'A' && cb <= 'Z')
-            cb = (char)(cb + 32);
-        if (ca != cb)
-            return FALSE;
-        a++;
-        b++;
-    }
-    return *a == *b;
-}
+    {"ip", 0}, {"icmp", 1}, {"igmp", 2}, {"tcp", 6}, {"udp", 17}, {"raw", 255}, {NULL, 0}};
 
 static struct sb_protoent *sb_proto_fill(struct SocketBase *base, ULONG idx)
 {
@@ -651,4 +789,15 @@ APTR bsd_getprotobynumber(LONG proto asm("d0"), struct SocketBase *base asm("a6"
             return sb_proto_fill(base, i);
     }
     return NULL;
+}
+
+/* getprotoent iterator: the idx-th sb_protos entry, or NULL past the end.
+ * Keeps get*ent walking the exact same table as getprotobyname/-number. */
+struct sb_protoent *sb_proto_at(struct SocketBase *base, ULONG idx)
+{
+    KprintfH("[bsdsocket] %s: idx=%lu\n", __func__, idx);
+    ULONG count = sizeof(sb_protos) / sizeof(sb_protos[0]) - 1; /* minus sentinel */
+    if (idx >= count)
+        return NULL;
+    return sb_proto_fill(base, idx);
 }
