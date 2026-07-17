@@ -21,5 +21,12 @@
 ; DNS1 = 192.168.1.1
 ; DNS2 = 9.9.9.9
 ;
+; Networks database (getnetbyname/getnetbyaddr): built-in entries are
+; "default 0" and "loopback 127"; NETWORK adds more (repeatable, up to 8,
+; /etc/networks notation — the number is a classful NETWORK number like
+; "192.168.0", not an IP address). Config entries shadow the built-ins.
+; NETWORK = homelan 192.168.0
+; NETWORK = officelan 10
+;
 ; Future: additional interfaces will use IFn_-prefixed keys (IF1_DEVICE,
 ; IF1_MODE, ...). Unprefixed keys are interface 0. Unknown keys are ignored.

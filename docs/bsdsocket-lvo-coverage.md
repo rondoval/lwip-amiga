@@ -70,7 +70,7 @@ All 46 are implemented.
 | `CloseSocket` | −120 | ✅ | ✅ done | |
 | `WaitSelect` | −126 | ✅ | ✅ done | |
 | `SetSocketSignals` | −132 | ✅ | ✅ done | |
-| `getdtablesize` | −138 | ✅ | ✅ done | Fixed table size (`SB_FD_COUNT`). |
+| `getdtablesize` | −138 | ✅ | ✅ done | Returns the opener's current fd-table size (`SB_FD_COUNT` by default, grows via `SBTC_DTABLESIZE`). |
 | `ObtainSocket` | −144 | ✅ | ✅ done | |
 | `ReleaseSocket` | −150 | ✅ | ✅ done | |
 | `ReleaseCopyOfSocket` | −156 | ✅ | ✅ done | Shared copies wake **all** holders (per-base owner refcounting in `SbSocket.owners`). |
@@ -84,8 +84,8 @@ All 46 are implemented.
 | `inet_network` | −204 | ✅ | ✅ done | |
 | `gethostbyname` | −210 | ✅ | ✅ done | |
 | `gethostbyaddr` | −216 | ✅ | ✅ done | Reverse DNS via PTR query (`sb_rdns.c`); `NULL`/`HOST_NOT_FOUND` when no PTR. |
-| `getnetbyname` | −222 | ✅ | ✅ done | |
-| `getnetbyaddr` | −228 | ✅ | ✅ done | |
+| `getnetbyname` | −222 | ✅ | ✅ done | Built-in networks table (`default` 0, `loopback` 127) plus user entries from `netstack.prefs` `NETWORK = name number` (repeatable, /etc/networks notation; config shadows built-ins). |
+| `getnetbyaddr` | −228 | ✅ | ✅ done | Same table; `n_net` is the classful network number, host order. |
 | `getservbyname` | −234 | ✅ | ✅ done | |
 | `getservbyport` | −240 | ✅ | ✅ done | |
 | `getprotobyname` | −246 | ✅ | ✅ done | |
@@ -96,7 +96,7 @@ All 46 are implemented.
 | `recvmsg` | −276 | ✅ | ✅ done | |
 | `gethostname` | −282 | ✅ | ✅ done | |
 | `gethostid` | −288 | ✅ | ✅ done | |
-| `SocketBaseTagList` (+ `SocketBaseTags`) | −294 | ✅ | ✅ done | errno/h_errno wiring, signal masks, syslog config (`SBTC_LOG*`), `SBTC_RELEASESTRPTR` (GET-only, "lwip-amiga x.y"), and `SBTC_HAVE_*` capability probes (see note above). The C runtimes set `SBTC_LOGTAGPTR` at socket-init — declining it aborts init. |
+| `SocketBaseTagList` (+ `SocketBaseTags`) | −294 | ✅ | ✅ done | errno/h_errno wiring (LONGPTR tags readable via GETREF), signal masks, syslog config (`SBTC_LOG*`), `SBTC_RELEASESTRPTR` (GET-only, "lwip-amiga x.y"), `SBTC_DTABLESIZE` GET/SET (grow-only, ceiling `SB_FD_MAX`), and `SBTC_HAVE_*` capability probes (see note above). The C runtimes set `SBTC_LOGTAGPTR` at socket-init — declining it aborts init. |
 | `GetSocketEvents` | −300 | ✅ | ✅ done | |
 
 *(LVOs −306…−360 are 10 reserved slots.)*
@@ -314,12 +314,7 @@ full set is listed here, sourced from `netinclude/libraries/bsdsocket.h`
 Each tag is a `SBTM_{GET,SET}{VAL,REF}(code)` request. A tag this library does
 not handle falls through to `default:` and `SocketBaseTagList` returns that
 tag's **1-based position** — Roadshow's "could not process this item"
-convention. **This is not free to decline:** a C runtime that bundles an
-unsupported tag into its startup taglist aborts with *"bsdsocket.library could
-not be initialized"* — exactly what `SBTC_LOGTAGPTR` (11) did to every clib2
-program before it was handled. Config tags declined below are safe only because
-no CRT sets them at init (`SBTC_CAN_SHARE_LIBRARY_BASES`/`SBTC_ERROR_HOOK`
-arrive in their own non-fatal taglist, *after* init has already succeeded).
+convention.
 
 Legend as above — **Impl.**: ✅ handled · 🟡 handled, one direction/limitation ·
 ⛔ falls through to `default:` (reported as an unprocessed tag).
@@ -332,7 +327,7 @@ Legend as above — **Impl.**: ✅ handled · 🟡 handled, one direction/limita
 | `SBTC_SIGEVENTMASK` | 4 | Signal delivered on `FD_*` socket events | ✅ | ✅ done | |
 | `SBTC_ERRNO` | 6 | Current `errno` value | ✅ | ✅ done | |
 | `SBTC_HERRNO` | 7 | Current `h_errno` value | ✅ | ✅ done | |
-| `SBTC_DTABLESIZE` | 8 | Socket descriptor-table size | 🟡 | ✅ done | GET returns `SB_FD_COUNT`; SET refused (fixed table). |
+| `SBTC_DTABLESIZE` | 8 | Socket descriptor-table size | 🟡 | ✅ done | GET returns the current size; SET grows (never shrinks) up to `SB_FD_MAX`, reallocating the fd table. |
 | `SBTC_FDCALLBACK` | 9 | Link-library fd alloc/free callback | ⛔ | ❌ no | Legacy; the header itself says *"don't use in new code"*. |
 | `SBTC_LOGSTAT` | 10 | `openlog()` options (`LOG_PID`, …) | ✅ | ✅ done | Stored per-opener (advisory). |
 | `SBTC_LOGTAGPTR` | 11 | `syslog` ident string pointer | ✅ | ✅ done | Prefixed to each `vsyslog` line. Set by clib2/newlib at init. |
@@ -345,9 +340,9 @@ Legend as above — **Impl.**: ✅ handled · 🟡 handled, one direction/limita
 | `SBTC_S2WERRNOSTRPTR` | 18 | String for the secondary/wire I/O error code | ⛔ | ❌ no | As above. |
 | `SBTC_ERRNOBYTEPTR` | 21 | Wire `errno` to a caller `BYTE` | ✅ | ✅ done | SET-only (as designed). |
 | `SBTC_ERRNOWORDPTR` | 22 | Wire `errno` to a caller `WORD` | ✅ | ✅ done | SET-only. |
-| `SBTC_ERRNOLONGPTR` | 24 | Wire `errno` to a caller `LONG` | ✅ | ✅ done | SET-only; `NULL` restores the internal errno. |
-| `SBTC_HERRNOLONGPTR` | 25 | Wire `h_errno` to a caller `LONG` | ✅ | ✅ done | SET-only; `NULL` restores the internal h_errno. |
-| `SBTC_RELEASESTRPTR` | 29 | Pointer to the stack's release/version string | ⛔ | 🔜 later | Trivial to return the `$VER` string; low demand. |
+| `SBTC_ERRNOLONGPTR` | 24 | Wire `errno` to a caller `LONG` | ✅ | ✅ done | SET: `NULL` restores the internal errno. GET: returns the registered pointer, or 0 if the current pointer isn't LONG-sized (e.g. narrowed by a later `SetErrnoPtr`). |
+| `SBTC_HERRNOLONGPTR` | 25 | Wire `h_errno` to a caller `LONG` | ✅ | ✅ done | SET: `NULL` restores the internal h_errno. GET: returns the registered pointer. |
+| `SBTC_RELEASESTRPTR` | 29 | Pointer to the stack's release/version string | ✅ | ✅ done | GET-only; returns the build's release string ("lwip-amiga x.y"). |
 | `SBTC_UDP_CHECKSUM` | 42 | Enable/disable UDP checksums | ⛔ | ❌ no | lwIP always checksums UDP; not runtime-toggleable. |
 | `SBTC_IP_FORWARDING` | 43 | Enable/disable IP forwarding | ⛔ | ❌ no | Single-homed host, not a router. |
 | `SBTC_IP_DEFAULT_TTL` | 44 | Get/set default IP TTL | ⛔ | ❌ no | Fixed at the lwIP default. |

@@ -16,7 +16,8 @@
 
 #include "netstack.h"
 
-#define SB_FD_WORDS ((SB_FD_COUNT + 31) / 32)
+/* working copies must cover the largest possible table (SBTC_DTABLESIZE) */
+#define SB_FD_WORDS ((SB_FD_MAX + 31) / 32)
 
 static BOOL sb_fd_bit(const ULONG *set, LONG fd)
 {
@@ -79,8 +80,8 @@ LONG bsd_WaitSelect(LONG nfds asm("d0"), APTR readfds asm("a0"), APTR writefds a
         sb_set_errno(base, SB_EINVAL);
         return -1;
     }
-    if (nfds > SB_FD_COUNT)
-        nfds = SB_FD_COUNT; /* truncate, per the autodoc */
+    if (nfds > (LONG)base->fdCount)
+        nfds = (LONG)base->fdCount; /* truncate, per the autodoc */
     if (tv != NULL && tv->tv_micro >= 1000000)
     {
         sb_set_errno(base, SB_EINVAL);

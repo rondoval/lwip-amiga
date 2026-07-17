@@ -11,6 +11,7 @@
 
 #include <minlist.h>
 
+#include <lwip/netif.h>
 #include <lwip/raw.h>
 #include <lwip/tcp.h>
 #include <lwip/udp.h>
@@ -304,6 +305,30 @@ static void sb_tcp_err_cb(void *arg, err_t err)
     sb_wake(s);
 }
 
+/* Locally-delivered connections (loopback, or hairpin to one of our own
+ * addresses) never touch a wire, so Nagle's small-segment hold buys nothing —
+ * it only inserts the peer's delayed-ACK interval (~250 ms) between sub-MSS
+ * sends, which reads as "data never arrived" to loopback-testing apps. Real
+ * stacks don't show this because their loopback RTT makes the hold invisible. */
+static void sb_tcp_nagle_local(struct SbSocket *s)
+{
+    KprintfH("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
+    const ip4_addr_t *remote = ip_2_ip4(&s->pcb.tcp->remote_ip);
+
+    if (!ip4_addr_isloopback(remote))
+    {
+        struct netif *nif;
+        NETIF_FOREACH(nif)
+        {
+            if (ip4_addr_eq(remote, netif_ip4_addr(nif)))
+                break;
+        }
+        if (nif == NULL)
+            return;
+    }
+    tcp_nagle_disable(s->pcb.tcp);
+}
+
 err_t sb_tcp_connected_cb(void *arg, struct tcp_pcb *tpcb, err_t err)
 {
     KprintfH("[bsdsocket] %s: s=0x%08lx err=%ld\n", __func__, (ULONG)arg, (LONG)err);
@@ -316,6 +341,7 @@ err_t sb_tcp_connected_cb(void *arg, struct tcp_pcb *tpcb, err_t err)
         {
             s->connecting = FALSE;
             s->connected = TRUE;
+            sb_tcp_nagle_local(s);
             sb_event(s, SB_FD_CONNECT);
         }
         else
@@ -357,6 +383,7 @@ static err_t sb_tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err)
     s->pcb.tcp = newpcb;
     s->connected = TRUE;
     sb_tcp_wire(s);
+    sb_tcp_nagle_local(s);
 
     AddTailMinList(&lst->acceptq, &s->node);
     lst->naccept++;
@@ -419,10 +446,14 @@ static u8_t sb_raw_recv_cb(void *arg, struct raw_pcb *rpcb, struct pbuf *p,
     if (s == NULL)
         return 0;
 
-    /* raw sockets deliver the packet including the IP header (BSD) — lwIP
-     * hands it to us that way already */
-    sb_dgram_queue(s, p, addr, 0);
-    return 1; /* consumed */
+    /* BSD raw sockets receive a COPY (IP header included — lwIP hands the
+     * pbuf to us that way) while the stack keeps processing the original:
+     * eating the packet here would stop icmp_input from answering echo
+     * requests aimed at our own addresses (loopback ping). */
+    struct pbuf *q = pbuf_clone(PBUF_RAW, PBUF_RAM, p);
+    if (q != NULL)
+        sb_dgram_queue(s, q, addr, 0);
+    return 0; /* not consumed; lwIP continues protocol processing */
 }
 
 /* ---------------------------------------------------------- lifecycle --- */
@@ -478,7 +509,9 @@ void sb_sock_free(struct SocketBase *base, struct SbSocket *s)
                 tcp_recv(pcb, NULL);
                 tcp_sent(pcb, NULL);
                 tcp_err(pcb, NULL);
-                if (tcp_close(pcb) != ERR_OK)
+                if (s->lingerOn && s->lingerTime == 0)
+                    tcp_abort(pcb); /* SO_LINGER(0): hard close, RST */
+                else if (tcp_close(pcb) != ERR_OK)
                     tcp_abort(pcb);
             }
         }
@@ -529,12 +562,12 @@ void sb_sock_free(struct SocketBase *base, struct SbSocket *s)
 LONG sb_fd_alloc(struct SocketBase *base, struct SbSocket *s)
 {
     KprintfH("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
-    for (LONG i = 0; i < SB_FD_COUNT; i++)
+    for (ULONG i = 0; i < base->fdCount; i++)
     {
         if (base->fd[i] == NULL)
         {
             base->fd[i] = s;
-            return i;
+            return (LONG)i;
         }
     }
     return -1;
@@ -543,7 +576,7 @@ LONG sb_fd_alloc(struct SocketBase *base, struct SbSocket *s)
 struct SbSocket *sb_fd_get(struct SocketBase *base, LONG fd)
 {
     // KprintfH("[bsdsocket] %s: fd=%ld\n", __func__, fd);
-    if (fd < 0 || fd >= SB_FD_COUNT || base->fd == NULL)
+    if (fd < 0 || fd >= (LONG)base->fdCount || base->fd == NULL)
         return NULL;
     return base->fd[fd];
 }

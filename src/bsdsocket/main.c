@@ -105,7 +105,7 @@ static void child_cleanup(struct SocketBase *b)
     if (b->fd != NULL)
     {
         /* orphaned sockets die with the base */
-        for (ULONG i = 0; i < SB_FD_COUNT; i++)
+        for (ULONG i = 0; i < b->fdCount; i++)
         {
             if (b->fd[i] != NULL)
             {
@@ -115,7 +115,7 @@ static void child_cleanup(struct SocketBase *b)
                 b->fd[i] = NULL;
             }
         }
-        FreeMem(b->fd, SB_FD_COUNT * sizeof(struct SbSocket *));
+        FreeMem(b->fd, b->fdCount * sizeof(struct SbSocket *));
         b->fd = NULL;
     }
 
@@ -197,7 +197,8 @@ struct SocketBase *LibOpen(ULONG version asm("d0"), struct SocketBase *base asm(
     b->timerReq = (struct timerequest *)CreateIORequest(b->timerPort, sizeof(struct timerequest));
     b->timerOpen = FALSE;
     b->dnsDone = FALSE;
-    b->fd = AllocMem(SB_FD_COUNT * sizeof(struct SbSocket *), MEMF_PUBLIC | MEMF_CLEAR);
+    b->fdCount = SB_FD_COUNT;
+    b->fd = AllocMem(b->fdCount * sizeof(struct SbSocket *), MEMF_PUBLIC | MEMF_CLEAR);
 
     if (b->timerReq != NULL &&
         OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_MICROHZ, &b->timerReq->tr_node, 0) == 0)

@@ -90,6 +90,14 @@ struct sb_servent
     char *s_proto;
 };
 
+struct sb_netent
+{
+    char *n_name;
+    char **n_aliases;
+    LONG n_addrtype;
+    ULONG n_net; /* classful network number, host order */
+};
+
 struct sb_msghdr
 {
     APTR msg_name;
@@ -330,9 +338,17 @@ struct sb_addrinfo
 /* SANA-II hardware type reported for Ethernet interfaces (S2WireType_Ethernet) */
 #define SB_S2WIRETYPE_ETHERNET 1
 
+struct sb_linger
+{
+    LONG l_onoff;
+    LONG l_linger;
+};
+
 /* --- sockets -------------------------------------------------------------- */
 
-#define SB_FD_COUNT 64
+#define SB_FD_COUNT 64  /* per-opener default (AmiTCP minimum) */
+#define SB_FD_MAX 256   /* SBTC_DTABLESIZE growth ceiling; sizes WaitSelect's
+                         * stack-local fd_set copies, so keep it modest */
 #define SB_DGRAM_QMAX 32
 #define SB_ACCEPT_QMAX 16
 #define SB_HOSTNAME_MAX 128
@@ -385,6 +401,10 @@ struct SbSocket
     UBYTE shut_rd;
     UBYTE shut_wr;
 
+    UBYTE lingerOn; /* SO_LINGER; on + time 0 => abort (RST) on close */
+    UBYTE pad2;
+    UWORD lingerTime; /* seconds */
+
     union
     {
         struct tcp_pcb *tcp;
@@ -422,36 +442,37 @@ struct SbSocket
 
 struct SocketBase
 {
-    struct Library libNode;
-    ULONG segList;
+    struct Library libNode; /* Exec library node; must stay first */
+    ULONG segList;          /* our seglist, handed back by LibExpunge to unload us */
     struct SocketBase *root; /* NULL in the root base itself */
 
     /* --- root-only state --- */
     struct SignalSemaphore openLock; /* guards stack startup/shutdown */
-    struct Task *stackTask;
+    struct Task *stackTask;         /* the lwIP stack task; NULL while the stack is down */
     APTR sockPool;      /* objects; alloc/free under the core lock only */
     ULONG openCount;    /* child bases alive */
     struct MinList releasedSockets; /* ReleaseSocket parking lot (core lock) */
-    LONG nextSockId;
-    char defaultDomain[SB_HOSTNAME_MAX];
+    LONG nextSockId;    /* ReleaseSocket UNIQUE_ID allocator; wraps to 1 rather
+                         * than going negative, and skips ids still parked */
+    char defaultDomain[SB_HOSTNAME_MAX]; /* Set/GetDefaultDomainName; "" = unset */
     /* startup configuration: written once by the stack task before
      * sb_stack_start() returns (i.e. before the first OpenLibrary()
      * completes), read-only afterwards — no locking needed */
     struct SbNetConfig netCfg;
 
     /* --- per-opener state (child bases; garbage in the root) --- */
-    struct Task *task;
-    BYTE sigBit;
+    struct Task *task;  /* the opener; the Signal() target of every wake */
+    BYTE sigBit;        /* the wait bit of the header's blocking pattern; -1 if AllocSignal failed */
     UBYTE pad0[3];
-    ULONG breakMask;
-    ULONG sigIoMask;
-    ULONG sigUrgMask;
+    ULONG breakMask;    /* SBTC_BREAKMASK; aborts a blocking call with SB_EINTR (default SIGBREAKF_CTRL_C) */
+    ULONG sigIoMask;    /* SBTC_SIGIOMASK; async SIGIO, delivered on every readiness change (see sb_wake) */
+    ULONG sigUrgMask;   /* SBTC_SIGURGMASK; stored and reported back, never delivered — no OOB support */
     ULONG sigEventMask; /* SBTC_SIGEVENTMASK; stored, delivered with SIGIO */
 
-    LONG internalErrno;
+    LONG internalErrno; /* the errno cell itself, used until SetErrnoPtr redirects errnoPtr */
     APTR errnoPtr;   /* defaults to &internalErrno */
     ULONG errnoSize; /* 1, 2 or 4 */
-    LONG hErrno;
+    LONG hErrno;     /* the h_errno counterpart of internalErrno */
     LONG *hErrnoPtr; /* defaults to &hErrno */
 
     /* syslog configuration (SBTC_LOG*; see bsd_vsyslog). logMask defaults to
@@ -462,29 +483,36 @@ struct SocketBase
     ULONG logFacility; /* default facility — advisory */
     ULONG logMask;     /* setlogmask() priority bitmask */
 
-    struct SbSocket **fd; /* SB_FD_COUNT entries */
+    struct SbSocket **fd; /* fdCount entries; grown via SBTC_DTABLESIZE */
+    ULONG fdCount;        /* SB_FD_COUNT..SB_FD_MAX */
 
-    struct MsgPort *timerPort; /* WaitSelect timeouts */
-    struct timerequest *timerReq;
-    UBYTE timerOpen;
-    UBYTE dnsDone;
+    struct MsgPort *timerPort;   /* WaitSelect and SO_SNDTIMEO/SO_RCVTIMEO deadlines */
+    struct timerequest *timerReq; /* UNIT_MICROHZ; one request, reused per blocking call */
+    UBYTE timerOpen;   /* timer.device opened; FALSE => sb_wait_to falls back to blocking forever */
+    UBYTE dnsDone;     /* handshake cell: the resolver callback sets it, then signals sigBit */
     UBYTE pad1[2];
 
-    /* DNS + netdb per-opener result storage */
-    ip_addr_t dnsAddr;
-    LONG dnsErr;
-    struct sb_hostent host;
-    char hostName[SB_HOSTNAME_MAX];
-    ULONG hostAddr;        /* network order */
-    char *hostAddrList[2];
-    char *hostAliases[1];
-    struct sb_protoent proto;
-    char *protoAliases[1];
-    struct sb_servent serv;
-    char *servAliases[1];
+    /* DNS + netdb per-opener result storage. The netdb calls return pointers
+     * straight into these fields, so each result stays valid only until the
+     * same opener's next call in that family — the classic BSD contract, and
+     * why they live per-base rather than in the root. */
+    ip_addr_t dnsAddr; /* dns_gethostbyname result cell, filled by sb_dns_cb */
+    LONG dnsErr;       /* 0 or SB_HOST_NOT_FOUND, from the same callback */
+    struct sb_hostent host;         /* gethostbyname/byaddr result; points at the fields below */
+    char hostName[SB_HOSTNAME_MAX]; /* h_name backing store */
+    ULONG hostAddr;        /* network order; the single address h_addr_list[0] points at */
+    char *hostAddrList[2]; /* { &hostAddr, NULL } — always one address */
+    char *hostAliases[1];  /* always { NULL } — the resolver never reports aliases */
+    struct sb_protoent proto; /* getprotobyname/bynumber/getprotoent result */
+    char *protoAliases[1];    /* always { NULL } */
+    struct sb_servent serv;   /* getservbyname/byport/getservent result */
+    char *servAliases[1];     /* always { NULL } */
+    struct sb_netent net;     /* getnetbyname/byaddr/getnetent result */
+    char *netAliases[1];      /* always { NULL } */
     ULONG protoIdx; /* get*ent iterators */
     ULONG servIdx;
-    char ntoaBuf[20];
+    ULONG netIdx;
+    char ntoaBuf[20]; /* Inet_NtoA return buffer */
 };
 
 #define SB_ROOT(b) ((b)->root != NULL ? (b)->root : (b))

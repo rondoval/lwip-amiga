@@ -20,6 +20,10 @@
  *   HOSTNAME = amiga                   DHCP option 12 / gethostname()
  *   VLAN     = vid[,pcp]               in-band 802.1Q (vid 1..4094, pcp 0..7);
  *                                      absent = untagged
+ *   NETWORK  = name number             networks-database entry (repeatable,
+ *                                      up to SB_CFG_NETWORKS_MAX), /etc/networks
+ *                                      notation ("homelan 192.168.0"); entries
+ *                                      shadow the built-ins (default, loopback)
  *
  * Multi-interface reservation: unprefixed keys are interface 0. A future
  * IFn_ prefix (IF1_DEVICE, IF1_MODE, ...) adds interfaces without a format
@@ -35,6 +39,14 @@
 
 #define SB_CFG_DEVICE_MAX   64
 #define SB_CFG_HOSTNAME_MAX 64
+#define SB_CFG_NETWORKS_MAX 8
+#define SB_CFG_NETNAME_MAX  32
+
+struct SbCfgNetwork
+{
+    char  name[SB_CFG_NETNAME_MAX];
+    ULONG net; /* classful network number, host order (/etc/networks) */
+};
 
 struct SbNetConfig
 {
@@ -47,6 +59,8 @@ struct SbNetConfig
     ip4_addr_t cfg_Dns[2];
     char       cfg_Hostname[SB_CFG_HOSTNAME_MAX];
     LONG       cfg_VlanTci;   /* -1 = no VLAN; else (pcp<<13)|(vid&0xFFF) */
+    struct SbCfgNetwork cfg_Networks[SB_CFG_NETWORKS_MAX];
+    ULONG      cfg_NumNetworks;
 };
 
 /* Defaults, then overrides from ENV:netstack.prefs. Needs a Process (DOS

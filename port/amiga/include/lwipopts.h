@@ -76,7 +76,7 @@
 #define MEMP_OVERFLOW_CHECK             1
 #define MEMP_SANITY_CHECK               1
 #endif
-#define MEMP_NUM_TCP_PCB                64
+#define MEMP_NUM_TCP_PCB                256
 #define MEMP_NUM_TCP_PCB_LISTEN         16
 #define MEMP_NUM_UDP_PCB                32
 #define MEMP_NUM_RAW_PCB                8

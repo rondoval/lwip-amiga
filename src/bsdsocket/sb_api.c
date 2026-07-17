@@ -370,6 +370,11 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
     BOOL dontwait = s->nonblock || (flags & SB_MSG_DONTWAIT);
     struct SbTimedWait tw = { 0, FALSE };
 
+    /* no TCP urgent data: lwIP never sets the URG bit, so accepting the flag
+     * would silently send the byte inline — refuse instead (callers probe) */
+    if (flags & SB_MSG_OOB)
+        return sb_fail(base, SB_EOPNOTSUPP);
+
     netstack_lock();
     while (sent < len)
     {
@@ -687,6 +692,11 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
     BOOL waitall = (flags & SB_MSG_WAITALL) != 0;
     LONG copied = 0;
     struct SbTimedWait tw = { 0, FALSE };
+
+    /* no urgent data support (sends refuse MSG_OOB), so there is never OOB
+     * to read — EINVAL, per BSD for "no out-of-band data pending" */
+    if (flags & SB_MSG_OOB)
+        return sb_fail(base, SB_EINVAL);
 
     netstack_lock();
     for (;;)
@@ -1160,8 +1170,19 @@ LONG bsd_setsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
             break;
         case SB_SO_SNDBUF:
         case SB_SO_RCVBUF:
-        case SB_SO_LINGER:
             break; /* accepted, fixed internally */
+        case SB_SO_LINGER:
+        {
+            const struct sb_linger *lg = optval;
+            if (lg == NULL || optlen < (LONG)sizeof(*lg))
+            {
+                e = SB_EINVAL;
+                break;
+            }
+            s->lingerOn = lg->l_onoff != 0;
+            s->lingerTime = (UWORD)lg->l_linger;
+            break;
+        }
         case SB_SO_EVENTMASK:
         {
             /* subscription may arrive AFTER the state it cares about
@@ -1241,6 +1262,20 @@ LONG bsd_getsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
     if (optval == NULL || optlen == NULL || *(LONG *)optlen < (LONG)sizeof(LONG))
         return sb_fail(base, SB_EINVAL);
 
+    if (level == SB_IPPROTO_TCP)
+    {
+        if (optname != SB_TCP_NODELAY || s->type != SBT_TCP)
+            return sb_fail(base, SB_ENOPROTOOPT);
+        netstack_lock();
+        LONG nd = (s->pcb.tcp != NULL && tcp_nagle_disabled(s->pcb.tcp)) ? 1 : 0;
+        netstack_unlock();
+        *(LONG *)optval = nd;
+        *(LONG *)optlen = sizeof(LONG);
+        return 0;
+    }
+    if (level != SB_SOL_SOCKET)
+        return sb_fail(base, SB_ENOPROTOOPT);
+
     LONG val;
     switch (optname)
     {
@@ -1259,6 +1294,16 @@ LONG bsd_getsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
         *(LONG *)optlen = sizeof(*tv);
         return 0;
     }
+    case SB_SO_LINGER:
+    {
+        if (*(LONG *)optlen < (LONG)sizeof(struct sb_linger))
+            return sb_fail(base, SB_EINVAL);
+        struct sb_linger *lg = optval;
+        lg->l_onoff = s->lingerOn;
+        lg->l_linger = s->lingerTime;
+        *(LONG *)optlen = sizeof(*lg);
+        return 0;
+    }
     case SB_SO_ERROR:
         netstack_lock();
         val = s->err;
@@ -1270,9 +1315,27 @@ LONG bsd_getsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
               : s->type == SBT_UDP ? SB_SOCK_DGRAM
                                    : SB_SOCK_RAW;
         break;
+    case SB_SO_REUSEADDR:
+    case SB_SO_KEEPALIVE:
+    case SB_SO_BROADCAST:
+    {
+        u8_t optbit = optname == SB_SO_REUSEADDR  ? SOF_REUSEADDR
+                      : optname == SB_SO_KEEPALIVE ? SOF_KEEPALIVE
+                                                   : SOF_BROADCAST;
+        netstack_lock();
+        val = (s->pcb.any != NULL &&
+               ip_get_option((struct ip_pcb *)s->pcb.any, optbit)) ? 1 : 0;
+        netstack_unlock();
+        break;
+    }
+    case SB_SO_SNDBUF:
+        /* fixed internally; report the real capacity (setsockopt is a no-op) */
+        val = s->type == SBT_TCP ? TCP_SND_BUF : 0xFFFF;
+        break;
+    case SB_SO_RCVBUF:
+        val = s->type == SBT_TCP ? TCP_WND : 0xFFFF;
+        break;
     default:
-        if (level != SB_SOL_SOCKET)
-            return sb_fail(base, SB_ENOPROTOOPT);
         return sb_fail(base, SB_ENOPROTOOPT);
     }
 
@@ -1292,7 +1355,7 @@ LONG bsd_GetSocketEvents(ULONG *eventsp asm("a0"), struct SocketBase *base asm("
         return -1;
 
     netstack_lock();
-    for (LONG fd = 0; fd < SB_FD_COUNT; fd++)
+    for (ULONG fd = 0; fd < base->fdCount; fd++)
     {
         struct SbSocket *s = base->fd[fd];
         if (s == NULL || s->eventsPending == 0)
@@ -1302,7 +1365,7 @@ LONG bsd_GetSocketEvents(ULONG *eventsp asm("a0"), struct SocketBase *base asm("
         if (s->naccept > 1 && (s->eventMask & SB_FD_ACCEPT))
             s->eventsPending = SB_FD_ACCEPT;
         netstack_unlock();
-        return fd;
+        return (LONG)fd;
     }
     netstack_unlock();
     return -1;
@@ -1311,8 +1374,7 @@ LONG bsd_GetSocketEvents(ULONG *eventsp asm("a0"), struct SocketBase *base asm("
 LONG bsd_getdtablesize(struct SocketBase *base asm("a6"))
 {
     KprintfH("[bsdsocket] %s\n", __func__);
-    (void)base;
-    return SB_FD_COUNT;
+    return (LONG)base->fdCount;
 }
 
 VOID bsd_SetSocketSignals(ULONG intMask asm("d0"), ULONG ioMask asm("d1"),

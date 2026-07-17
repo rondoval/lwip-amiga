@@ -46,7 +46,7 @@ LONG bsd_Dup2Socket(LONG oldSock asm("d0"), LONG newSock asm("d1"),
     }
     else
     {
-        if (newSock < 0 || newSock >= SB_FD_COUNT)
+        if (newSock < 0 || newSock >= (LONG)base->fdCount)
         {
             netstack_unlock();
             sb_set_errno(base, SB_EBADF);
@@ -333,10 +333,10 @@ VOID bsd_vsyslog(LONG pri asm("d0"), STRPTR msg asm("a0"), APTR args asm("a1"),
     if (base != NULL && !(base->logMask & SB_LOG_MASK(pri)))
         return;
     sb_vformat(buf, sizeof(buf), (const char *)msg, args);
-    STRPTR tag = base != NULL ? base->logTagPtr : NULL;
-    Kprintf("[syslog:%ld] %s%s%s\n", pri,
-            tag != NULL ? (ULONG)tag : (ULONG)"",
-            tag != NULL ? (ULONG)": " : (ULONG)"", (ULONG)buf);
+    if (base != NULL && base->logTagPtr != NULL)
+        Kprintf("[syslog:%ld] %s: %s\n", pri, (ULONG)base->logTagPtr, (ULONG)buf);
+    else
+        Kprintf("[syslog:%ld] %s\n", pri, (ULONG)buf);
 }
 
 /* --------------------------------------- ObtainSocket / ReleaseSocket --- */
@@ -585,21 +585,69 @@ APTR bsd_getservbyport(LONG port asm("d0"), STRPTR proto asm("a0"),
     return NULL;
 }
 
+/* networks database: built-in /etc/networks equivalent (no file on this
+ * platform) plus the user's NETWORK= entries from netstack.prefs (read-only
+ * after stack startup, so no locking). Config entries are searched first —
+ * they shadow the built-ins. n_net is the classful network number in host
+ * order, per BSD. */
+static const struct
+{
+    const char *name;
+    ULONG net;
+} sb_networks[] = {
+    {"default", 0},
+    {"loopback", 127},
+    {NULL, 0}};
+
+#define SB_NETWORKS_BUILTIN (sizeof(sb_networks) / sizeof(sb_networks[0]) - 1)
+
+static struct sb_netent *sb_net_fill(struct SocketBase *base, const char *name, ULONG net)
+{
+    KprintfH("[bsdsocket] %s: name=%s net=%lu\n", __func__, (ULONG)name, net);
+    base->net.n_name = (char *)name;
+    base->netAliases[0] = NULL;
+    base->net.n_aliases = base->netAliases;
+    base->net.n_addrtype = SB_AF_INET;
+    base->net.n_net = net;
+    return &base->net;
+}
+
 APTR bsd_getnetbyname(STRPTR name asm("a0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s\n", __func__);
-    (void)name;
-    (void)base;
-    return NULL; /* no networks database */
+    KprintfH("[bsdsocket] %s: name=%s\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)");
+    if (name == NULL)
+        return NULL;
+    const struct SbNetConfig *cfg = &SB_ROOT(base)->netCfg;
+    for (ULONG i = 0; i < cfg->cfg_NumNetworks; i++)
+    {
+        if (sb_streq_nocase((const char *)name, cfg->cfg_Networks[i].name))
+            return sb_net_fill(base, cfg->cfg_Networks[i].name, cfg->cfg_Networks[i].net);
+    }
+    for (ULONG i = 0; sb_networks[i].name != NULL; i++)
+    {
+        if (sb_streq_nocase((const char *)name, sb_networks[i].name))
+            return sb_net_fill(base, sb_networks[i].name, sb_networks[i].net);
+    }
+    return NULL;
 }
 
 APTR bsd_getnetbyaddr(ULONG net asm("d0"), LONG type asm("d1"),
                       struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: net=0x%08lx\n", __func__, net);
-    (void)net;
-    (void)type;
-    (void)base;
+    KprintfH("[bsdsocket] %s: net=%lu type=%ld\n", __func__, net, type);
+    if (type != SB_AF_INET)
+        return NULL;
+    const struct SbNetConfig *cfg = &SB_ROOT(base)->netCfg;
+    for (ULONG i = 0; i < cfg->cfg_NumNetworks; i++)
+    {
+        if (cfg->cfg_Networks[i].net == net)
+            return sb_net_fill(base, cfg->cfg_Networks[i].name, cfg->cfg_Networks[i].net);
+    }
+    for (ULONG i = 0; sb_networks[i].name != NULL; i++)
+    {
+        if (sb_networks[i].net == net)
+            return sb_net_fill(base, sb_networks[i].name, sb_networks[i].net);
+    }
     return NULL;
 }
 
@@ -607,20 +655,31 @@ VOID bsd_setnetent(LONG stayOpen asm("d0"), struct SocketBase *base asm("a6"))
 {
     KprintfH("[bsdsocket] %s\n", __func__);
     (void)stayOpen;
-    (void)base;
+    base->netIdx = 0;
 }
 
 VOID bsd_endnetent(struct SocketBase *base asm("a6"))
 {
     KprintfH("[bsdsocket] %s\n", __func__);
-    (void)base;
+    base->netIdx = 0;
 }
 
 APTR bsd_getnetent(struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s\n", __func__);
-    (void)base;
-    return NULL;
+    KprintfH("[bsdsocket] %s: idx=%lu\n", __func__, (ULONG)base->netIdx);
+    /* config entries first, then the built-ins — same order lookups use */
+    const struct SbNetConfig *cfg = &SB_ROOT(base)->netCfg;
+    ULONG idx = base->netIdx;
+    if (idx < cfg->cfg_NumNetworks)
+    {
+        base->netIdx++;
+        return sb_net_fill(base, cfg->cfg_Networks[idx].name, cfg->cfg_Networks[idx].net);
+    }
+    idx -= cfg->cfg_NumNetworks;
+    if (idx >= SB_NETWORKS_BUILTIN)
+        return NULL;
+    base->netIdx++;
+    return sb_net_fill(base, sb_networks[idx].name, sb_networks[idx].net);
 }
 
 VOID bsd_setprotoent(LONG stayOpen asm("d0"), struct SocketBase *base asm("a6"))

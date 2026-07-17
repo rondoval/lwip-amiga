@@ -29,6 +29,39 @@ static void sb_cfg_copy(char *dst, ULONG max, const char *src)
     dst[i] = '\0';
 }
 
+/* /etc/networks notation: 1..4 dot-separated octets, most significant first —
+ * "127" = 127, "192.168.6" = 0xC0A806. NOT an IP address (inet_addr pads the
+ * missing octets differently). */
+static BOOL sb_cfg_parse_netnum(const char *s, ULONG *out)
+{
+    ULONG net = 0;
+    ULONG parts = 0;
+    while (*s != '\0')
+    {
+        ULONG octet = 0;
+        ULONG digits = 0;
+        while (*s >= '0' && *s <= '9')
+        {
+            octet = octet * 10 + (ULONG)(*s - '0');
+            if (octet > 255)
+                return FALSE;
+            s++;
+            digits++;
+        }
+        if (digits == 0 || ++parts > 4)
+            return FALSE;
+        net = (net << 8) | octet;
+        if (*s == '.')
+            s++;
+        else if (*s != '\0')
+            return FALSE;
+    }
+    if (parts == 0)
+        return FALSE;
+    *out = net;
+    return TRUE;
+}
+
 static void sb_cfg_defaults(struct SbNetConfig *cfg)
 {
     for (ULONG i = 0; i < sizeof(*cfg); i++)
@@ -169,6 +202,32 @@ void sb_config_load(struct SbNetConfig *cfg)
                 cfg->cfg_VlanTci = ((pcp & 7) << 13) | (vid & 0xFFF);
             else
                 Kprintf("[bsdsocket] netstack.prefs: bad VLAN '%s'\n", val);
+        }
+        else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "NETWORK") == 0)
+        {
+            /* NETWORK = <name> <number>  (repeatable): extra networks-database
+             * entries for getnetbyname/getnetbyaddr, shadowing the built-ins */
+            char *num = val;
+            while (*num && *num != ' ' && *num != '\t')
+                num++;
+            if (*num != '\0')
+            {
+                *num++ = '\0';
+                while (*num == ' ' || *num == '\t')
+                    num++;
+            }
+            ULONG netnum;
+            if (*val == '\0' || !sb_cfg_parse_netnum(num, &netnum))
+                Kprintf("[bsdsocket] netstack.prefs: bad NETWORK '%s'\n", val);
+            else if (cfg->cfg_NumNetworks >= SB_CFG_NETWORKS_MAX)
+                Kprintf("[bsdsocket] netstack.prefs: NETWORK table full (max %ld)\n",
+                        (LONG)SB_CFG_NETWORKS_MAX);
+            else
+            {
+                struct SbCfgNetwork *n = &cfg->cfg_Networks[cfg->cfg_NumNetworks++];
+                sb_cfg_copy(n->name, sizeof(n->name), val);
+                n->net = netnum;
+            }
         }
         /* unknown keys are ignored (incl. future IFn_ prefixes) */
     }

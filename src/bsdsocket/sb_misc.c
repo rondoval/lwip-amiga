@@ -6,10 +6,12 @@
 
 #include "sb_base.h"
 
+#include <exec/memory.h>
 #include <utility/tagitem.h>
 
 #include <lwip/dns.h>
 #include <lwip/ip4_addr.h>
+#include <lwip/netif.h>
 
 #include <debug.h>
 
@@ -140,8 +142,24 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
             if (isSet)
             {
                 base->sigEventMask = *valp;
-                if (*valp != 0 && base->task != NULL)
-                    Signal(base->task, *valp);
+                /* events latched before the mask was registered (SO_EVENTMASK
+                 * armed first) would otherwise never signal — but a bare
+                 * registration must stay silent: an unconditional Signal here
+                 * reads as a spurious event to apps that trust the mask */
+                if (*valp != 0 && base->task != NULL && base->fd != NULL)
+                {
+                    netstack_lock();
+                    for (ULONG i = 0; i < base->fdCount; i++)
+                    {
+                        struct SbSocket *sk = base->fd[i];
+                        if (sk != NULL && sk->eventsPending != 0)
+                        {
+                            Signal(base->task, *valp);
+                            break;
+                        }
+                    }
+                    netstack_unlock();
+                }
             }
             else
                 *valp = base->sigEventMask;
@@ -186,8 +204,31 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
             break;
         case SBTC_DTABLESIZE:
             if (isSet)
-                return index; /* fixed in this implementation */
-            *valp = SB_FD_COUNT;
+            {
+                /* grow-only: shrinking under open sockets is unanswerable
+                 * (AmiTCP keeps the bigger table too); a shrink request
+                 * succeeds but keeps the current size */
+                ULONG want = *valp;
+                if (want > SB_FD_MAX)
+                    want = SB_FD_MAX;
+                if (want > base->fdCount)
+                {
+                    struct SbSocket **nfd =
+                        AllocMem(want * sizeof(struct SbSocket *), MEMF_PUBLIC | MEMF_CLEAR);
+                    if (nfd == NULL)
+                        return index;
+                    netstack_lock();
+                    CopyMem(base->fd, nfd, base->fdCount * sizeof(struct SbSocket *));
+                    struct SbSocket **ofd = base->fd;
+                    ULONG ocount = base->fdCount;
+                    base->fd = nfd;
+                    base->fdCount = want;
+                    netstack_unlock();
+                    FreeMem(ofd, ocount * sizeof(struct SbSocket *));
+                }
+            }
+            else
+                *valp = base->fdCount;
             break;
         case SBTC_ERRNOBYTEPTR:
             if (!isSet)
@@ -203,7 +244,12 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
             break;
         case SBTC_ERRNOLONGPTR:
             if (!isSet)
-                return index;
+            {
+                /* readback: the registered pointer, but only while it is
+                 * actually long-sized (SetErrnoPtr can have narrowed it) */
+                *valp = base->errnoSize == 4 ? (ULONG)base->errnoPtr : 0;
+                break;
+            }
             if ((APTR)*valp != NULL)
             {
                 base->errnoPtr = (APTR)*valp;
@@ -217,7 +263,10 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
             break;
         case SBTC_HERRNOLONGPTR:
             if (!isSet)
-                return index;
+            {
+                *valp = (ULONG)base->hErrnoPtr;
+                break;
+            }
             base->hErrnoPtr = (APTR)*valp != NULL ? (LONG *)*valp : &base->hErrno;
             break;
         case SBTC_RELEASESTRPTR:
@@ -373,10 +422,11 @@ ULONG bsd_Inet_MakeAddr(ULONG net asm("d0"), ULONG host asm("d1"),
 ULONG bsd_inet_network(STRPTR cp asm("a0"), struct SocketBase *base asm("a6"))
 {
     KprintfH("[bsdsocket] %s: cp=%s\n", __func__, cp != NULL ? (ULONG)cp : (ULONG)"(null)");
-    ULONG a = bsd_inet_addr(cp, base);
-    if (a == 0xFFFFFFFF)
-        return 0xFFFFFFFF;
-    return bsd_Inet_NetOf(a, base);
+    /* like inet_addr but host byte order — the full 32-bit value
+     * ("10.0.0.0" -> 0x0a000000), NOT the classful network number.
+     * On big-endian 68k host order == network order, so this is the
+     * inet_addr value unchanged (INADDR_NONE passes through). */
+    return bsd_inet_addr(cp, base);
 }
 
 /* ---------------------------------------------------------- DNS / netdb --- */
@@ -530,7 +580,16 @@ ULONG bsd_gethostid(struct SocketBase *base asm("a6"))
 {
     KprintfH("[bsdsocket] %s\n", __func__);
     (void)base;
-    return 0;
+    /* BSD convention: the host identifier is the primary IP address;
+     * unconfigured hosts still answer non-zero with the loopback address */
+    ULONG id = 0;
+    netstack_lock();
+    if (netif_default != NULL)
+        id = ip4_addr_get_u32(netif_ip4_addr(netif_default));
+    netstack_unlock();
+    if (id == 0)
+        id = 0x7F000001UL;
+    return id;
 }
 
 /* getprotobyname/-number over a fixed table */
