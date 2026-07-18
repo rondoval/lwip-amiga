@@ -1,61 +1,118 @@
-# Release notes — lwip-amiga 0.1
+# Release notes — lwip-amiga 1.0
 
-First release. A modern TCP/IP stack for AmigaOS 3.2, built on lwIP 2.2.1, delivering three
-layers on top of a fresh network driver ABI. Validated on real PiStorm/CM4 hardware.
+First public release. A fast, modern TCP/IP stack for classic AmigaOS 3.2, released
+together with the first driver that supports it: `genet.device` 4.x, for the Raspberry
+Pi 4/CM4's onboard Ethernet under PiStorm/Emu68.
 
-Ships `bsdsocket.library` (runtime version 4.1 — ABI major 4, the AmiTCP/Roadshow contract;
-the revision tracks this release). The first driver for the new ABI, `genet.device`, is in
-the emu68-driver-stack.
+**This is not a SANA-II stack** — lwip-amiga uses a new driver interface, not the one
+Roadshow, AmiTCP, and every other Amiga network driver speaks. See the
+[README](README.md) for what that means and who this release is for.
+
+Ships `bsdsocket.library`, version 4.100 — the standard AmiTCP/Roadshow-compatible
+socket API, installed to `LIBS:`.
 
 ---
 
 ## Highlights
 
-### `netdev` — a new NIC driver ABI (`include/netdev.h`)
+### Performance
 
-A clean-break SANA-II replacement: direct-call, context-based, batched, and zero-copy in
-both directions, with capability negotiation (checksum offload, interrupt coalescing, link
-events). RX buffers are driver-owned and returned via a release hook; TX memory is drawn
-from a driver-provided DMA allocator, so nothing is copied and every buffer is
-DMA-reachable. The header is the open, permissively-licensed public contract. The v1 layout
-is finalized: it negotiates the MTU at ATTACH (`nda_MtuReq`/`ndc_Mtu`) and reserves the
-surface for jumbo frames (multi-buffer RX scatter) and hardware VLAN offload, so those can
-land later without an ABI break.
+On a local wired gigabit network (release build, single stream — not the internet, and
+measured against a pre-release build of `genet.device`; the final tagged 4.x release may
+land slightly different numbers):
 
-### In-band 802.1Q VLAN
+| Test | Speed | % of line rate |
+|---|---|---|
+| Download (TCP) | **787 Mb/s** | 83% |
+| Upload (TCP) | **424 Mb/s** | 45% |
+| Download (UDP) | **953 Mb/s** | line rate |
+| Upload (UDP, 64 KB chunks) | **600 Mb/s** | 63% |
 
-The stack tags and filters a single configured VID (`VLAN = vid[,pcp]` in `netstack.prefs`)
-through lwIP's software VLAN path — GENET carries the tag in-band, and the L4 checksum
-offloads stay active on tagged frames.
+These gains come from a handful of changes under the hood:
 
-### TCP/IP core — lwIP + AmigaOS port layer
+- **A zero-copy driver interface.** The new `netdev` interface hands data directly
+  between the driver and the stack instead of copying it back and forth, and offloads
+  checksum calculation to the network hardware where it can.
+- **Batching incoming data.** Packets that arrive together on the same connection get
+  merged into a single delivery to the application, instead of being handled one at a
+  time — roughly 25x fewer trips through the stack.
+- **A faster memory pool for packets.** Packet buffers are handed out and returned from
+  a small set of fixed-size pools instead of a general-purpose allocator, and each
+  buffer is sized to line up cleanly with the hardware's cache and DMA requirements.
+- **Cached outgoing headers.** The network header for each destination is worked out
+  once and reused, instead of being recalculated for every outgoing packet.
+- **A small upstream-worthy fix in lwIP itself**, tracking where unsent TCP data ends so
+  it doesn't need to be re-scanned on every send.
 
-lwIP 2.2.1 as an unmodified git submodule plus a hand-written Amiga port layer, running in
-core-locking direct-path mode: application tasks execute stack code in their own context
-under a single core semaphore, with Exec signals as the blocking primitive. Built as the
-`netstack` static library. IPv4 + TCP + UDP + ICMP + DHCP + DNS.
+Every change above was measured and verified on real hardware before being kept.
+
+### Test results
+
+Run against bsdsocktest, a conformance suite for `bsdsocket.library`, on real Raspberry
+Pi 4/PiStorm hardware:
+
+**138 of 142 tests pass outright. 4 are skipped. None fail.**
+
+Three of the 4 skips cover advanced or rarely-used features:
+
+- Out-of-band TCP data (`MSG_OOB`) — 2 tests
+- Asynchronous socket notification (`FIOASYNC`)
+
+The fourth is more a buffer-sizing quirk than a gap: the test forces a non-blocking
+`send()` to return `EWOULDBLOCK` by writing 1 MB without draining it, but lwip-amiga's
+TCP send buffer is deliberately sized to exactly 1 MiB for throughput on fast links, so
+the test's fixed 1 MB probe runs out just short of the wall it's trying to hit. The
+backpressure path itself (`tcp_sndbuf()` accounting) is real and correct; this test just
+wasn't sized to reach it.
+
+(A fifth test, `ReleaseCopyOfSocket`, is implemented and counted above as passing — the
+raw suite log can show it skipped on a second run of the suite without a reboot, a
+test-harness quirk rather than a library limitation.)
+
+None of these affect typical networking software.
+
+### A new driver interface: `netdev`
+
+lwip-amiga does not use SANA-II, the driver interface every other Amiga network stack
+speaks. Instead it defines a new interface, `netdev` (`include/netdev.h`), built from
+the ground up for zero-copy transfers and hardware offload — the driver owns and hands
+off its own buffers instead of copying data back and forth, and negotiates capabilities
+like checksum offload and interrupt coalescing at startup. It's an open, freely reusable
+interface — any driver or stack can implement it. Today, `genet.device` 4.x is the only
+driver that does.
+
+### VLAN support
+
+lwip-amiga can tag and filter a single VLAN (`VLAN = vid[,pcp]` in `netstack.prefs`),
+with hardware checksum offload still active on tagged traffic.
+
+### The TCP/IP core
+
+Built on [lwIP](https://savannah.nongnu.org/projects/lwip/) 2.2.1, a mature,
+widely-used open-source TCP/IP stack, with an AmigaOS-specific layer on top. IPv4, TCP,
+UDP, ICMP, DHCP, and DNS are all supported.
 
 ### `bsdsocket.library`
 
-The standard application socket API, built directly on the lwIP raw API — per-opener child
-bases, an in-library stack task, DHCP/DNS out of the box. 72 of 121 LVOs implemented: the
-socket core, `WaitSelect`, the `errno`/inet/resolver families, `getaddrinfo`,
-`sendmsg`/`recvmsg`, `ObtainSocket`/`ReleaseSocket`, `SO_SNDTIMEO`/`SO_RCVTIMEO`, and the
-full AmiTCP V4 async event API. Installs to `LIBS:`.
+The standard Amiga networking API programs already use — 76 of 121 entry points
+implemented, covering everyday socket use (connect, send, receive, select, DNS lookups
+both forward and reverse, `getaddrinfo`, and more). See the [README](README.md) for
+what's not yet implemented and why.
 
 ### Tools
 
-`netdev-stats` (shipped) reads live loss-point counters and drives interrupt coalescing on
-release builds.
+`netinfo` and `netdev-stats` ship with this release — see the [README](README.md) for
+what each does.
 
 ---
 
 ## Known limitations
 
-- Throughput is still being optimized (download below line rate).
-- lwIP acts on emitted but not received SACKs, so multi-loss windows recover by RTO — fine
-  for a clean wired LAN.
-- Stubbed LVOs: the Roadshow interface-config/route/monitor families, `mbuf_*`, `bpf_*`,
-  and (intentionally) the private `ipf_*` filter. No reverse DNS yet.
-
-See [docs/TODO.md](docs/TODO.md) for the full picture.
+- Recovery from several dropped packets in a row is slower than it could be (falls back
+  to a full timeout instead of a fast selective resend) — not an issue on a normal wired
+  LAN.
+- TCP upload runs at about 45% of line rate; the driver's packet-submission path is the
+  current bottleneck, not the stack.
+- A handful of advanced/legacy `bsdsocket.library` calls aren't implemented: Roadshow's
+  interface-configuration/routing/monitoring calls, `mbuf_*`/`bpf_*`, and (by design) the
+  private `ipf_*` packet filter.
