@@ -62,8 +62,11 @@ struct NdHhEntry
  * holds, link changes or teardown. Gated on ndi_RxOffload: with lwIP's own
  * TCP checksum check active, a rewritten merged header would fail it. */
 #define NDIF_GRO_FLOWS      4u  /* direct-mapped merge contexts */
-#define NDIF_GRO_MAX_FRAMES 32u /* per merge; keeps merged IPH_LEN well
-                                   under the u16 ceiling (32*MSS+hdrs) */
+#define NDIF_GRO_MAX_FRAMES 44u /* per merge — the u16 IPH_LEN ceiling:
+                                   1500 + 43*1460 = 64280 <= 65535. The
+                                   driver batch (ND_RX_BATCH) is the other
+                                   bound on a run; 64-frame batches split
+                                   into a 44 + a 20. */
 
 /* per-frame pre-lock classification verdict */
 #define NDIF_GRO_NO      0  /* not IPv4/TCP: deliver immediately */
