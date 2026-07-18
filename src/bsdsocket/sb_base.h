@@ -593,9 +593,10 @@ struct SocketBase
 
 /* --- internals ------------------------------------------------------------- */
 
-/* errno plumbing (sb_misc.c) */
+/* errno plumbing (sb_errno.c); sb_fail = set errno, return -1 */
 void sb_set_errno(struct SocketBase *base, LONG code);
 void sb_set_herrno(struct SocketBase *base, LONG code);
+LONG sb_fail(struct SocketBase *base, LONG code);
 
 /* socket core (sb_socket.c) */
 struct SbSocket *sb_sock_alloc(struct SocketBase *base, SbSockType type);
@@ -632,14 +633,12 @@ void sb_raw_wire(struct SbSocket *s);
 BOOL sb_sock_readable(const struct SbSocket *s);
 BOOL sb_sock_writable(struct SbSocket *s);
 LONG sb_map_err(signed char lwip_err);
+/* TCP peer address readout (sb_socket.c); core lock held, 0/0 without a pcb */
+void sb_peer_ip(struct SbSocket *s, ULONG *addr, UWORD *port);
 
-/* datagram recvmsg: scatter the head datagram across mh's iovs (sb_api.c) */
-LONG sb_dgram_recvmsg(struct SocketBase *base, struct SbSocket *s,
-                      struct sb_msghdr *mh, LONG flags);
-/* getprotoent iterator over the sb_protos table (sb_misc.c); NULL past the end */
-struct sb_protoent *sb_proto_at(struct SocketBase *base, ULONG idx);
-/* parse an app sockaddr_in (sb_api.c); shared with sendmsg */
+/* app sockaddr_in conversion (sb_api.c); shared with the sb_io.c data path */
 LONG sb_addr_in(const struct sb_sockaddr_in *sa, LONG salen, ip_addr_t *ip, u16_t *port);
+void sb_addr_out(APTR name, LONG *namelen, ULONG addr, UWORD port);
 
 /* library plumbing (main.c) */
 extern const APTR bsdsocket_functable[];
@@ -658,53 +657,67 @@ void sb_stack_stop(struct SocketBase *root);
 
 struct TagItem;
 
+/* sb_api.c — socket lifecycle and control */
 LONG bsd_socket(LONG domain asm("d0"), LONG type asm("d1"), LONG protocol asm("d2"), struct SocketBase *base asm("a6"));
 LONG bsd_bind(LONG sock asm("d0"), APTR name asm("a0"), LONG namelen asm("d1"), struct SocketBase *base asm("a6"));
 LONG bsd_listen(LONG sock asm("d0"), LONG backlog asm("d1"), struct SocketBase *base asm("a6"));
 LONG bsd_accept(LONG sock asm("d0"), APTR addr asm("a0"), APTR addrlen asm("a1"), struct SocketBase *base asm("a6"));
 LONG bsd_connect(LONG sock asm("d0"), APTR name asm("a0"), LONG namelen asm("d1"), struct SocketBase *base asm("a6"));
+LONG bsd_shutdown(LONG sock asm("d0"), LONG how asm("d1"), struct SocketBase *base asm("a6"));
+LONG bsd_CloseSocket(LONG sock asm("d0"), struct SocketBase *base asm("a6"));
+LONG bsd_getsockname(LONG sock asm("d0"), APTR name asm("a0"), APTR namelen asm("a1"), struct SocketBase *base asm("a6"));
+LONG bsd_getpeername(LONG sock asm("d0"), APTR name asm("a0"), APTR namelen asm("a1"), struct SocketBase *base asm("a6"));
+LONG bsd_IoctlSocket(LONG sock asm("d0"), ULONG req asm("d1"), APTR argp asm("a0"), struct SocketBase *base asm("a6"));
+
+/* sb_io.c — the data path */
 LONG bsd_sendto(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"), LONG flags asm("d2"), APTR to asm("a1"), LONG tolen asm("d3"), struct SocketBase *base asm("a6"));
 LONG bsd_send(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"), LONG flags asm("d2"), struct SocketBase *base asm("a6"));
 LONG bsd_recvfrom(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"), LONG flags asm("d2"), APTR addr asm("a1"), APTR addrlen asm("a2"), struct SocketBase *base asm("a6"));
 LONG bsd_recv(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"), LONG flags asm("d2"), struct SocketBase *base asm("a6"));
-LONG bsd_shutdown(LONG sock asm("d0"), LONG how asm("d1"), struct SocketBase *base asm("a6"));
+LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"), struct SocketBase *base asm("a6"));
+LONG bsd_recvmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"), struct SocketBase *base asm("a6"));
+
+/* sb_sockopt.c — options, events, signals */
 LONG bsd_setsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm("d2"), APTR optval asm("a0"), LONG optlen asm("d3"), struct SocketBase *base asm("a6"));
 LONG bsd_getsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm("d2"), APTR optval asm("a0"), APTR optlen asm("a1"), struct SocketBase *base asm("a6"));
-LONG bsd_getsockname(LONG sock asm("d0"), APTR name asm("a0"), APTR namelen asm("a1"), struct SocketBase *base asm("a6"));
-LONG bsd_getpeername(LONG sock asm("d0"), APTR name asm("a0"), APTR namelen asm("a1"), struct SocketBase *base asm("a6"));
-LONG bsd_IoctlSocket(LONG sock asm("d0"), ULONG req asm("d1"), APTR argp asm("a0"), struct SocketBase *base asm("a6"));
-LONG bsd_CloseSocket(LONG sock asm("d0"), struct SocketBase *base asm("a6"));
-LONG bsd_WaitSelect(LONG nfds asm("d0"), APTR readfds asm("a0"), APTR writefds asm("a1"), APTR exceptfds asm("a2"), APTR timeout asm("a3"), ULONG *signals asm("d1"), struct SocketBase *base asm("a6"));
-VOID bsd_SetSocketSignals(ULONG intMask asm("d0"), ULONG ioMask asm("d1"), ULONG urgMask asm("d2"), struct SocketBase *base asm("a6"));
-LONG bsd_getdtablesize(struct SocketBase *base asm("a6"));
 LONG bsd_GetSocketEvents(ULONG *eventsp asm("a0"), struct SocketBase *base asm("a6"));
+LONG bsd_getdtablesize(struct SocketBase *base asm("a6"));
+VOID bsd_SetSocketSignals(ULONG intMask asm("d0"), ULONG ioMask asm("d1"), ULONG urgMask asm("d2"), struct SocketBase *base asm("a6"));
+
+/* sb_select.c */
+LONG bsd_WaitSelect(LONG nfds asm("d0"), APTR readfds asm("a0"), APTR writefds asm("a1"), APTR exceptfds asm("a2"), APTR timeout asm("a3"), ULONG *signals asm("d1"), struct SocketBase *base asm("a6"));
+
+/* sb_errno.c */
 LONG bsd_Errno(struct SocketBase *base asm("a6"));
 VOID bsd_SetErrnoPtr(APTR errnoPtr asm("a0"), LONG size asm("d0"), struct SocketBase *base asm("a6"));
+
+/* sb_taglist.c */
+LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"), struct SocketBase *base asm("a6"));
+
+/* sb_inet.c — address conversion and classification */
 STRPTR bsd_Inet_NtoA(ULONG ip asm("d0"), struct SocketBase *base asm("a6"));
 ULONG bsd_inet_addr(STRPTR cp asm("a0"), struct SocketBase *base asm("a6"));
+LONG bsd_inet_aton(STRPTR cp asm("a0"), APTR addr asm("a1"), struct SocketBase *base asm("a6"));
+STRPTR bsd_inet_ntop(LONG af asm("d0"), APTR src asm("a0"), STRPTR dst asm("a1"), LONG size asm("d1"), struct SocketBase *base asm("a6"));
+LONG bsd_inet_pton(LONG af asm("d0"), STRPTR src asm("a0"), APTR dst asm("a1"), struct SocketBase *base asm("a6"));
 ULONG bsd_Inet_LnaOf(ULONG in asm("d0"), struct SocketBase *base asm("a6"));
 ULONG bsd_Inet_NetOf(ULONG in asm("d0"), struct SocketBase *base asm("a6"));
 ULONG bsd_Inet_MakeAddr(ULONG net asm("d0"), ULONG host asm("d1"), struct SocketBase *base asm("a6"));
 ULONG bsd_inet_network(STRPTR cp asm("a0"), struct SocketBase *base asm("a6"));
+LONG bsd_In_LocalAddr(ULONG address asm("d0"), struct SocketBase *base asm("a6"));
+LONG bsd_In_CanForward(ULONG address asm("d0"), struct SocketBase *base asm("a6"));
+
+/* sb_resolver.c — DNS + hostent */
 APTR bsd_gethostbyname(STRPTR name asm("a0"), struct SocketBase *base asm("a6"));
 APTR bsd_gethostbyaddr(STRPTR addr asm("a0"), LONG len asm("d0"), LONG type asm("d1"), struct SocketBase *base asm("a6"));
+APTR bsd_gethostbyname_r(STRPTR name asm("a0"), APTR hp asm("a1"), APTR buf asm("a2"), ULONG buflen asm("d0"), LONG *he asm("a3"), struct SocketBase *base asm("a6"));
+APTR bsd_gethostbyaddr_r(STRPTR addr asm("a0"), LONG len asm("d0"), LONG type asm("d1"), APTR hp asm("a1"), APTR buf asm("a2"), ULONG buflen asm("d2"), LONG *he asm("a3"), struct SocketBase *base asm("a6"));
 LONG bsd_gethostname(STRPTR name asm("a0"), LONG namelen asm("d0"), struct SocketBase *base asm("a6"));
 ULONG bsd_gethostid(struct SocketBase *base asm("a6"));
-LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"), struct SocketBase *base asm("a6"));
-LONG bsd_inet_aton(STRPTR cp asm("a0"), APTR addr asm("a1"), struct SocketBase *base asm("a6"));
-STRPTR bsd_inet_ntop(LONG af asm("d0"), APTR src asm("a0"), STRPTR dst asm("a1"), LONG size asm("d1"), struct SocketBase *base asm("a6"));
-LONG bsd_inet_pton(LONG af asm("d0"), STRPTR src asm("a0"), APTR dst asm("a1"), struct SocketBase *base asm("a6"));
+
+/* sb_netdb.c — protocols/services/networks databases */
 APTR bsd_getprotobyname(STRPTR name asm("a0"), struct SocketBase *base asm("a6"));
 APTR bsd_getprotobynumber(LONG proto asm("d0"), struct SocketBase *base asm("a6"));
-
-/* sb_misc2.c */
-LONG bsd_Dup2Socket(LONG oldSock asm("d0"), LONG newSock asm("d1"), struct SocketBase *base asm("a6"));
-LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"), struct SocketBase *base asm("a6"));
-LONG bsd_recvmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"), struct SocketBase *base asm("a6"));
-VOID bsd_vsyslog(LONG pri asm("d0"), STRPTR msg asm("a0"), APTR args asm("a1"), struct SocketBase *base asm("a6"));
-LONG bsd_ObtainSocket(LONG id asm("d0"), LONG domain asm("d1"), LONG type asm("d2"), LONG protocol asm("d3"), struct SocketBase *base asm("a6"));
-LONG bsd_ReleaseSocket(LONG sock asm("d0"), LONG id asm("d1"), struct SocketBase *base asm("a6"));
-LONG bsd_ReleaseCopyOfSocket(LONG sock asm("d0"), LONG id asm("d1"), struct SocketBase *base asm("a6"));
 APTR bsd_getservbyname(STRPTR name asm("a0"), STRPTR proto asm("a1"), struct SocketBase *base asm("a6"));
 APTR bsd_getservbyport(LONG port asm("d0"), STRPTR proto asm("a0"), struct SocketBase *base asm("a6"));
 APTR bsd_getnetbyname(STRPTR name asm("a0"), struct SocketBase *base asm("a6"));
@@ -718,10 +731,17 @@ APTR bsd_getprotoent(struct SocketBase *base asm("a6"));
 VOID bsd_setservent(LONG stayOpen asm("d0"), struct SocketBase *base asm("a6"));
 VOID bsd_endservent(struct SocketBase *base asm("a6"));
 APTR bsd_getservent(struct SocketBase *base asm("a6"));
-APTR bsd_gethostbyname_r(STRPTR name asm("a0"), APTR hp asm("a1"), APTR buf asm("a2"), ULONG buflen asm("d0"), LONG *he asm("a3"), struct SocketBase *base asm("a6"));
-APTR bsd_gethostbyaddr_r(STRPTR addr asm("a0"), LONG len asm("d0"), LONG type asm("d1"), APTR hp asm("a1"), APTR buf asm("a2"), ULONG buflen asm("d2"), LONG *he asm("a3"), struct SocketBase *base asm("a6"));
-LONG bsd_In_LocalAddr(ULONG address asm("d0"), struct SocketBase *base asm("a6"));
-LONG bsd_In_CanForward(ULONG address asm("d0"), struct SocketBase *base asm("a6"));
+
+/* sb_syslog.c */
+VOID bsd_vsyslog(LONG pri asm("d0"), STRPTR msg asm("a0"), APTR args asm("a1"), struct SocketBase *base asm("a6"));
+
+/* sb_sockpass.c — fd duplication and task handoff */
+LONG bsd_Dup2Socket(LONG oldSock asm("d0"), LONG newSock asm("d1"), struct SocketBase *base asm("a6"));
+LONG bsd_ObtainSocket(LONG id asm("d0"), LONG domain asm("d1"), LONG type asm("d2"), LONG protocol asm("d3"), struct SocketBase *base asm("a6"));
+LONG bsd_ReleaseSocket(LONG sock asm("d0"), LONG id asm("d1"), struct SocketBase *base asm("a6"));
+LONG bsd_ReleaseCopyOfSocket(LONG sock asm("d0"), LONG id asm("d1"), struct SocketBase *base asm("a6"));
+
+/* sb_dnsconfig.c — resolver configuration */
 LONG bsd_AddDomainNameServer(STRPTR address asm("a0"), struct SocketBase *base asm("a6"));
 LONG bsd_RemoveDomainNameServer(STRPTR address asm("a0"), struct SocketBase *base asm("a6"));
 APTR bsd_ObtainDomainNameServerList(struct SocketBase *base asm("a6"));
@@ -745,7 +765,7 @@ VOID bsd_freeaddrinfo(struct sb_addrinfo *ai asm("a0"), struct SocketBase *base 
 STRPTR bsd_gai_strerror(LONG errnum asm("a0"), struct SocketBase *base asm("a6"));
 LONG bsd_getnameinfo(APTR sa asm("a0"), ULONG salen asm("d0"), STRPTR host asm("a1"), ULONG hostlen asm("d1"), STRPTR serv asm("a2"), ULONG servlen asm("d2"), ULONG flags asm("d3"), struct SocketBase *base asm("a6"));
 
-/* shared helpers (sb_misc.c) */
+/* the blocking resolver core (sb_resolver.c); shared with sb_gai.c */
 struct sb_hostent *sb_host_resolve(struct SocketBase *base, const char *name, ULONG *addrOut, LONG *herrOut);
 
 /* reverse DNS (sb_rdns.c): resolve @addr (network order) to a hostname via a
@@ -754,7 +774,7 @@ struct sb_hostent *sb_host_resolve(struct SocketBase *base, const char *name, UL
  * the core lock internally; call it without the lock held. */
 LONG sb_ptr_resolve(struct SocketBase *base, ULONG addr, char *out, ULONG outmax);
 
-/* services table lookups (sb_misc2.c); ports host-order, proto "tcp"/"udp" */
+/* services table lookups (sb_netdb.c); ports host-order, proto "tcp"/"udp" */
 LONG sb_serv_port_by_name(const char *name, const char *proto);
 const char *sb_serv_name_by_port(UWORD port, const char *proto);
 

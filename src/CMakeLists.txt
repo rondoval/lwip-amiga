@@ -77,9 +77,17 @@ add_executable(bsdsocket_library
     bsdsocket/sb_stack.c
     bsdsocket/sb_socket.c
     bsdsocket/sb_api.c
+    bsdsocket/sb_io.c
+    bsdsocket/sb_sockopt.c
     bsdsocket/sb_select.c
-    bsdsocket/sb_misc.c
-    bsdsocket/sb_misc2.c
+    bsdsocket/sb_errno.c
+    bsdsocket/sb_taglist.c
+    bsdsocket/sb_inet.c
+    bsdsocket/sb_resolver.c
+    bsdsocket/sb_netdb.c
+    bsdsocket/sb_syslog.c
+    bsdsocket/sb_sockpass.c
+    bsdsocket/sb_dnsconfig.c
     bsdsocket/sb_ifquery.c
     bsdsocket/sb_gai.c
     bsdsocket/sb_rdns.c

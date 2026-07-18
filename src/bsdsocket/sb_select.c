@@ -21,13 +21,11 @@
 
 static BOOL sb_fd_bit(const ULONG *set, LONG fd)
 {
-    // KprintfH("[bsdsocket] %s: fd %ld\n", __func__, fd);
     return set != NULL && (set[fd >> 5] & (1UL << (fd & 31))) != 0;
 }
 
 static void sb_fd_setbit(ULONG *set, LONG fd)
 {
-    // KprintfH("[bsdsocket] %s: fd %ld\n", __func__, fd);
     set[fd >> 5] |= 1UL << (fd & 31);
 }
 

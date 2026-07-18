@@ -107,13 +107,12 @@ void sb_wake(struct SbSocket *s)
 {
     KprintfH("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
     /* Wake every owner: normally one, but a socket shared via
-     * ReleaseCopyOfSocket has several and all of them must be woken (the
-     * 2026 "last claimant only" gap). sigIoMask = AmiTCP-style async SIGIO
-     * (SetSocketSignals / SBTC_SIGIOMASK): apps park in Wait() on it instead
-     * of WaitSelect — every readiness change must deliver it or they hang
-     * (AExplorer post-accept, 2026-07-14). Spurious delivery is fine, SIGIO
-     * consumers re-poll. sigEventMask delivered likewise until a real
-     * GetSocketEvents queue exists. */
+     * ReleaseCopyOfSocket has several and all of them must be woken.
+     * sigIoMask = AmiTCP-style async SIGIO (SetSocketSignals /
+     * SBTC_SIGIOMASK): apps park in Wait() on it instead of WaitSelect, so
+     * every readiness change must deliver it or they hang. Spurious
+     * delivery is fine, SIGIO consumers re-poll. sigEventMask is delivered
+     * on the same rule. */
     for (ULONG i = 0; i < SB_SOCK_OWNERS; i++)
     {
         struct SocketBase *b = s->owners[i].base;
@@ -211,12 +210,23 @@ LONG sb_wait_to(struct SocketBase *base, ULONG ms, struct SbTimedWait *tw)
 
 BOOL sb_sock_readable(const struct SbSocket *s)
 {
-    // KprintfH("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
     if (s->err != 0 || s->rxeof)
         return TRUE;
     if (s->type == SBT_TCP)
         return s->rxq != NULL || s->naccept != 0;
     return s->ndgrams != 0;
+}
+
+/* TCP peer address readout; core lock held. 0/0 when there is no pcb. */
+void sb_peer_ip(struct SbSocket *s, ULONG *addr, UWORD *port)
+{
+    *addr = 0;
+    *port = 0;
+    if (s->type == SBT_TCP && s->pcb.tcp != NULL)
+    {
+        *addr = ip4_addr_get_u32(ip_2_ip4(&s->pcb.tcp->remote_ip));
+        *port = s->pcb.tcp->remote_port;
+    }
 }
 
 BOOL sb_sock_writable(struct SbSocket *s)
@@ -577,7 +587,6 @@ LONG sb_fd_alloc(struct SocketBase *base, struct SbSocket *s)
 
 struct SbSocket *sb_fd_get(struct SocketBase *base, LONG fd)
 {
-    // KprintfH("[bsdsocket] %s: fd=%ld\n", __func__, fd);
     if (fd < 0 || fd >= (LONG)base->fdCount || base->fd == NULL)
         return NULL;
     return base->fd[fd];

@@ -118,7 +118,7 @@ static void sb_netdev_up(struct SbStackCtx *ctx)
         ((UBYTE *)&att)[i] = 0;
     att.nda_AbiVersion = NETDEV_ABI_VERSION;
     att.nda_RxHoldReq = netdevif_rx_hold_budget();
-    att.nda_MtuReq = 0; /* driver default MTU (no MTU prefs key this release) */
+    att.nda_MtuReq = 0; /* driver default MTU (no MTU prefs key) */
     att.nda_StackCtx = &ctx->ndi;
     att.nda_StackOps = netdevif_stack_ops();
 
@@ -392,10 +392,9 @@ LONG sb_stack_start(struct SocketBase *root)
         return -1;
 
     SetSignal(0UL, SIGBREAKF_CTRL_F);
-    /* Priority sits above dynamic-scheduler managed bands (Executive
-     * reprioritizes pri <= 5; at 5 this task was starved for ~1 s under
-     * app CPU bursts, stalling every lwIP timer) — same tier as the
-     * genet/nvme unit tasks. */
+    /* Priority must sit above the dynamic-scheduler managed band: Executive
+     * reprioritizes pri <= 5, which starves this task under app CPU bursts
+     * and stalls every lwIP timer. Same tier as the genet/nvme unit tasks. */
     struct Process *proc = CreateNewProcTags(
         NP_Entry, (ULONG)SbStackTask,
         NP_Name, (ULONG) "bsdsocket.library stack",

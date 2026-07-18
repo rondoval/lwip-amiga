@@ -24,14 +24,6 @@ struct SbGaiBlock
     ULONG pad;
 };
 
-static ULONG sb_gai_strlen(const char *s)
-{
-    ULONG n = 0;
-    while (s[n] != '\0')
-        n++;
-    return n;
-}
-
 /* strict decimal port: returns -1 unless the whole string is 0..65535 */
 static LONG sb_gai_parse_port(const char *s)
 {
@@ -157,7 +149,7 @@ LONG bsd_getaddrinfo(STRPTR hostname asm("a0"), STRPTR servname asm("a1"),
     /* one block: header + addrinfos + sockaddrs + optional canonname */
     ULONG canonLen = 0;
     if ((flags & SB_AI_CANONNAME) && hostname != NULL)
-        canonLen = sb_gai_strlen((const char *)hostname) + 1;
+        canonLen = strlen((const char *)hostname) + 1;
     ULONG total = sizeof(struct SbGaiBlock) +
                   ntypes * (sizeof(struct sb_addrinfo) + sizeof(struct sb_sockaddr_in)) +
                   canonLen;
@@ -274,7 +266,7 @@ LONG bsd_getnameinfo(APTR sa asm("a0"), ULONG salen asm("d0"),
             ip4addr_ntoa_r(&ip, numBuf, sizeof(numBuf));
             name = numBuf;
         }
-        ULONG n = sb_gai_strlen(name);
+        ULONG n = strlen(name);
         if (n + 1 > hostlen)
             return SB_EAI_MEMORY;
         CopyMem((APTR)name, host, n + 1);
@@ -304,7 +296,7 @@ LONG bsd_getnameinfo(APTR sa asm("a0"), ULONG salen asm("d0"),
             buf[i] = '\0';
             name = buf;
         }
-        ULONG n = sb_gai_strlen(name);
+        ULONG n = strlen(name);
         if (n + 1 > servlen)
             return SB_EAI_MEMORY;
         CopyMem((APTR)name, serv, n + 1);

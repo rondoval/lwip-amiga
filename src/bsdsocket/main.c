@@ -254,7 +254,7 @@ ULONG LibNull(void)
     return 0;
 }
 
-/* Placeholders for the LVOs not yet implemented: -1 for the LONG-returning
+/* Placeholders for the unimplemented LVOs: -1 for the LONG-returning
  * majority, NULL for the pointer-returning ones (an app checking != NULL
  * must not be handed -1). */
 LONG LibStub(void)
