@@ -28,6 +28,15 @@
 #include <netdev.h>
 
 struct NdRxWrap;
+struct ip_hdr;  /* lwip/prot/ip4.h */
+struct tcp_hdr; /* lwip/prot/tcp.h */
+
+/* Upper bound on frames processed per netstack_lock() hold in ndif_rx_input.
+ * Kept >= the driver's ND_RX_BATCH so a whole driver batch lands in ONE lock
+ * hold (no mid-batch re-lock). A ceiling, not a target: the RX lock cadence
+ * is swept driver-side via ND_RX_BATCH + budget (see bcmgenet.c). Also sizes
+ * the per-chunk verdict arrays (drop[], ndi_GroMeta). */
+#define NDIF_RX_CHUNK 64
 
 /* L2 header cache: one prebuilt Ethernet (or Ethernet+802.1Q) header
  * per recently-used destination IP, so the TX hot path skips
@@ -44,6 +53,49 @@ struct NdHhEntry
     UWORD nhh_Len;     /* 14, or 18 when the frame carries a VLAN tag */
     UWORD nhh_Left;    /* fast hits left before a slow-path revalidation */
     UBYTE nhh_Hdr[NDIF_HH_HDR_MAX];
+};
+
+/* GRO-lite: merge N consecutive in-order same-flow TCP data frames from one
+ * driver RX batch into a single pbuf chain and feed lwIP once. Candidates are
+ * classified in the pre-lock pass; merge contexts live only WITHIN one core
+ * lock hold (flushed before every unlock), so nothing survives across
+ * holds, link changes or teardown. Gated on ndi_RxOffload: with lwIP's own
+ * TCP checksum check active, a rewritten merged header would fail it. */
+#define NDIF_GRO_FLOWS      4u  /* direct-mapped merge contexts */
+#define NDIF_GRO_MAX_FRAMES 32u /* per merge; keeps merged IPH_LEN well
+                                   under the u16 ceiling (32*MSS+hdrs) */
+
+/* per-frame pre-lock classification verdict */
+#define NDIF_GRO_NO      0  /* not IPv4/TCP: deliver immediately */
+#define NDIF_GRO_NOMERGE 1  /* IPv4 TCP but unmergeable (SYN/FIN/RST, options,
+                               padded, fragment): flush its flow first */
+#define NDIF_GRO_MERGE   2  /* in-order-candidate data segment */
+
+struct NdGroMeta
+{
+    ULONG ngm_SrcIp;   /* flow key, raw network order */
+    ULONG ngm_DstIp;
+    ULONG ngm_Ports;   /* src<<16 | dst, raw */
+    ULONG ngm_Seq;     /* host order */
+    UWORD ngm_PayOff;  /* frame offset of TCP payload (l2 + 20 + 20) */
+    UWORD ngm_PayLen;  /* TCP payload bytes (from IPH_LEN, pad excluded) */
+    UBYTE ngm_Class;   /* NDIF_GRO_* */
+    UBYTE ngm_Flags;   /* raw TCP flag byte (PSH propagation) */
+};
+
+struct NdGroCtx
+{
+    struct pbuf *ngc_Head;    /* first frame, headers intact; NULL = idle */
+    struct pbuf *ngc_Tail;    /* append point (manual linking; tot_len of
+                                 the chain is fixed up once at flush) */
+    struct ip_hdr *ngc_Ip;    /* head's IP header (length/csum patch) */
+    struct tcp_hdr *ngc_Tcp;  /* head's TCP header (ackno/wnd/PSH patch) */
+    ULONG ngc_SrcIp;          /* flow key, raw */
+    ULONG ngc_DstIp;
+    ULONG ngc_Ports;
+    ULONG ngc_NextSeq;        /* host order: expected next seqno */
+    ULONG ngc_PayloadAdd;     /* Σ payload bytes appended after the head */
+    UWORD ngc_Frames;         /* frames absorbed, head included */
 };
 
 struct NetdevIf
@@ -68,6 +120,10 @@ struct NetdevIf
     ULONG ndi_HhPrimeDst;               /* dst IP whose header linkoutput should
                                            snoop from the next slow-path frame;
                                            0 = none */
+
+    /* GRO-lite state: meta lives here; both are unit-task exclusive during nso_RxInput */
+    struct NdGroMeta ndi_GroMeta[NDIF_RX_CHUNK];
+    struct NdGroCtx ndi_Gro[NDIF_GRO_FLOWS];
 };
 
 /* The stack-side callback table to pass in NetDevAttach.nda_StackOps; use
