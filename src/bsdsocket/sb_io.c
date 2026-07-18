@@ -13,7 +13,6 @@
 #include <lwip/raw.h>
 #include <lwip/tcp.h>
 #include <lwip/udp.h>
-#include <lwip/priv/tcp_priv.h> /* sb_tcp_unsent_guard peeks at pcb->unsent */
 
 #include <debug.h>
 
@@ -54,94 +53,6 @@ static BOOL sb_send_block(struct SocketBase *base, struct SbSocket *s,
     return TRUE;
 }
 
-/* Guard against lwIP's tcp_write tail-reuse overflow. The fork caches the
- * last unsent segment (pcb->unsent_tail) and tracks its spare pbuf tail room
- * in pcb->unsent_oversize; when that bookkeeping goes stale, tcp_write's
- * phase-1 "oversize" path appends into tail room the segment does not
- * actually have — a heap overflow into the neighboring block. Zeroing the
- * field before every write makes tcp_write take the fresh-pbuf path
- * unconditionally; the only cost is small-write coalescing. The Kprintf
- * evidence-printers (DEBUG builds only) record the pcb state whenever the
- * invariant was genuinely violated, feeding the upstream unsent-tail fix
- * (docs/TODO.md).
- *
- * Returns TRUE when the tail segment is too long for tcp_write's mss_local
- * (its u16 space math would underflow): the caller must flush and wait for
- * the tail to drain, exactly like a full send buffer. Core lock held. */
-static BOOL sb_tcp_unsent_guard(struct SbSocket *s)
-{
-    struct tcp_pcb *pcb = s->pcb.tcp;
-
-    if (pcb->unsent == NULL)
-    {
-        if (pcb->unsent_oversize != 0)
-        {
-            /* no unsent segment, yet the pcb claims tail room — tcp_write
-             * would halt on its "pcb->unsent is NULL" assert */
-            Kprintf("[bsdsocket] TCPGUARD-OVZ0 s=0x%08lx: ovz=%lu state=%ld pcbfl=0x%lx qlen=%lu\n",
-                    (ULONG)s, (ULONG)pcb->unsent_oversize, (LONG)pcb->state,
-                    (ULONG)pcb->flags, (ULONG)pcb->snd_queuelen);
-            pcb->unsent_oversize = 0;
-        }
-        return FALSE;
-    }
-
-    struct tcp_seg *lu = pcb->unsent_tail; /* the fork's cached tail */
-    if (lu == NULL)
-    {
-        /* a head exists but the tail cache is gone — the very desync being
-         * guarded against; clamp and write fresh pbufs (no tail to reuse) */
-        Kprintf("[bsdsocket] TCPGUARD-NULLTAIL s=0x%08lx: ovz=%lu state=%ld qlen=%lu\n",
-                (ULONG)s, (ULONG)pcb->unsent_oversize, (LONG)pcb->state,
-                (ULONG)pcb->snd_queuelen);
-        pcb->unsent_oversize = 0;
-        return FALSE;
-    }
-
-    u16_t ml = LWIP_MIN(pcb->mss, TCPWND_MIN16(pcb->snd_wnd_max / 2));
-    if (ml == 0)
-        ml = pcb->mss;
-    u32_t luneed = (u32_t)lu->len + LWIP_TCP_OPT_LENGTH(lu->flags);
-#if TCP_OVERSIZE_DBGCHECK
-    /* lwIP's own desync detector (tcp_out.c "unsent_oversize mismatch"),
-     * rendered non-halting. The shadow must be zeroed in lockstep with the
-     * clamp below, or that assert halts on the very next write. */
-    if (pcb->unsent_oversize != lu->oversize_left)
-        Kprintf("[bsdsocket] TCPGUARD-DESYNC s=0x%08lx: ovz=%lu luovz=%lu len=%lu segfl=0x%lx "
-                "state=%ld qlen=%lu plen=%lu ptot=%lu pref=%lu\n",
-                (ULONG)s, (ULONG)pcb->unsent_oversize, (ULONG)lu->oversize_left,
-                (ULONG)lu->len, (ULONG)lu->flags, (LONG)pcb->state,
-                (ULONG)pcb->snd_queuelen, (ULONG)(lu->p != NULL ? lu->p->len : 0),
-                (ULONG)(lu->p != NULL ? lu->p->tot_len : 0), (ULONG)(lu->p != NULL ? lu->p->ref : 0));
-    lu->oversize_left = 0;
-#endif
-    if (pcb->unsent_oversize != 0)
-    {
-        if (luneed > ml || pcb->unsent_oversize > ml - luneed)
-            Kprintf("[bsdsocket] TCPGUARD-OVZ s=0x%08lx: ovz=%lu space=%lu ml=%lu mss=%lu swm=%lu swnd=%lu "
-                    "len=%lu segfl=0x%lx state=%ld pcbfl=0x%lx qlen=%lu luovz=%lu plen=%lu ptot=%lu pref=%lu\n",
-                    (ULONG)s, (ULONG)pcb->unsent_oversize, (ULONG)(ml - luneed), (ULONG)ml,
-                    (ULONG)pcb->mss, (ULONG)pcb->snd_wnd_max, (ULONG)pcb->snd_wnd,
-                    (ULONG)lu->len, (ULONG)lu->flags, (LONG)pcb->state, (ULONG)pcb->flags,
-                    (ULONG)pcb->snd_queuelen, (ULONG)lu->oversize_left,
-                    (ULONG)(lu->p != NULL ? lu->p->len : 0), (ULONG)(lu->p != NULL ? lu->p->tot_len : 0),
-                    (ULONG)(lu->p != NULL ? lu->p->ref : 0));
-        pcb->unsent_oversize = 0;
-    }
-    if (luneed > ml)
-    {
-        Kprintf("[bsdsocket] TCPGUARD s=0x%08lx: ml=%lu mss=%lu swm=%lu swnd=%lu len=%lu segfl=0x%lx "
-                "state=%ld pcbfl=0x%lx qlen=%lu sndbuf=%lu ovz=%lu luovz=%lu ptot=%lu\n",
-                (ULONG)s, (ULONG)ml, (ULONG)pcb->mss, (ULONG)pcb->snd_wnd_max,
-                (ULONG)pcb->snd_wnd, (ULONG)lu->len, (ULONG)lu->flags,
-                (LONG)pcb->state, (ULONG)pcb->flags, (ULONG)pcb->snd_queuelen,
-                (ULONG)pcb->snd_buf, (ULONG)pcb->unsent_oversize,
-                (ULONG)lu->oversize_left, (ULONG)(lu->p != NULL ? lu->p->tot_len : 0));
-        return TRUE;
-    }
-    return FALSE;
-}
-
 static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
                         const UBYTE *buf, LONG len, LONG flags)
 {
@@ -177,21 +88,15 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
         if (s->connecting)
         {
             /* Hold sends until the connection is established. lwIP would
-             * happily queue data in SYN_SENT, but the SYN-ACK RESETS
-             * snd_wnd_max to the raw handshake window (tcp_in.c), and
-             * anything already queued at full MSS then trips tcp_write's
-             * "mss_local is too small" underflow. Mirrors sb_sock_writable,
-             * which reports not-writable while connecting. */
+             * happily queue data in SYN_SENT, but the SYN-ACK shrinks
+             * pcb->mss to the peer's MSS option and RESETS snd_wnd_max to
+             * the raw handshake window (tcp_in.c), stranding pre-queued
+             * full-MSS segments above the new mss_local (the fork's
+             * tcp_write now retires such tails instead of asserting, but
+             * queueing before ESTABLISHED stays wrong). Mirrors
+             * sb_sock_writable, which reports not-writable while
+             * connecting. */
             if (!sb_send_block(base, s, sent, dontwait, &tw, FALSE, &ret))
-                return ret;
-            continue;
-        }
-
-        /* oversized unsent tail: wait it out like a full send buffer (the
-         * tail drains via tcp_output/ACKs) */
-        if (sb_tcp_unsent_guard(s))
-        {
-            if (!sb_send_block(base, s, sent, dontwait, &tw, TRUE, &ret))
                 return ret;
             continue;
         }
@@ -214,16 +119,6 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
          * bounds the hold. */
         if (chunk > 16384)
             chunk = 16384;
-        /* Keep split chunks whole-MSS: sb_tcp_unsent_guard disables
-         * tcp_write's tail top-up, so a split remainder would ship as a
-         * runt segment on the wire, every chunk. The app buffer's own
-         * tail stays exact. */
-        if ((LONG)chunk < len - sent)
-        {
-            ULONG mss = s->pcb.tcp->mss;
-            if (chunk > mss)
-                chunk -= chunk % mss;
-        }
 
         u8_t wf = TCP_WRITE_FLAG_COPY;
         if ((LONG)(sent + (LONG)chunk) < len)
