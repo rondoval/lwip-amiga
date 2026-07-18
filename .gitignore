@@ -3,3 +3,6 @@ build*/
 *.uaem
 compile_commands.json
 .cache/
+
+# Private working notes, not published with the component.
+docs/TODO.md
