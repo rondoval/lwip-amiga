@@ -19,6 +19,7 @@
 #include <debug.h>
 
 #include "netstack.h"
+#include "nsprof.h"
 
 /* -------------------------------------------------------------- helpers --- */
 
@@ -375,7 +376,9 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
     if (flags & SB_MSG_OOB)
         return sb_fail(base, SB_EOPNOTSUPP);
 
+    PERF_T0(t_lock);
     netstack_lock();
+    PERF_ADD(&ns_perf, NSP_SEND_LOCKWAIT, t_lock);
     while (sent < len)
     {
         if (s->pcb.tcp == NULL || s->err != 0)
@@ -520,7 +523,9 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
         ULONG avail = tcp_sndbuf(s->pcb.tcp);
         if (avail == 0)
         {
+            PERF_T0(t_out);
             tcp_output(s->pcb.tcp);
+            PERF_ADD(&ns_perf, NSP_SEND_OUTPUT, t_out);
             if (dontwait)
             {
                 netstack_unlock();
@@ -528,7 +533,9 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
                     return sent;
                 return sb_fail(base, SB_EWOULDBLOCK);
             }
+            PERF_T0(t_sleep);
             LONG we = sb_wait_to(base, s->sndTimeoMs, &tw);
+            PERF_ADD(&ns_perf, NSP_SEND_SLEEP, t_sleep);
             if (we != 0)
             {
                 netstack_unlock();
@@ -564,7 +571,9 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
         if ((LONG)(sent + (LONG)chunk) < len)
             wf |= TCP_WRITE_FLAG_MORE;
 
+        PERF_T0(t_write);
         err_t r = tcp_write(s->pcb.tcp, buf + sent, (u16_t)chunk, wf);
+        PERF_ADD(&ns_perf, NSP_SEND_WRITE, t_write);
         if (r == ERR_MEM)
         {
             tcp_output(s->pcb.tcp);
@@ -604,13 +613,21 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
              * ss_QueueCount read is safe: a waiter arriving right after
              * the check just waits out one more chunk. The loop head
              * re-validates the socket state after the break. */
+            PERF_T0(t_out);
             tcp_output(s->pcb.tcp);
+            PERF_ADD(&ns_perf, NSP_SEND_OUTPUT, t_out);
             netstack_unlock();
+            PERF_T0(t_relock);
             netstack_lock();
+            PERF_ADD(&ns_perf, NSP_SEND_LOCKWAIT, t_relock);
         }
     }
     if (s->pcb.tcp != NULL)
+    {
+        PERF_T0(t_out);
         tcp_output(s->pcb.tcp);
+        PERF_ADD(&ns_perf, NSP_SEND_OUTPUT, t_out);
+    }
     netstack_unlock();
     return sent;
 }
@@ -623,7 +640,10 @@ static LONG sb_dgram_send(struct SocketBase *base, struct SbSocket *s,
     if (len < 0 || len > 0xFFFF)
         return sb_fail(base, SB_EMSGSIZE);
 
+    PERF_T0(t_lock);
     netstack_lock();
+    PERF_ADD(&ns_perf, NSP_SEND_LOCKWAIT, t_lock);
+    PERF_T0(t_send);
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
     if (p == NULL)
     {
@@ -641,6 +661,7 @@ static LONG sb_dgram_send(struct SocketBase *base, struct SbSocket *s,
                      : raw_send(s->pcb.raw, p);
 
     pbuf_free(p);
+    PERF_ADD(&ns_perf, NSP_UDP_SEND, t_send);
     netstack_unlock();
 
     if (r != ERR_OK)
@@ -698,7 +719,9 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
     if (flags & SB_MSG_OOB)
         return sb_fail(base, SB_EINVAL);
 
+    PERF_T0(t_lock);
     netstack_lock();
+    PERF_ADD(&ns_perf, NSP_RECV_LOCKWAIT, t_lock);
     for (;;)
     {
         while (s->rxq == NULL)
@@ -741,7 +764,9 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
                     return copied;
                 return sb_fail(base, SB_EWOULDBLOCK);
             }
+            PERF_T0(t_sleep);
             LONG we = sb_wait_to(base, s->rcvTimeoMs, &tw);
+            PERF_ADD(&ns_perf, NSP_RECV_SLEEP, t_sleep);
             if (we != 0)
             {
                 netstack_unlock();
@@ -811,13 +836,17 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
             s->rxBytes -= take;
 
             netstack_unlock();
+            PERF_T0(t_copy);
             ULONG off = 0;
             for (struct pbuf *p = run; p != NULL; p = p->next)
             {
                 pbuf_copy_partial(p, buf + copied + off, p->len, 0);
                 off += p->len;
             }
+            PERF_ADD(&ns_perf, NSP_RECV_COPY, t_copy);
+            PERF_T0(t_relock);
             netstack_lock();
+            PERF_ADD(&ns_perf, NSP_RECV_LOCKWAIT, t_relock);
             copied += (LONG)take;
 
             struct pbuf *p = run;
@@ -837,11 +866,16 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
          * either blocks in sb_wait_to or breaks to return — so the receive
          * window never stays closed across a wait. tcp_recved takes a u16, so
          * a >64 KB drain is emitted in <=0xFFFF chunks. */
-        while (acked > 0 && s->pcb.tcp != NULL)
+        if (acked > 0)
         {
-            u16_t n = (acked > 0xFFFF) ? 0xFFFF : (u16_t)acked;
-            tcp_recved(s->pcb.tcp, n);
-            acked -= n;
+            PERF_T0(t_ack);
+            while (acked > 0 && s->pcb.tcp != NULL)
+            {
+                u16_t n = (acked > 0xFFFF) ? 0xFFFF : (u16_t)acked;
+                tcp_recved(s->pcb.tcp, n);
+                acked -= n;
+            }
+            PERF_ADD(&ns_perf, NSP_RECV_ACKFLUSH, t_ack);
         }
 
         if (copied >= len || !waitall)

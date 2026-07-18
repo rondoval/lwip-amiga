@@ -27,7 +27,17 @@
 #define LWIP_TCPIP_CORE_LOCKING         0
 #define LWIP_NETCONN                    0
 #define LWIP_SOCKET                     0
+/* PROFILE_LEAN (EMU68_PROFILE_LEAN=lwip-amiga): the release-truth profiling
+ * tier — DEBUG backend + nsprof stay, but the assert-class overhead that
+ * inflates DEBUG profiles goes: LWIP_NOASSERT kills every LWIP_ASSERT, and
+ * ASSERT_CORE_LOCKED stops costing a FindTask() per lwIP entry point.
+ * Functional LWIP_ERROR guards are unaffected. */
+#ifdef PROFILE_LEAN
+#define LWIP_NOASSERT
+#define LWIP_ASSERT_CORE_LOCKED()
+#else
 #define LWIP_ASSERT_CORE_LOCKED()       netstack_assert_locked()
+#endif
 
 /* --- protocols, v1 scope --- */
 #define LWIP_ARP                        1

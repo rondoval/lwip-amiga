@@ -17,6 +17,7 @@
 #include "netdev_if.h"
 #include "netstack.h"
 #include "netstack_lwiphooks.h"
+#include "nsprof.h"
 
 /* One RX buffer in flight to lwIP: a custom pbuf wrapping driver memory.
  * Freeing the pbuf recycles the driver buffer. Wrappers live in a free
@@ -90,6 +91,7 @@ static ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULON
          * lwIP's TCP/UDP checking is off when the driver offloads RX csum;
          * frames without the VALID verdict get their RAW sum folded here. */
         UBYTE drop[NDIF_RX_CHUNK];
+        PERF_T0(t_csum);
         for (ULONG i = 0; i < chunk; i++)
         {
             const struct NetDevRxDesc *d = &cd[i];
@@ -115,8 +117,11 @@ static ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULON
             if (gro)
                 ndif_gro_classify(d, &ndi->ndi_GroMeta[i]);
         }
+        PERF_ADD(&ns_perf, NSP_RX_CSUM, t_csum);
 
+        PERF_T0(t_lock);
         netstack_lock();
+        PERF_ADD(&ns_perf, NSP_RX_LOCKWAIT, t_lock);
         for (ULONG i = 0; i < chunk; i++)
         {
             const struct NetDevRxDesc *d = &cd[i];
@@ -158,8 +163,10 @@ static ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULON
                 ndif_gro_rx(ndi, p, d, &ndi->ndi_GroMeta[i]);
             else
             {
+                PERF_T0(t_in);
                 if (ndi->ndi_Netif.input(p, &ndi->ndi_Netif) != ERR_OK)
                     pbuf_free(p);
+                PERF_ADD(&ns_perf, NSP_RX_INPUT, t_in);
             }
 
             /* Fairness yield (see NDIF_RX_YIELD_STRIDE): under contention, hand
@@ -174,7 +181,9 @@ static ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULON
                 since_yield = 0;
                 ndif_gro_flush_all(ndi);
                 netstack_unlock();
+                PERF_T0(t_relock);
                 netstack_lock();
+                PERF_ADD(&ns_perf, NSP_RX_LOCKWAIT, t_relock);
             }
         }
         ndif_gro_flush_all(ndi);
@@ -191,9 +200,11 @@ static void ndif_tx_done(APTR stackctx, APTR const *cookies, ULONG count)
     // KprintfH("[netdevif] %s: count %lu\n", __func__, count);
     (void)stackctx;
 
+    PERF_T0(t_done);
     netstack_lock();
     for (ULONG i = 0; i < count; i++)
         pbuf_free((struct pbuf *)cookies[i]);
+    PERF_ADD(&ns_perf, NSP_TX_DONE, t_done);
     netstack_unlock();
 }
 
@@ -328,8 +339,10 @@ static void ndif_gro_classify(const struct NetDevRxDesc *d, struct NdGroMeta *m)
 /* Hand one frame (or chain) to lwIP; shared by flush and the direct path. */
 static void ndif_gro_deliver(struct NetdevIf *ndi, struct pbuf *p)
 {
+    PERF_T0(t_in);
     if (ndi->ndi_Netif.input(p, &ndi->ndi_Netif) != ERR_OK)
         pbuf_free(p);
+    PERF_ADD(&ns_perf, NSP_RX_INPUT, t_in);
 }
 
 /* Deliver a held run: restore the pbuf-chain tot_len invariant (deferred
@@ -409,6 +422,7 @@ static void ndif_gro_rx(struct NetdevIf *ndi, struct pbuf *p,
         /* absorb: strip headers, link via the tail pointer (tot_len of the
          * chain is restored at flush), take the freshest cumulative ackno
          * and window, OR the PSH hint */
+        PERF_T0(t_gro);
         pbuf_remove_header(p, m->ngm_PayOff);
         c->ngc_Tail->next = p;
         c->ngc_Tail = p;
@@ -422,6 +436,7 @@ static void ndif_gro_rx(struct NetdevIf *ndi, struct pbuf *p,
         c->ngc_Tcp->wnd = th->wnd;
         if (m->ngm_Flags & TCP_PSH)
             TCPH_SET_FLAG(c->ngc_Tcp, TCP_PSH);
+        PERF_ADD(&ns_perf, NSP_RX_GRO, t_gro);
         return;
     }
 
@@ -551,6 +566,7 @@ static err_t ndif_linkoutput(struct netif *nif, struct pbuf *p)
 {
     // KprintfH("[netdevif] %s: pbuf 0x%08lx tot_len %lu\n", __func__, (ULONG)p, (ULONG)p->tot_len);
     struct NetdevIf *ndi = nif->state;
+    PERF_T0(t_out);
 
     /* a slow-path ndif_ip4_output send is in flight: capture its header */
     if (ndi->ndi_HhPrimeDst != 0)
@@ -644,13 +660,16 @@ static err_t ndif_linkoutput(struct netif *nif, struct pbuf *p)
     if (!cloned)
         pbuf_ref(frame);
 
+    PERF_T0(t_submit);
     LONG accepted = ndi->ndi_Ops->ndo_TxSubmit(ndi->ndi_Drv, &desc, 1);
+    PERF_ADD(&ns_perf, NSP_TX_SUBMIT, t_submit);
     if (accepted != 1)
     {
         pbuf_free(frame);
         return ERR_MEM; /* ring full; TCP retries on timer */
     }
 
+    PERF_ADD(&ns_perf, NSP_TX_LINKOUT, t_out);
     return ERR_OK;
 }
 

@@ -19,9 +19,24 @@
 
 #include "netdev_if.h"
 #include "netstack.h"
+#include "nsprof.h"
 
 struct NetStack netstack;
 struct Device *TimerBase;
+
+/* The netstack perf instance (emu68-common <perf.h>). Slot storage is
+ * unconditional so DEBUG and release share one layout; order of the name
+ * table must match enum NsProfSlot. */
+static struct perf_counter ns_perf_slots[NSP_SLOT_COUNT];
+static const char *const ns_perf_names[NSP_SLOT_COUNT] = {
+    "rx_csum",   "rx_lockwait",   "rx_input",   "rx_gro",
+    "tx_done",
+    "tx_linkout", "tx_submit",
+    "recv_lockwait", "recv_copy", "recv_ackflush", "recv_sleep",
+    "send_lockwait", "send_write", "send_output", "send_sleep",
+    "udp_send",
+};
+struct perf ns_perf = { "nsprof", ns_perf_names, ns_perf_slots, NSP_SLOT_COUNT };
 
 void netstack_init(struct Device *timerBase)
 {
@@ -128,6 +143,7 @@ void netstack_tick(void)
             netstack.ns_LockHoldUs = 0;
             netstack.ns_LockHoldMaxUs = 0;
         }
+        perf_report(&ns_perf);
     }
 #endif
     netstack_unlock();
