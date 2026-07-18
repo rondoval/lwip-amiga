@@ -35,7 +35,7 @@ find_package(Emu68Common CONFIG REQUIRED)
 emu68_debug_backend_definitions()
 
 # --- netstack: lwIP core + Amiga port layer ---------------------------------
-# The stack proper as a static library: unmodified lwIP compiled with the
+# The stack proper as a static library: lwIP compiled with the
 # real port configuration (port/amiga/include/lwipopts.h) plus the port
 # sources (core lock/time/heap, netdev netif glue).
 set(LWIP_DIR ${CMAKE_SOURCE_DIR}/lwip)

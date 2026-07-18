@@ -440,8 +440,8 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
         }
         else
         {
-            while (lu->next != NULL)
-                lu = lu->next;
+            /* cached tail from the forked lwIP (pcb->unsent_tail) */
+            lu = s->pcb.tcp->unsent_tail;
             u16_t ml = LWIP_MIN(s->pcb.tcp->mss, TCPWND_MIN16(s->pcb.tcp->snd_wnd_max / 2));
             if (ml == 0)
                 ml = s->pcb.tcp->mss;

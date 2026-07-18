@@ -7,7 +7,7 @@ a fresh network driver ABI:
 flowchart TB
     app["Application task<br/>(IBrowse, wget, AmiSSL, YAM, ...)"]
     bsd["<b>bsdsocket.library</b><br/>socket API on the lwIP raw API<br/>(per-opener bases, WaitSelect, DHCP/DNS)"]
-    lwip["<b>lwIP 2.2.1 core</b> (submodule, unmodified)<br/>+ Amiga port layer (netstack, netif glue)"]
+    lwip["<b>lwIP 2.2.1 core</b> (submodule)<br/>+ Amiga port layer (netstack, netif glue)"]
     abi["<b>netdev ABI</b> — include/netdev.h<br/>direct-call, context-based, batched, zero-copy"]
     drv["<b>genet.device</b><br/>first hardware driver"]
     nic["BCM GENET NIC<br/>(Pi4 / CM4 under PiStorm / Emu68)"]
@@ -75,8 +75,19 @@ interface-*config* LVOs are declined (the stack is configured only from
 
 ## Layer 2 — lwIP core + Amiga port layer (`lwip/`, `port/amiga/`)
 
-lwIP 2.2.1 is a git submodule pinned to `STABLE-2_2_1_RELEASE` and used **unmodified** —
-all Amiga-specific code lives in the port layer, which lwIP is designed to keep separate.
+lwIP 2.2.1 is a git submodule, forked from `STABLE-2_2_1_RELEASE` — all Amiga-specific code lives in the port layer, which lwIP is
+designed to keep separate.
+
+- **The unsent-tail patch** (the fork's one divergence, written to be upstreamable — it
+  resolves lwIP's own `@todo` in `tcp_out.c`): `struct tcp_pcb` gains `unsent_tail`,
+  a cached pointer to the last node of `pcb->unsent` (invariant: NULL iff `unsent` is
+  NULL, maintained at every queue mutation). Before it, `tcp_write` and
+  `tcp_enqueue_flags` walked the whole unsent queue per call to find the tail; with
+  `TCP_SND_BUF` = 1 MB that queue holds ~700 segments and `tcp_write` runs ~2200×/s
+  during a saturated upload, so the O(n) walks were a measured hot spot (Phase T
+  profiling, docs/TODO.md). A walk-and-compare self-check exists behind
+  `TCP_UNSENT_TAIL_DBGCHECK` (enabled in the DEBUG_HIGH tier only — it re-adds the
+  walk the cache removes).
 
 - **Runtime model** (`lwipopts.h`): `NO_SYS=1` with external serialization — the
   core-locking idea implemented over an Exec `SignalSemaphore` instead of lwIP's own
@@ -252,7 +263,7 @@ unit 0), not the stack refactor — revisit when one is real.
 Built on the m68k cross-toolchain through the **emu68-driver-stack** superproject (which
 supplies the toolchain and `emu68-common`); see the [README](../README.md) for commands.
 
-- `netstack` — a static library: the unmodified lwIP core (IPv4 only) + the Amiga port
+- `netstack` — a static library: the forked lwIP core (IPv4 only) + the Amiga port
   layer.
 - `bsdsocket.library` — the shippable library (`-nostartfiles`, entry `doNotExecute`; a
   library carries no crt0). Runtime version `4.<release>` (see the version note below).

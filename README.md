@@ -27,7 +27,7 @@ layers, built bottom-up:
   contract — any driver or stack may implement it. First implementation:
   `genet.device` (BCM GENET on Pi4/CM4 under PiStorm/Emu68, in
   [emu68-driver-stack](https://github.com/rondoval/emu68-driver-stack)).
-- **A TCP/IP core** — lwIP (git submodule, unmodified) plus an AmigaOS port layer,
+- **A TCP/IP core** — lwIP (git submodule) plus an AmigaOS port layer,
   running in **core-locking direct-path** mode: application tasks execute stack code in
   their own context under a single core semaphore, with Exec signals as the blocking
   primitive. Built as the `netstack` static library.
@@ -45,8 +45,7 @@ See [docs/architecture.md](docs/architecture.md) for how the stack works, and
 
 - `include/netdev.h` — the `netdev` driver ABI header. Installed and exported as the `Netdev` CMake package
   (`Netdev::netdev_headers`), which is how `genet.device` consumes it.
-- `lwip/` — lwIP core, git submodule (BSD-3-Clause, pinned to `STABLE-2_2_1_RELEASE`,
-  used unmodified).
+- `lwip/` — lwIP core, git submodule (BSD-3-Clause, forked from `STABLE-2_2_1_RELEASE`).
 - `port/amiga/` — AmigaOS port layer: `lwipopts.h` (the core-locking config),
   `netstack.c` (singleton, core lock, `EClock`→ms time, DMA-aware heap), `netdev_if.c`
   (lwIP netif ⇄ `netdev` glue: zero-copy TX scatter-gather + L4 checksum offsets, RX
@@ -166,7 +165,7 @@ options — `lwip-amiga` is a valid `EMU68_DEBUG_HIGH` component name.
 ## License
 
 `BSD-3-Clause` throughout — own code, the `include/` `netdev` ABI headers, and the
-bundled `lwip/` submodule (© the lwIP developers, used unmodified) all match. Any
+bundled `lwip/` submodule (© the lwIP developers) all match. Any
 driver or stack, under any license, may implement the `netdev` ABI contract. See
 [LICENSE](LICENSE), including a note on the `emu68-common` build dependency
 used by the Amiga binaries.

@@ -75,6 +75,9 @@
  * heap-guard note in netstack.c). */
 #define MEMP_OVERFLOW_CHECK             1
 #define MEMP_SANITY_CHECK               1
+/* Walk-and-compare check of the forked lwIP's cached pcb->unsent_tail —
+ * O(n) per call, so DEBUG_HIGH only. */
+#define TCP_UNSENT_TAIL_DBGCHECK        1
 #endif
 #define MEMP_NUM_TCP_PCB                256
 #define MEMP_NUM_TCP_PCB_LISTEN         16
