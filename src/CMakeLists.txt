@@ -46,7 +46,11 @@ add_library(netstack STATIC
     ${lwipcore4_SRCS}
     ${LWIP_DIR}/src/netif/ethernet.c
     ${CMAKE_SOURCE_DIR}/port/amiga/netstack.c
+    ${CMAKE_SOURCE_DIR}/port/amiga/netstack_mem.c
+    ${CMAKE_SOURCE_DIR}/port/amiga/netstack_diag.c
     ${CMAKE_SOURCE_DIR}/port/amiga/netdev_if.c
+    ${CMAKE_SOURCE_DIR}/port/amiga/netdev_rx.c
+    ${CMAKE_SOURCE_DIR}/port/amiga/netdev_tx.c
 )
 
 target_compile_options(netstack PRIVATE -O3 ${LWIP_WARN})

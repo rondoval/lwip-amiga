@@ -79,10 +79,10 @@
 
 #define MEMP_NUM_PBUF                   512  /* PBUF_REF/ROM headers (TX) */
 #if defined(DEBUG) && defined(DEBUG_HIGH)
-/* 2026-07-14 corruption hunt: tcp_seg/pcb pools are static arrays outside
- * the guarded netstack heap — let lwIP police them too. DEBUG_HIGH tier:
- * OVERFLOW_CHECK pads every memp element, changing pool layout (see the
- * heap-guard note in netstack.c). */
+/* lwIP's own pool policing: the memp pools (tcp_seg, pcbs, ...) are static
+ * arrays outside the netstack heap. OVERFLOW_CHECK pads every element
+ * (changing pool layout between build tiers); SANITY_CHECK walks the free
+ * lists on each op. */
 #define MEMP_OVERFLOW_CHECK             1
 #define MEMP_SANITY_CHECK               1
 /* Walk-and-compare check of the forked lwIP's cached pcb->unsent_tail —
@@ -167,7 +167,7 @@ void netstack_platform_diag(const char *msg);
  * would misread as 16-bit (fleet gotcha) — so LWIP_PLATFORM_DIAG goes
  * through netstack_diag_printf, which formats with C argument promotion
  * and hands the backend a finished string. Follows the stack-wide DEBUG;
- * toggle modules below as the hunt moves. */
+ * toggle modules below as needed. */
 #ifdef DEBUG
 #define LWIP_DEBUG
 void netstack_diag_printf(const char *fmt, ...);

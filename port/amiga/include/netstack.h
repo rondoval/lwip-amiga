@@ -20,7 +20,7 @@
 struct Device;
 struct NetdevIf;
 
-/* Slab front-end size classes over the packet heap (see netstack.c). */
+/* Slab front-end size classes over the packet heap (see netstack_mem.c). */
 #define NS_SLAB_CLASSES 3
 
 struct NetStack
@@ -41,7 +41,7 @@ struct NetStack
 
     ULONG ns_MemInUse;  /* diagnostic */
 
-    /* packet-heap slab front-end (netstack.c): O(1) per-class freelists
+    /* packet-heap slab front-end (netstack_mem.c): O(1) per-class freelists
      * over arenas from the attached driver's DMA pool; all access under
      * ns_Core. Freelist links live inside the free slots. */
     void *ns_SlabFree[NS_SLAB_CLASSES];   /* intrusive freelist heads */
@@ -49,8 +49,8 @@ struct NetStack
     ULONG ns_SlabGrows[NS_SLAB_CLASSES];  /* diagnostic */
 
     /* Core-lock profiling — written under DEBUG only, but the fields are
-     * unconditional so DEBUG and release share one struct layout (the
-     * 2026-07-14 Heisenbug lesson). Outermost holds only (ss_NestCount);
+     * unconditional so DEBUG and release share one struct layout.
+     * Outermost holds only (ss_NestCount);
      * timestamps from the BCM 1 MHz system timer. netstack_tick prints
      * and zeroes the counters every ~2 s. */
     ULONG ns_LockT0;

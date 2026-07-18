@@ -2,10 +2,11 @@
 /*
  * netdev_if — the lwIP netif over the netdev driver ABI.
  *
- * The caller (interface-config code, Phase 2) owns the exec side: it opens
- * the device, issues NETDEV_CMD_ATTACH with netdevif_stack_ops()/the glue
- * context, then hands the attach results to netdevif_create(). The glue
- * owns everything between lwIP and the driver's direct-call surface:
+ * The caller (the library's stack task, src/bsdsocket/sb_stack.c) owns the
+ * exec side: it opens the device, issues NETDEV_CMD_ATTACH with
+ * netdevif_stack_ops()/the glue context, then hands the attach results to
+ * netdevif_create(). The glue owns everything between lwIP and the
+ * driver's direct-call surface:
  *
  *   TX: pbuf chain -> scatter-gather NetDevTxDesc, L4 checksum offsets +
  *       pseudo-header seed when the driver offloads, one extra pbuf_ref
@@ -109,7 +110,9 @@ struct NetdevIf
     struct NetDevCaps ndi_Caps;
     LONG ndi_VlanTci;                   /* in-band 802.1Q: -1 = no VLAN, else
                                            (pcp<<13)|(vid&0xFFF); read by the
-                                           lwIP VLAN hooks. Set before create. */
+                                           lwIP VLAN hooks. create() defaults it;
+                                           the opener overrides from prefs before
+                                           the interface is brought up. */
 
     struct NdRxWrap *ndi_FreeWraps;     /* under the core lock */
     APTR ndi_WrapStorage;
