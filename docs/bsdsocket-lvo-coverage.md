@@ -21,7 +21,7 @@ The library has two tiers:
   below are grouped by that feature tag.
 
 > **Capability probe.** Our `SocketBaseTagList` answers every `SBTC_HAVE_*`
-> feature tag (`sb_misc.c`): the implemented groups (DNS, local-database,
+> feature tag (`sb_taglist.c`): the implemented groups (DNS, local-database,
 > address-conversion, reentrant/getaddrinfo, **status**, **interface**) report
 > `TRUE`, the rest `FALSE`, and `SBTC_NUM_PACKET_FILTER_CHANNELS` reports `0`. The
 > interface tag reports `TRUE` for its read-only query subset; the config LVOs
@@ -314,7 +314,7 @@ capability tags — one per Roadshow feature group — are covered by the
 **Feature-group roll-up** above. Everything else is a *config or per-opener
 setting* (errno/h_errno plumbing, task signal masks, syslog, stack tuning): the
 full set is listed here, sourced from `netinclude/libraries/bsdsocket.h`
-(codes) and `bsdsocket.doc`, cross-checked against `sb_misc.c`.
+(codes) and `bsdsocket.doc`, cross-checked against `sb_taglist.c`.
 
 Each tag is a `SBTM_{GET,SET}{VAL,REF}(code)` request. A tag this library does
 not handle falls through to `default:` and `SocketBaseTagList` returns that

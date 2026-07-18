@@ -63,8 +63,12 @@ table included — so every opening task gets its own `errno`, fd table, wait si
   expunge. It runs at **priority 10** (above the dynamic-scheduler band, matching the
   driver's unit task) so it is not starved by CPU-bound application tasks.
 
-The socket-call surface, resolver, event API and inet utilities live in `sb_api.c`,
-`sb_select.c`, `sb_misc.c`, `sb_misc2.c` and `sb_gai.c`; the generated LVO jump table is
+The API surface is grouped topically: lifecycle/control (`sb_api.c`), the data path
+(`sb_io.c`), options and events (`sb_sockopt.c`), `WaitSelect` (`sb_select.c`), errno
+plumbing (`sb_errno.c`), `SocketBaseTagList` (`sb_taglist.c`), address conversion
+(`sb_inet.c`), the resolver (`sb_resolver.c`), the netdb tables (`sb_netdb.c`), syslog
+(`sb_syslog.c`), socket handoff (`sb_sockpass.c`), DNS configuration
+(`sb_dnsconfig.c`) and getaddrinfo (`sb_gai.c`); the generated LVO jump table is
 `vectors.c` (139 slots emitted from the SFD by `scripts/gen-vectors.py`).
 
 Interface **status** is read-only (`sb_ifquery.c`): the Roadshow interface-query LVOs
@@ -84,8 +88,8 @@ designed to keep separate.
   NULL, maintained at every queue mutation). Before it, `tcp_write` and
   `tcp_enqueue_flags` walked the whole unsent queue per call to find the tail; with
   `TCP_SND_BUF` = 1 MB that queue holds ~700 segments and `tcp_write` runs ~2200×/s
-  during a saturated upload, so the O(n) walks were a measured hot spot (Phase T
-  profiling, docs/TODO.md). A walk-and-compare self-check exists behind
+  during a saturated upload, so the O(n) walks were a measured hot spot. A
+  walk-and-compare self-check exists behind
   `TCP_UNSENT_TAIL_DBGCHECK` (enabled in the DEBUG_HIGH tier only — it re-adds the
   walk the cache removes).
 
@@ -99,15 +103,18 @@ designed to keep separate.
   1. **application tasks** — socket calls run stack code in caller context under the lock;
   2. **the driver task** — injects received frames via `netif->input` under the lock;
   3. **the stack task** — runs lwIP timeouts (retransmit, DHCP renew, DNS) only.
-- **Time / RNG / heap** (`netstack.c`): `sys_now()` derives monotonic milliseconds from
-  the `timer.device` EClock; `LWIP_RAND` is an xorshift; the lwIP heap
+- **Time / RNG** (`netstack.c`): `sys_now()` derives monotonic milliseconds from
+  the `timer.device` EClock; `LWIP_RAND` is an xorshift.
+- **Heap** (`netstack_mem.c`): the lwIP heap
   (`MEM_CUSTOM_*` → `netstack_malloc`/`free`) routes every `PBUF_RAM`/TX payload to the
-  active driver's DMA allocator, with an 8-byte origin header so frees route correctly
-  across attach/detach (and an `AllocMem` fallback when no NIC is attached).
+  active driver's DMA allocator — fronted by three slab size classes — with an 8-byte
+  origin header so frees route correctly across attach/detach (and an `AllocMem`
+  fallback when no NIC is attached).
 
-## Layer 3 — netif ↔ netdev glue (`port/amiga/netdev_if.c`)
+## Layer 3 — netif ↔ netdev glue (`port/amiga/netdev_*.c`)
 
-This binds a lwIP `netif` to a netdev driver. `netdevif_create` allocates the RX wrapper
+This binds a lwIP `netif` to a netdev driver — lifecycle in `netdev_if.c`, the
+datapaths in `netdev_rx.c`/`netdev_tx.c`. `netdevif_create` allocates the RX wrapper
 pool (sized from the driver's advertised `ndc_RxPoolBufs`), adds the netif with
 `ethernet_input`, and programs the per-netif checksum switches from the negotiated caps
 (disabling lwIP's own TCP/UDP checksum gen/check where the hardware offloads it). The
@@ -183,7 +190,7 @@ Design choices worth knowing:
   `NDRF_VLAN_STRIPPED` flags + `NDCF_VLAN_TX_INSERT`/`NDCF_VLAN_RX_STRIP` caps so a future
   NIC with hardware insert/strip needs no layout break.
 - **Cache maintenance is driver-side only** — the driver knows DMA timing and the platform
-  contract (68040 cache-line ownership), keeping the port layer platform-agnostic.
+  contract, keeping the port layer platform-agnostic.
 - **Quiesce is exact.** STOP completes every in-flight TX cookie before replying; DETACH
   then requires all RX cookies released and all driver-allocated DMA memory freed, so
   after DETACH no pointer of either side survives in the other.
@@ -228,7 +235,7 @@ unblocked. What is already multi-ready:
 - **The ABI is fully per-context**: every `ndo_*`/`nso_*` call carries a context, ATTACH
   is per-unit, and the only identity the ABI carries is `ndc_Mac`. Interface selection —
   (device name, unit) — correctly lives outside the ABI, in the opener.
-- **The glue is parameterized**: `netdev_if.c` recovers its `NetdevIf` from `nif->state`
+- **The glue is parameterized**: the netdev glue recovers its `NetdevIf` from `nif->state`
   everywhere; multiple instances would coexist as-is.
 - **lwIP and the socket layer iterate**: the multi-netif list is compiled in
   (`NETIF_FOREACH` is already used), DHCP is per-netif, DNS is global by design.
