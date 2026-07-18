@@ -44,9 +44,6 @@ struct NdRxWrap
 #define NDIF_RX_YIELD_STRIDE 8u
 
 static BOOL ndif_rx_csum_ok(const struct NetDevRxDesc *d, ULONG raw);
-#ifdef DEBUG
-static UWORD ndif_sum_range(const UBYTE *data, ULONG len);
-#endif
 
 /* GRO-lite (defined after ndif_ip_offset, used by ndif_rx_input) */
 static void ndif_gro_classify(const struct NetDevRxDesc *d, struct NdGroMeta *m);
@@ -99,21 +96,6 @@ static ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULON
                       !(d->nrd_Flags & NDRF_CSUM_VALID) &&
                       (d->nrd_Flags & NDRF_CSUM_RAW) &&
                       !ndif_rx_csum_ok(d, d->nrd_CsumRaw);
-#ifdef DEBUG
-            if (drop[i])
-            {
-                /* debug cross-check of the hardware raw sum (the RXCHK
-                 * decode was mapped live before it was trusted) */
-                UWORD sw = ndif_sum_range(d->nrd_Data + SIZEOF_ETH_HDR,
-                                          d->nrd_Len - SIZEOF_ETH_HDR);
-                BOOL ok = ndif_rx_csum_ok(d, sw);
-                Kprintf("[netdevif] RX csum: hw 0x%04lx sw 0x%04lx len %lu %s\n",
-                        (ULONG)d->nrd_CsumRaw, (ULONG)sw, (ULONG)d->nrd_Len,
-                        (ULONG)(ok ? "pass(sw)" : "DROP"));
-                if (ok)
-                    drop[i] = 0;
-            }
-#endif
             if (gro)
                 ndif_gro_classify(d, &ndi->ndi_GroMeta[i]);
         }
@@ -497,26 +479,6 @@ static ULONG ndif_l4_offsets(struct pbuf *p, UWORD *csum_start, UWORD *csum_offs
     return proto;
 }
 
-#ifdef DEBUG
-/* 1's-complement sum over a byte range, network order, odd tail
- * zero-padded, folded to 16 bits. */
-static UWORD ndif_sum_range(const UBYTE *data, ULONG len)
-{
-    ULONG sum = 0;
-    while (len > 1)
-    {
-        sum += ((ULONG)data[0] << 8) | data[1];
-        data += 2;
-        len -= 2;
-    }
-    if (len != 0)
-        sum += (ULONG)data[0] << 8;
-    while (sum >> 16)
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    return (UWORD)sum;
-}
-#endif /* DEBUG (ndif_sum_range) */
-
 /* RX verification for frames the driver reported only a RAW checksum for.
  * `raw` is the 1's-complement sum over the frame past the Ethernet
  * header (IP header + payload). A valid IP header folds to -0, so for a
@@ -749,10 +711,10 @@ UWORD netdevif_rx_hold_budget(void)
     return (UWORD)(NDIF_RX_HOLD_STREAMS * wndFrames + NDIF_RX_HOLD_SLACK);
 }
 
-APTR netdevif_dma_alloc(struct NetdevIf *ndi, ULONG size)
+APTR netdevif_dma_alloc(struct NetdevIf *ndi, ULONG size, ULONG align)
 {
-    // KprintfH("[netdevif] %s: size %lu\n", __func__, size);
-    return ndi->ndi_Ops->ndo_DmaAlloc(ndi->ndi_Drv, size, MEM_ALIGNMENT);
+    // KprintfH("[netdevif] %s: size %lu align %lu\n", __func__, size, align);
+    return ndi->ndi_Ops->ndo_DmaAlloc(ndi->ndi_Drv, size, align);
 }
 
 void netdevif_dma_free(struct NetdevIf *ndi, APTR ptr, ULONG size)
@@ -908,7 +870,11 @@ void netdevif_destroy(struct NetdevIf *ndi)
     netstack_lock();
     netif_remove(&ndi->ndi_Netif);
     if (netstack.ns_ActiveNetdev == ndi)
+    {
+        /* return the slab arenas while the ABI pointer is still valid */
+        netstack_slab_detach(ndi);
         netstack.ns_ActiveNetdev = NULL;
+    }
     netstack_unlock();
 
     FreeMem(ndi->ndi_WrapStorage, ndi->ndi_WrapStorageSize);

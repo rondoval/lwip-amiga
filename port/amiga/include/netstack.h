@@ -20,6 +20,9 @@
 struct Device;
 struct NetdevIf;
 
+/* Slab front-end size classes over the packet heap (see netstack.c). */
+#define NS_SLAB_CLASSES 3
+
 struct NetStack
 {
     struct SignalSemaphore ns_Core;
@@ -37,6 +40,13 @@ struct NetStack
     struct NetdevIf *ns_ActiveNetdev;
 
     ULONG ns_MemInUse;  /* diagnostic */
+
+    /* packet-heap slab front-end (netstack.c): O(1) per-class freelists
+     * over arenas from the attached driver's DMA pool; all access under
+     * ns_Core. Freelist links live inside the free slots. */
+    void *ns_SlabFree[NS_SLAB_CLASSES];   /* intrusive freelist heads */
+    void *ns_SlabArenas[NS_SLAB_CLASSES]; /* NsSlabArena chains */
+    ULONG ns_SlabGrows[NS_SLAB_CLASSES];  /* diagnostic */
 
     /* Core-lock profiling — written under DEBUG only, but the fields are
      * unconditional so DEBUG and release share one struct layout (the
@@ -67,5 +77,10 @@ void netstack_tick(void);
 
 /* Monotonic milliseconds (also lwIP's sys_now). Call under the lock. */
 ULONG netstack_now_ms(void);
+
+/* Return the slab arenas to @nd's DMA pool and reset the freelists.
+ * netdevif_destroy calls this under the core lock, before it clears
+ * ns_ActiveNetdev. */
+void netstack_slab_detach(struct NetdevIf *nd);
 
 #endif /* LWIPAMIGA_NETSTACK_H */

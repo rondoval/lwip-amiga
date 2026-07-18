@@ -150,8 +150,10 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
  * before this + NETDEV_CMD_DETACH. */
 void netdevif_destroy(struct NetdevIf *ndi);
 
-/* TX-pool memory for the netstack heap (routes to ndo_DmaAlloc/Free). */
-APTR netdevif_dma_alloc(struct NetdevIf *ndi, ULONG size);
+/* TX-pool memory for the netstack heap (routes to ndo_DmaAlloc/Free).
+ * @align: 1:1 with the ABI's ndo_DmaAlloc alignment (the heap passes
+ * MEM_ALIGNMENT for one-off blocks, 64 for cache-line-tiled slab arenas). */
+APTR netdevif_dma_alloc(struct NetdevIf *ndi, ULONG size, ULONG align);
 void netdevif_dma_free(struct NetdevIf *ndi, APTR ptr, ULONG size);
 
 #endif /* LWIPAMIGA_NETDEV_IF_H */
