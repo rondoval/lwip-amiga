@@ -29,6 +29,23 @@
 
 struct NdRxWrap;
 
+/* L2 header cache: one prebuilt Ethernet (or Ethernet+802.1Q) header
+ * per recently-used destination IP, so the TX hot path skips
+ * etharp_output/ethernet_output entirely. Entries revalidate
+ * through the slow path every NDIF_HH_REVALIDATE hits (bounded staleness
+ * against ARP re-resolution or a DHCP netmask/gateway change) and are
+ * flushed on link change. All access is under the core lock. */
+#define NDIF_HH_ENTRIES    4u  /* direct-mapped by dst-IP low bits */
+#define NDIF_HH_HDR_MAX    18u /* Ethernet 14 + one 802.1Q tag */
+
+struct NdHhEntry
+{
+    ULONG nhh_DstIp;   /* network-order dst IP; 0 = empty */
+    UWORD nhh_Len;     /* 14, or 18 when the frame carries a VLAN tag */
+    UWORD nhh_Left;    /* fast hits left before a slow-path revalidation */
+    UBYTE nhh_Hdr[NDIF_HH_HDR_MAX];
+};
+
 struct NetdevIf
 {
     struct netif ndi_Netif;
@@ -46,6 +63,11 @@ struct NetdevIf
     ULONG ndi_RxNoWrap;                 /* backpressure: wrap pool empty */
     ULONG ndi_TxOversize;               /* dropped: segs > caps even coalesced */
     ULONG ndi_RxCsumBad;                /* RAW-fold verification failures */
+
+    struct NdHhEntry ndi_Hh[NDIF_HH_ENTRIES];
+    ULONG ndi_HhPrimeDst;               /* dst IP whose header linkoutput should
+                                           snoop from the next slow-path frame;
+                                           0 = none */
 };
 
 /* The stack-side callback table to pass in NetDevAttach.nda_StackOps; use
