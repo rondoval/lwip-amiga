@@ -203,13 +203,6 @@ add_executable(sockbench
 
 target_compile_options(sockbench PRIVATE -O2 ${LWIP_WARN})
 
-target_link_libraries(sockbench
-    PRIVATE
-        Emu68Common::common
-)
-
-emu68_debug_backend_finalize(sockbench)
-
 # sockbench is a developer benchmark — built for local HW testing but deliberately
 # not installed, so it stays out of the shipped package.
 
@@ -222,13 +215,6 @@ add_executable(netinfo
 )
 
 target_compile_options(netinfo PRIVATE -O2 ${LWIP_WARN})
-
-target_link_libraries(netinfo
-    PRIVATE
-        Emu68Common::common
-)
-
-emu68_debug_backend_finalize(netinfo)
 
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/netinfo

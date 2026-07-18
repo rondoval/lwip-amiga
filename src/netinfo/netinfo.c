@@ -28,8 +28,6 @@
 #include <proto/exec.h>
 #include <proto/socket.h> /* bsdsocket.library inline glue */
 
-#include <debug.h>
-
 struct Library *SocketBase; /* the bsdsocket inline glue in <proto/socket.h> */
 
 static void print_addr(const char *label, const struct sockaddr_in *sa)
@@ -43,7 +41,7 @@ static void print_interface(STRPTR name)
 {
     struct sockaddr_in addr, mask, bcast, dns0, dns1;
     UBYTE hw[16];
-    LONG hwbits = 0, mtu = 0, state = SM_Down, bindtype = IFABT_Unknown, unit = 0;
+    LONG mtu = 0, state = SM_Down, bindtype = IFABT_Unknown, unit = 0;
     STRPTR devname = NULL;
 
     memset(&addr, 0, sizeof(addr));
@@ -61,7 +59,6 @@ static void print_interface(STRPTR name)
                        IFQ_State, (Tag)&state,
                        IFQ_AddressBindType, (Tag)&bindtype,
                        IFQ_HardwareAddress, (Tag)hw,
-                       IFQ_HardwareAddressSize, (Tag)&hwbits,
                        IFQ_DeviceName, (Tag)&devname,
                        IFQ_DeviceUnit, (Tag)&unit,
                        IFQ_PrimaryDNSAddress, (Tag)&dns0,

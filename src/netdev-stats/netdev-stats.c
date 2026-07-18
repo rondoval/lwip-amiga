@@ -7,9 +7,13 @@
  * the counter visibility that DEBUG builds get from the mib/txh prints,
  * available on release builds.
  *
- *   > netdev-stats                     one-shot dump
- *   > netdev-stats 2                   redraw every 2 s with /s rates (Ctrl-C ends)
- *   > netdev-stats coalesce 500 64 32  set RX usecs / RX max frames / TX max frames
+ *   > netdev-stats                                       one-shot dump
+ *   > netdev-stats 2                                     redraw every 2 s with /s rates
+ *                                                        (Ctrl-C ends)
+ *   > netdev-stats RXUSECS 500 RXFRAMES 64 TXFRAMES 32   set interrupt coalescing
+ *
+ * ReadArgs CLI (`netdev-stats ?` prints the template): DEVICE/UNIT select the
+ * driver (default genet.device unit 0); the three coalesce keywords go together.
  *
  * The loss line names the bottleneck directly: rdma = RX ring full (drain
  * too slow), rbovfl = RBUF FIFO overflow, pooldry = free pool empty (stack
@@ -17,19 +21,31 @@
  */
 
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 
 #include <devices/timer.h>
 #include <dos/dos.h>
+#include <dos/rdargs.h>
 #include <exec/io.h>
 #include <exec/types.h>
 
+#include <proto/dos.h>
 #include <proto/exec.h>
 
 #include <netdev.h>
 
-#define DEVICE_NAME "genet.device"
+#define DEVICE_NAME "genet.device" /* default; override with DEVICE/UNIT */
+
+#define ARG_TEMPLATE "INTERVAL/N,DEVICE/K,UNIT/K/N,RXUSECS/K/N,RXFRAMES/K/N,TXFRAMES/K/N"
+enum
+{
+    ARG_INTERVAL,
+    ARG_DEVICE,
+    ARG_UNIT,
+    ARG_RXUSECS,
+    ARG_RXFRAMES,
+    ARG_TXFRAMES,
+    ARG_COUNT
+};
 
 static unsigned long long u64val(const struct NetDevU64 *v)
 {
@@ -70,7 +86,7 @@ static BYTE netdev_cmd(struct IOStdReq *io, UWORD cmd, APTR data, ULONG len)
 static void print_stats(const struct NetDevStats *s, const struct NetDevStats *prev,
                         ULONG secs, const struct NetDevLinkState *link)
 {
-    char b1[22], b2[22], b3[16];
+    char b1[22], b2[22], b3[24];
 
     printf("rx : pkts %s  bytes %s", u64str(u64val(&s->nds_RxPackets), b1),
            u64str(u64val(&s->nds_RxBytes), b2));
@@ -115,41 +131,53 @@ static void print_stats(const struct NetDevStats *s, const struct NetDevStats *p
     printf("\n");
 }
 
-int main(int argc, char **argv)
+int main(void)
 {
     int rc = 20;
-    LONG interval = 0;
-    BOOL do_coalesce = FALSE;
     struct NetDevCoalesce coal;
 
-    if (argc >= 2 && strcmp(argv[1], "coalesce") == 0)
+    LONG argvals[ARG_COUNT] = {0};
+    struct RDArgs *rda = ReadArgs((CONST_STRPTR)ARG_TEMPLATE, argvals, NULL);
+    if (rda == NULL)
     {
-        if (argc != 5)
-        {
-            printf("usage: netdev-stats coalesce <rx_usecs> <rx_frames> <tx_frames>\n");
-            return 10;
-        }
-        coal.ndcl_RxUsecs = (ULONG)atoi(argv[2]);
-        coal.ndcl_RxMaxFrames = (UWORD)atoi(argv[3]);
-        coal.ndcl_TxMaxFrames = (UWORD)atoi(argv[4]);
-        do_coalesce = TRUE;
+        PrintFault(IoErr(), (CONST_STRPTR) "netdev-stats");
+        return 10;
     }
-    else if (argc >= 2)
+
+    /* devname points into rda's buffers: FreeArgs only at exit */
+    LONG interval = argvals[ARG_INTERVAL] ? *(LONG *)argvals[ARG_INTERVAL] : 0;
+    const char *devname = argvals[ARG_DEVICE] ? (const char *)argvals[ARG_DEVICE]
+                                              : DEVICE_NAME;
+    LONG unit = argvals[ARG_UNIT] ? *(LONG *)argvals[ARG_UNIT] : 0;
+
+    int ncoal = (argvals[ARG_RXUSECS] != 0) + (argvals[ARG_RXFRAMES] != 0) +
+                (argvals[ARG_TXFRAMES] != 0);
+    BOOL do_coalesce = (ncoal == 3);
+    if (ncoal != 0 && ncoal != 3)
     {
-        interval = atoi(argv[1]);
-        if (interval <= 0)
-        {
-            printf("usage: netdev-stats [interval_secs]\n"
-                   "       netdev-stats coalesce <rx_usecs> <rx_frames> <tx_frames>\n");
-            return 10;
-        }
+        printf("netdev-stats: RXUSECS, RXFRAMES and TXFRAMES must be given together\n");
+        FreeArgs(rda);
+        return 10;
+    }
+    if (argvals[ARG_INTERVAL] != 0 && (interval <= 0 || do_coalesce))
+    {
+        printf("netdev-stats: INTERVAL must be >= 1 and cannot combine with coalescing\n");
+        FreeArgs(rda);
+        return 10;
+    }
+    if (do_coalesce)
+    {
+        coal.ndcl_RxUsecs = (ULONG)*(LONG *)argvals[ARG_RXUSECS];
+        coal.ndcl_RxMaxFrames = (UWORD)*(LONG *)argvals[ARG_RXFRAMES];
+        coal.ndcl_TxMaxFrames = (UWORD)*(LONG *)argvals[ARG_TXFRAMES];
     }
 
     struct MsgPort *devPort = CreateMsgPort();
     struct IOStdReq *dio = (struct IOStdReq *)CreateIORequest(devPort, sizeof(struct IOStdReq));
-    if (dio == NULL || OpenDevice((CONST_STRPTR)DEVICE_NAME, 0, (struct IORequest *)dio, 0) != 0)
+    if (dio == NULL ||
+        OpenDevice((CONST_STRPTR)devname, (ULONG)unit, (struct IORequest *)dio, 0) != 0)
     {
-        printf("netdev-stats: cannot open %s\n", DEVICE_NAME);
+        printf("netdev-stats: cannot open %s unit %ld\n", devname, (long)unit);
         goto out_ports;
     }
 
@@ -235,5 +263,6 @@ out_ports:
         DeleteIORequest((struct IORequest *)dio);
     if (devPort != NULL)
         DeleteMsgPort(devPort);
+    FreeArgs(rda);
     return rc;
 }

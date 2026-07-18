@@ -35,8 +35,6 @@
 #define TIMER_BASE_NAME TimerBase
 #include <proto/timer.h>
 
-#include <debug.h>
-
 struct Library *SocketBase; /* the bsdsocket inline glue in <proto/socket.h> */
 struct Device *TimerBase;
 
@@ -89,7 +87,7 @@ static void bench_report(const char *tag, unsigned long long bytes,
            (unsigned long)(mbit_x10 / 10), (unsigned long)(mbit_x10 % 10));
 }
 
-static int run_bench(int argc, char **argv)
+int main(int argc, char **argv)
 {
     /* argv: [0]=sockbench [1]=rx|tx|udprx|udptx [2]=host [3]=streams [4]=secs [5]=sizeKB */
     const char *dir = (argc > 1) ? argv[1] : "";
@@ -329,10 +327,4 @@ bench_out:
     DeleteMsgPort(tp);
     CloseLibrary(SocketBase);
     return rc;
-}
-
-int main(int argc, char **argv)
-{
-    Kprintf("[sockbench] %s: argc=%ld\n", __func__, (LONG)argc);
-    return run_bench(argc, argv);
 }
