@@ -298,6 +298,16 @@ static void SbStackTask(void)
     /* seed the resolver search domain from prefs via the LVO that owns the
      * field's truncation contract; apps may override it later the same way */
     bsd_SetDefaultDomainName((STRPTR)ctx->root->netCfg.cfg_Domain, ctx->root);
+    /* anchor the loaded code base. An Emu68 [WP-HIT]/[WILD-WR] reports a raw
+     * runtime 68k PC; with a known symbol's runtime address here
+     * the load base falls out (base = anchor_runtime - anchor_link_offset from
+     * m68k-amigaos-nm bsdsocket.library), so any PC in this binary resolves to a
+     * symbol offline. Three anchors bracket the code (netstack / bsdsocket /
+     * resolver); equal derived bases confirm a single code hunk. */
+    Kprintf("[bsdsocket] code anchors: netstack_init@0x%08lx sb_config_load@0x%08lx"
+            " bsd_SetDefaultDomainName@0x%08lx\n",
+            (ULONG)netstack_init, (ULONG)sb_config_load,
+            (ULONG)bsd_SetDefaultDomainName);
     sb_netdev_up(ctx);
     /* stamp interface-start time for IFQ_LastStart (UNIT_MICROHZ answers
      * TR_GETSYSTIME); harmless if no NIC came up */

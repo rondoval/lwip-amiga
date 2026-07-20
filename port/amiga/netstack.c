@@ -130,7 +130,7 @@ void netstack_tick(void)
 {
     netstack_lock();
     sys_check_timeouts();
-#ifdef DEBUG
+#ifdef PROFILE
     /* lock-profile line every ~2 s (20 × 100 ms ticks) when anything held */
     if (++netstack.ns_LockProfTicks >= 20)
     {
