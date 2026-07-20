@@ -91,7 +91,7 @@ void sb_config_load(struct SbNetConfig *cfg)
         CloseLibrary((struct Library *)DOSBase);
         return;
     }
-    KprintfH("[bsdsocket] %s: reading ENV:netstack.prefs\n", __func__);
+    KprintfT("[bsdsocket] %s: reading ENV:netstack.prefs\n", __func__);
 
     BOOL staticMode = FALSE;
     char linebuf[256];

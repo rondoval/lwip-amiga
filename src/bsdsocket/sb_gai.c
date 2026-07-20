@@ -45,7 +45,7 @@ LONG bsd_getaddrinfo(STRPTR hostname asm("a0"), STRPTR servname asm("a1"),
                      struct sb_addrinfo *hints asm("a2"), struct sb_addrinfo **res asm("a3"),
                      struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: host=%s serv=%s\n", __func__,
+    KprintfT("[bsdsocket] %s: host=%s serv=%s\n", __func__,
              hostname != NULL ? (ULONG)hostname : (ULONG) "(null)",
              servname != NULL ? (ULONG)servname : (ULONG) "(null)");
     if (res == NULL)
@@ -193,7 +193,7 @@ LONG bsd_getaddrinfo(STRPTR hostname asm("a0"), STRPTR servname asm("a1"),
 
 VOID bsd_freeaddrinfo(struct sb_addrinfo *ai asm("a0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: ai=0x%08lx\n", __func__, (ULONG)ai);
+    KprintfT("[bsdsocket] %s: ai=0x%08lx\n", __func__, (ULONG)ai);
     (void)base;
     if (ai == NULL)
         return;
@@ -204,7 +204,7 @@ VOID bsd_freeaddrinfo(struct sb_addrinfo *ai asm("a0"), struct SocketBase *base 
 
 STRPTR bsd_gai_strerror(LONG errnum asm("a0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: errnum=%ld\n", __func__, errnum);
+    KprintfT("[bsdsocket] %s: errnum=%ld\n", __func__, errnum);
     (void)base;
     static const char *const msgs[] = {
         "no error",                                    /* 0 */
@@ -233,7 +233,7 @@ LONG bsd_getnameinfo(APTR sa asm("a0"), ULONG salen asm("d0"),
                      STRPTR serv asm("a2"), ULONG servlen asm("d2"),
                      ULONG flags asm("d3"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: sa=0x%08lx flags=0x%lx\n", __func__, (ULONG)sa, flags);
+    KprintfT("[bsdsocket] %s: sa=0x%08lx flags=0x%lx\n", __func__, (ULONG)sa, flags);
     const struct sb_sockaddr_in *sin = sa;
 
     if ((flags & ~(ULONG)(SB_NI_NUMERICHOST | SB_NI_NUMERICSERV | SB_NI_NOFQDN |

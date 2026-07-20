@@ -26,7 +26,7 @@
 /* parse an app sockaddr (4.4BSD, sin_len first) */
 LONG sb_addr_in(const struct sb_sockaddr_in *sa, LONG salen, ip_addr_t *ip, u16_t *port)
 {
-    KprintfH("[bsdsocket] %s: sa 0x%08lx salen %ld\n", __func__, (ULONG)sa, salen);
+    KprintfT("[bsdsocket] %s: sa 0x%08lx salen %ld\n", __func__, (ULONG)sa, salen);
     if (sa == NULL || salen < 8)
         return SB_EINVAL;
     if (sa->sin_family != SB_AF_INET && sa->sin_family != 0)
@@ -40,7 +40,7 @@ LONG sb_addr_in(const struct sb_sockaddr_in *sa, LONG salen, ip_addr_t *ip, u16_
 /* write an ip/port back into an app sockaddr, value-result */
 void sb_addr_out(APTR name, LONG *namelen, ULONG addr, UWORD port)
 {
-    KprintfH("[bsdsocket] %s: addr 0x%08lx port %lu\n", __func__, addr, (ULONG)port);
+    KprintfT("[bsdsocket] %s: addr 0x%08lx port %lu\n", __func__, addr, (ULONG)port);
     struct sb_sockaddr_in out;
 
     if (name == NULL || namelen == NULL || *namelen <= 0)
@@ -63,7 +63,7 @@ void sb_addr_out(APTR name, LONG *namelen, ULONG addr, UWORD port)
 LONG bsd_socket(LONG domain asm("d0"), LONG type asm("d1"), LONG protocol asm("d2"),
                 struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: domain %ld type %ld protocol %ld\n", __func__, domain, type, protocol);
+    KprintfT("[bsdsocket] %s: domain %ld type %ld protocol %ld\n", __func__, domain, type, protocol);
     if (domain != SB_AF_INET)
         return sb_fail(base, SB_EAFNOSUPPORT);
 
@@ -136,7 +136,7 @@ LONG bsd_socket(LONG domain asm("d0"), LONG type asm("d1"), LONG protocol asm("d
 LONG bsd_bind(LONG sock asm("d0"), APTR name asm("a0"), LONG namelen asm("d1"),
               struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: fd %ld name 0x%08lx namelen %ld\n", __func__, sock, (ULONG)name, namelen);
+    KprintfT("[bsdsocket] %s: fd %ld name 0x%08lx namelen %ld\n", __func__, sock, (ULONG)name, namelen);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -176,7 +176,7 @@ LONG bsd_bind(LONG sock asm("d0"), APTR name asm("a0"), LONG namelen asm("d1"),
 LONG bsd_listen(LONG sock asm("d0"), LONG backlog asm("d1"),
                 struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: fd %ld backlog %ld\n", __func__, sock, backlog);
+    KprintfT("[bsdsocket] %s: fd %ld backlog %ld\n", __func__, sock, backlog);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -216,7 +216,7 @@ LONG bsd_listen(LONG sock asm("d0"), LONG backlog asm("d1"),
 LONG bsd_accept(LONG sock asm("d0"), APTR addr asm("a0"), APTR addrlen asm("a1"),
                 struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: fd %ld\n", __func__, sock);
+    KprintfT("[bsdsocket] %s: fd %ld\n", __func__, sock);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -270,7 +270,7 @@ LONG bsd_accept(LONG sock asm("d0"), APTR addr asm("a0"), APTR addrlen asm("a1")
 LONG bsd_connect(LONG sock asm("d0"), APTR name asm("a0"), LONG namelen asm("d1"),
                  struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: fd %ld name 0x%08lx namelen %ld\n", __func__, sock, (ULONG)name, namelen);
+    KprintfT("[bsdsocket] %s: fd %ld name 0x%08lx namelen %ld\n", __func__, sock, (ULONG)name, namelen);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -356,7 +356,7 @@ LONG bsd_connect(LONG sock asm("d0"), APTR name asm("a0"), LONG namelen asm("d1"
 LONG bsd_shutdown(LONG sock asm("d0"), LONG how asm("d1"),
                   struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: fd %ld how %ld\n", __func__, sock, how);
+    KprintfT("[bsdsocket] %s: fd %ld how %ld\n", __func__, sock, how);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -403,7 +403,7 @@ LONG bsd_shutdown(LONG sock asm("d0"), LONG how asm("d1"),
 
 LONG bsd_CloseSocket(LONG sock asm("d0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: fd %ld\n", __func__, sock);
+    KprintfT("[bsdsocket] %s: fd %ld\n", __func__, sock);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -443,7 +443,7 @@ LONG bsd_CloseSocket(LONG sock asm("d0"), struct SocketBase *base asm("a6"))
 LONG bsd_getsockname(LONG sock asm("d0"), APTR name asm("a0"), APTR namelen asm("a1"),
                      struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: fd %ld\n", __func__, sock);
+    KprintfT("[bsdsocket] %s: fd %ld\n", __func__, sock);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -481,7 +481,7 @@ LONG bsd_getsockname(LONG sock asm("d0"), APTR name asm("a0"), APTR namelen asm(
 LONG bsd_getpeername(LONG sock asm("d0"), APTR name asm("a0"), APTR namelen asm("a1"),
                      struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: fd %ld\n", __func__, sock);
+    KprintfT("[bsdsocket] %s: fd %ld\n", __func__, sock);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -523,7 +523,7 @@ LONG bsd_getpeername(LONG sock asm("d0"), APTR name asm("a0"), APTR namelen asm(
 LONG bsd_IoctlSocket(LONG sock asm("d0"), ULONG req asm("d1"), APTR argp asm("a0"),
                      struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: fd %ld req 0x%lx\n", __func__, sock, req);
+    KprintfT("[bsdsocket] %s: fd %ld req 0x%lx\n", __func__, sock, req);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);

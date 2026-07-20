@@ -307,7 +307,7 @@ LONG bsd_GetNetworkStatistics(LONG type asm("d0"), LONG version asm("d1"),
                               APTR destination asm("a0"), LONG size asm("d2"),
                               struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: type=%ld version=%ld dest=0x%08lx size=%ld\n",
+    KprintfT("[bsdsocket] %s: type=%ld version=%ld dest=0x%08lx size=%ld\n",
              __func__, type, version, (ULONG)destination, size);
     if (version != SB_NETWORKSTATUS_VERSION)
     {

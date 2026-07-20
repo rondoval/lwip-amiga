@@ -14,7 +14,7 @@
  * pointer. Anything else is copied through. */
 static ULONG sb_vformat(char *dst, ULONG max, const char *fmt, const ULONG *args)
 {
-    KprintfH("[bsdsocket] %s: fmt=%s\n", __func__, (ULONG)fmt);
+    KprintfT("[bsdsocket] %s: fmt=%s\n", __func__, (ULONG)fmt);
     ULONG o = 0;
     ULONG ai = 0;
 

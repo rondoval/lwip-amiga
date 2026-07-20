@@ -81,7 +81,7 @@ static void sb_if_set_sockaddr(APTR dst, ULONG addr)
 
 APTR bsd_ObtainInterfaceList(struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s\n", __func__);
+    KprintfT("[bsdsocket] %s\n", __func__);
     struct List *list = AllocVec(sizeof(struct List), MEMF_PUBLIC | MEMF_CLEAR);
     if (list == NULL)
     {
@@ -115,7 +115,7 @@ APTR bsd_ObtainInterfaceList(struct SocketBase *base asm("a6"))
 
 VOID bsd_ReleaseInterfaceList(APTR list asm("a0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: list=0x%08lx\n", __func__, (ULONG)list);
+    KprintfT("[bsdsocket] %s: list=0x%08lx\n", __func__, (ULONG)list);
     (void)base;
     struct List *l = list;
     if (l == NULL)
@@ -130,7 +130,7 @@ VOID bsd_ReleaseInterfaceList(APTR list asm("a0"), struct SocketBase *base asm("
 LONG bsd_QueryInterfaceTagList(STRPTR name asm("a0"), struct TagItem *tags asm("a1"),
                                struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: name=%s\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)");
+    KprintfT("[bsdsocket] %s: name=%s\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)");
     if (name == NULL || tags == NULL)
     {
         sb_set_errno(base, SB_EINVAL);
@@ -323,7 +323,7 @@ LONG bsd_QueryInterfaceTagList(STRPTR name asm("a0"), struct TagItem *tags asm("
  * passed in the other registers. */
 LONG bsd_InterfaceConfigUnsupported(struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: interface configuration is not supported\n", __func__);
+    KprintfT("[bsdsocket] %s: interface configuration is not supported\n", __func__);
     sb_set_errno(base, SB_EINVAL);
     return -1;
 }

@@ -22,7 +22,7 @@
 
 LONG sb_map_err(signed char e)
 {
-    KprintfH("[bsdsocket] %s: e=%ld\n", __func__, (LONG)e);
+    KprintfT("[bsdsocket] %s: e=%ld\n", __func__, (LONG)e);
     switch (e)
     {
     case ERR_OK:
@@ -70,7 +70,7 @@ struct SocketBase *sb_owner_first(struct SbSocket *s)
 
 BOOL sb_owner_incref(struct SbSocket *s, struct SocketBase *b)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx b=0x%08lx\n", __func__, (ULONG)s, (ULONG)b);
+    KprintfT("[bsdsocket] %s: s=0x%08lx b=0x%08lx\n", __func__, (ULONG)s, (ULONG)b);
     struct SbOwnerRef *slot = NULL;
     for (ULONG i = 0; i < SB_SOCK_OWNERS; i++)
     {
@@ -91,7 +91,7 @@ BOOL sb_owner_incref(struct SbSocket *s, struct SocketBase *b)
 
 void sb_owner_decref(struct SbSocket *s, struct SocketBase *b)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx b=0x%08lx\n", __func__, (ULONG)s, (ULONG)b);
+    KprintfT("[bsdsocket] %s: s=0x%08lx b=0x%08lx\n", __func__, (ULONG)s, (ULONG)b);
     for (ULONG i = 0; i < SB_SOCK_OWNERS; i++)
     {
         if (s->owners[i].base == b)
@@ -105,7 +105,7 @@ void sb_owner_decref(struct SbSocket *s, struct SocketBase *b)
 
 void sb_wake(struct SbSocket *s)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
+    KprintfT("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
     /* Wake every owner: normally one, but a socket shared via
      * ReleaseCopyOfSocket has several and all of them must be woken.
      * sigIoMask = AmiTCP-style async SIGIO (SetSocketSignals /
@@ -144,7 +144,7 @@ void sb_event(struct SbSocket *s, ULONG ev)
  * outside the lock, so callers re-test their condition afterwards. */
 LONG sb_wait(struct SocketBase *base)
 {
-    KprintfH("[bsdsocket] %s: base=0x%08lx\n", __func__, (ULONG)base);
+    KprintfT("[bsdsocket] %s: base=0x%08lx\n", __func__, (ULONG)base);
     SetSignal(0UL, 1UL << base->sigBit);
     netstack_unlock();
     ULONG sigs = Wait((1UL << base->sigBit) | base->breakMask);
@@ -169,7 +169,7 @@ LONG sb_wait(struct SocketBase *base)
  * SB_EWOULDBLOCK. */
 LONG sb_wait_to(struct SocketBase *base, ULONG ms, struct SbTimedWait *tw)
 {
-    KprintfH("[bsdsocket] %s: base=0x%08lx ms=%lu\n", __func__, (ULONG)base, ms);
+    KprintfT("[bsdsocket] %s: base=0x%08lx ms=%lu\n", __func__, (ULONG)base, ms);
     if (ms == 0 || base->timerReq == NULL)
         return sb_wait(base);
 
@@ -231,7 +231,7 @@ void sb_peer_ip(struct SbSocket *s, ULONG *addr, UWORD *port)
 
 BOOL sb_sock_writable(struct SbSocket *s)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
+    KprintfT("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
     if (s->err != 0)
         return TRUE;
     if (s->type == SBT_TCP)
@@ -249,7 +249,7 @@ BOOL sb_sock_writable(struct SbSocket *s)
 
 static err_t sb_tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx p=0x%08lx err=%ld\n", __func__, (ULONG)arg, (ULONG)p, (LONG)err);
+    KprintfT("[bsdsocket] %s: s=0x%08lx p=0x%08lx err=%ld\n", __func__, (ULONG)arg, (ULONG)p, (LONG)err);
     struct SbSocket *s = arg;
     (void)tpcb;
     (void)err;
@@ -287,7 +287,7 @@ static err_t sb_tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err
 
 static err_t sb_tcp_sent_cb(void *arg, struct tcp_pcb *tpcb, u16_t len)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx len=%lu\n", __func__, (ULONG)arg, (ULONG)len);
+    KprintfT("[bsdsocket] %s: s=0x%08lx len=%lu\n", __func__, (ULONG)arg, (ULONG)len);
     struct SbSocket *s = arg;
     (void)tpcb;
     (void)len;
@@ -301,7 +301,7 @@ static err_t sb_tcp_sent_cb(void *arg, struct tcp_pcb *tpcb, u16_t len)
 
 static void sb_tcp_err_cb(void *arg, err_t err)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx err=%ld\n", __func__, (ULONG)arg, (LONG)err);
+    KprintfT("[bsdsocket] %s: s=0x%08lx err=%ld\n", __func__, (ULONG)arg, (LONG)err);
     struct SbSocket *s = arg;
     if (s == NULL)
         return;
@@ -322,7 +322,7 @@ static void sb_tcp_err_cb(void *arg, err_t err)
  * stacks don't show this because their loopback RTT makes the hold invisible. */
 static void sb_tcp_nagle_local(struct SbSocket *s)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
+    KprintfT("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
     const ip4_addr_t *remote = ip_2_ip4(&s->pcb.tcp->remote_ip);
 
     if (!ip4_addr_isloopback(remote))
@@ -341,7 +341,7 @@ static void sb_tcp_nagle_local(struct SbSocket *s)
 
 err_t sb_tcp_connected_cb(void *arg, struct tcp_pcb *tpcb, err_t err)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx err=%ld\n", __func__, (ULONG)arg, (LONG)err);
+    KprintfT("[bsdsocket] %s: s=0x%08lx err=%ld\n", __func__, (ULONG)arg, (LONG)err);
     struct SbSocket *s = arg;
     (void)tpcb;
 
@@ -366,7 +366,7 @@ err_t sb_tcp_connected_cb(void *arg, struct tcp_pcb *tpcb, err_t err)
 
 void sb_tcp_wire(struct SbSocket *s)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
+    KprintfT("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
     tcp_arg(s->pcb.tcp, s);
     tcp_recv(s->pcb.tcp, sb_tcp_recv_cb);
     tcp_sent(s->pcb.tcp, sb_tcp_sent_cb);
@@ -375,7 +375,7 @@ void sb_tcp_wire(struct SbSocket *s)
 
 static err_t sb_tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err)
 {
-    KprintfH("[bsdsocket] %s: lst=0x%08lx newpcb=0x%08lx err=%ld\n", __func__, (ULONG)arg, (ULONG)newpcb, (LONG)err);
+    KprintfT("[bsdsocket] %s: lst=0x%08lx newpcb=0x%08lx err=%ld\n", __func__, (ULONG)arg, (ULONG)newpcb, (LONG)err);
     struct SbSocket *lst = arg;
 
     if (lst == NULL || err != ERR_OK || newpcb == NULL)
@@ -406,7 +406,7 @@ static err_t sb_tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err)
 
 static void sb_dgram_queue(struct SbSocket *s, struct pbuf *p, const ip_addr_t *addr, u16_t port)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx len=%lu port=%lu\n", __func__, (ULONG)s, (ULONG)p->tot_len, (ULONG)port);
+    KprintfT("[bsdsocket] %s: s=0x%08lx len=%lu port=%lu\n", __func__, (ULONG)s, (ULONG)p->tot_len, (ULONG)port);
     struct SocketBase *root = s->rootBase;
 
     if (s->ndgrams >= SB_DGRAM_QMAX)
@@ -436,7 +436,7 @@ static void sb_dgram_queue(struct SbSocket *s, struct pbuf *p, const ip_addr_t *
 static void sb_udp_recv_cb(void *arg, struct udp_pcb *upcb, struct pbuf *p,
                            const ip_addr_t *addr, u16_t port)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx p=0x%08lx port=%lu\n", __func__, (ULONG)arg, (ULONG)p, (ULONG)port);
+    KprintfT("[bsdsocket] %s: s=0x%08lx p=0x%08lx port=%lu\n", __func__, (ULONG)arg, (ULONG)p, (ULONG)port);
     struct SbSocket *s = arg;
     (void)upcb;
 
@@ -451,7 +451,7 @@ static void sb_udp_recv_cb(void *arg, struct udp_pcb *upcb, struct pbuf *p,
 static u8_t sb_raw_recv_cb(void *arg, struct raw_pcb *rpcb, struct pbuf *p,
                            const ip_addr_t *addr)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx p=0x%08lx\n", __func__, (ULONG)arg, (ULONG)p);
+    KprintfT("[bsdsocket] %s: s=0x%08lx p=0x%08lx\n", __func__, (ULONG)arg, (ULONG)p);
     struct SbSocket *s = arg;
     (void)rpcb;
 
@@ -472,7 +472,7 @@ static u8_t sb_raw_recv_cb(void *arg, struct raw_pcb *rpcb, struct pbuf *p,
 
 struct SbSocket *sb_sock_alloc(struct SocketBase *base, SbSockType type)
 {
-    KprintfH("[bsdsocket] %s: type=%ld\n", __func__, (LONG)type);
+    KprintfT("[bsdsocket] %s: type=%ld\n", __func__, (LONG)type);
     struct SocketBase *root = SB_ROOT(base);
 
     struct SbSocket *s = AllocPooled(root->sockPool, sizeof(struct SbSocket));
@@ -496,7 +496,7 @@ struct SbSocket *sb_sock_alloc(struct SocketBase *base, SbSockType type)
  * close/abort the pcb, flush queues. Core lock held. */
 void sb_sock_free(struct SocketBase *base, struct SbSocket *s)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx refs=%lu\n", __func__, (ULONG)s, (ULONG)s->refs);
+    KprintfT("[bsdsocket] %s: s=0x%08lx refs=%lu\n", __func__, (ULONG)s, (ULONG)s->refs);
     struct SocketBase *root = s->rootBase;
 
     sb_owner_decref(s, base); /* this base gives up one fd on the socket */
@@ -573,7 +573,7 @@ void sb_sock_free(struct SocketBase *base, struct SbSocket *s)
 
 LONG sb_fd_alloc(struct SocketBase *base, struct SbSocket *s)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
+    KprintfT("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
     for (ULONG i = 0; i < base->fdCount; i++)
     {
         if (base->fd[i] == NULL)
@@ -594,19 +594,19 @@ struct SbSocket *sb_fd_get(struct SocketBase *base, LONG fd)
 
 void sb_listen_wire(struct SbSocket *s)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
+    KprintfT("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
     tcp_arg(s->pcb.tcp, s);
     tcp_accept(s->pcb.tcp, sb_tcp_accept_cb);
 }
 
 void sb_udp_wire(struct SbSocket *s)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
+    KprintfT("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
     udp_recv(s->pcb.udp, sb_udp_recv_cb, s);
 }
 
 void sb_raw_wire(struct SbSocket *s)
 {
-    KprintfH("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
+    KprintfT("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
     raw_recv(s->pcb.raw, sb_raw_recv_cb, s);
 }

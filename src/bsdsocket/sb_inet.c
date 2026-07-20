@@ -16,7 +16,7 @@
 
 STRPTR bsd_Inet_NtoA(ULONG ip asm("d0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: ip=0x%08lx\n", __func__, ip);
+    KprintfT("[bsdsocket] %s: ip=0x%08lx\n", __func__, ip);
     ip4_addr_t a;
     ip4_addr_set_u32(&a, ip);
     ip4addr_ntoa_r(&a, base->ntoaBuf, sizeof(base->ntoaBuf));
@@ -25,7 +25,7 @@ STRPTR bsd_Inet_NtoA(ULONG ip asm("d0"), struct SocketBase *base asm("a6"))
 
 ULONG bsd_inet_addr(STRPTR cp asm("a0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: cp=%s\n", __func__, cp != NULL ? (ULONG)cp : (ULONG)"(null)");
+    KprintfT("[bsdsocket] %s: cp=%s\n", __func__, cp != NULL ? (ULONG)cp : (ULONG)"(null)");
     (void)base;
     ip4_addr_t a;
     if (cp == NULL || ip4addr_aton((const char *)cp, &a) == 0)
@@ -36,7 +36,7 @@ ULONG bsd_inet_addr(STRPTR cp asm("a0"), struct SocketBase *base asm("a6"))
 LONG bsd_inet_aton(STRPTR cp asm("a0"), APTR addr asm("a1"),
                    struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: cp=%s\n", __func__, cp != NULL ? (ULONG)cp : (ULONG)"(null)");
+    KprintfT("[bsdsocket] %s: cp=%s\n", __func__, cp != NULL ? (ULONG)cp : (ULONG)"(null)");
     (void)base;
     ip4_addr_t a;
     if (cp == NULL || addr == NULL || ip4addr_aton((const char *)cp, &a) == 0)
@@ -48,7 +48,7 @@ LONG bsd_inet_aton(STRPTR cp asm("a0"), APTR addr asm("a1"),
 STRPTR bsd_inet_ntop(LONG af asm("d0"), APTR src asm("a0"), STRPTR dst asm("a1"),
                      LONG size asm("d1"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: af=%ld size=%ld\n", __func__, af, size);
+    KprintfT("[bsdsocket] %s: af=%ld size=%ld\n", __func__, af, size);
     if (af != SB_AF_INET || src == NULL || dst == NULL)
     {
         sb_set_errno(base, SB_EAFNOSUPPORT);
@@ -67,7 +67,7 @@ STRPTR bsd_inet_ntop(LONG af asm("d0"), APTR src asm("a0"), STRPTR dst asm("a1")
 LONG bsd_inet_pton(LONG af asm("d0"), STRPTR src asm("a0"), APTR dst asm("a1"),
                    struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: af=%ld src=%s\n", __func__, af, src != NULL ? (ULONG)src : (ULONG)"(null)");
+    KprintfT("[bsdsocket] %s: af=%ld src=%s\n", __func__, af, src != NULL ? (ULONG)src : (ULONG)"(null)");
     if (af != SB_AF_INET)
     {
         sb_set_errno(base, SB_EAFNOSUPPORT);
@@ -83,7 +83,7 @@ LONG bsd_inet_pton(LONG af asm("d0"), STRPTR src asm("a0"), APTR dst asm("a1"),
 /* classful helpers — legacy API surface, exact 4.3BSD semantics */
 ULONG bsd_Inet_LnaOf(ULONG in asm("d0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: in=0x%08lx\n", __func__, in);
+    KprintfT("[bsdsocket] %s: in=0x%08lx\n", __func__, in);
     (void)base;
     if ((in & 0x80000000UL) == 0)
         return in & 0x00FFFFFF;
@@ -94,7 +94,7 @@ ULONG bsd_Inet_LnaOf(ULONG in asm("d0"), struct SocketBase *base asm("a6"))
 
 ULONG bsd_Inet_NetOf(ULONG in asm("d0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: in=0x%08lx\n", __func__, in);
+    KprintfT("[bsdsocket] %s: in=0x%08lx\n", __func__, in);
     (void)base;
     if ((in & 0x80000000UL) == 0)
         return (in >> 24) & 0xFF;
@@ -106,7 +106,7 @@ ULONG bsd_Inet_NetOf(ULONG in asm("d0"), struct SocketBase *base asm("a6"))
 ULONG bsd_Inet_MakeAddr(ULONG net asm("d0"), ULONG host asm("d1"),
                         struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: net=0x%08lx host=0x%08lx\n", __func__, net, host);
+    KprintfT("[bsdsocket] %s: net=0x%08lx host=0x%08lx\n", __func__, net, host);
     (void)base;
     if (net < 128)
         return (net << 24) | (host & 0x00FFFFFF);
@@ -117,7 +117,7 @@ ULONG bsd_Inet_MakeAddr(ULONG net asm("d0"), ULONG host asm("d1"),
 
 ULONG bsd_inet_network(STRPTR cp asm("a0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: cp=%s\n", __func__, cp != NULL ? (ULONG)cp : (ULONG)"(null)");
+    KprintfT("[bsdsocket] %s: cp=%s\n", __func__, cp != NULL ? (ULONG)cp : (ULONG)"(null)");
     (void)base;
     if (cp == NULL)
         return 0xFFFFFFFF; /* INADDR_NONE */
@@ -190,7 +190,7 @@ ULONG bsd_inet_network(STRPTR cp asm("a0"), struct SocketBase *base asm("a6"))
 
 LONG bsd_In_LocalAddr(ULONG address asm("d0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: addr=0x%08lx\n", __func__, address);
+    KprintfT("[bsdsocket] %s: addr=0x%08lx\n", __func__, address);
     (void)base;
     LONG local = 0;
 
@@ -212,7 +212,7 @@ LONG bsd_In_LocalAddr(ULONG address asm("d0"), struct SocketBase *base asm("a6")
 
 LONG bsd_In_CanForward(ULONG address asm("d0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: addr=0x%08lx\n", __func__, address);
+    KprintfT("[bsdsocket] %s: addr=0x%08lx\n", __func__, address);
     (void)base;
     /* 4.3BSD in_canforward(): a datagram to this address may be forwarded
      * unless it is class D (multicast) or class E (experimental) space, or a

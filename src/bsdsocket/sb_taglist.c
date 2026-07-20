@@ -25,7 +25,7 @@ static const char releaseString[] = RELEASE_STRING;
 LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
                            struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: tags=0x%08lx\n", __func__, (ULONG)tags);
+    KprintfT("[bsdsocket] %s: tags=0x%08lx\n", __func__, (ULONG)tags);
     if (tags == NULL)
         return 0;
 

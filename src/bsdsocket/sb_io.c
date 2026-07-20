@@ -56,7 +56,7 @@ static BOOL sb_send_block(struct SocketBase *base, struct SbSocket *s,
 static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
                         const UBYTE *buf, LONG len, LONG flags)
 {
-    KprintfH("[bsdsocket] %s: len %ld flags 0x%lx\n", __func__, len, (ULONG)flags);
+    KprintfT("[bsdsocket] %s: len %ld flags 0x%lx\n", __func__, len, (ULONG)flags);
     LONG sent = 0;
     BOOL dontwait = s->nonblock || (flags & SB_MSG_DONTWAIT);
     struct SbTimedWait tw = { 0, FALSE };
@@ -174,7 +174,7 @@ static LONG sb_dgram_send(struct SocketBase *base, struct SbSocket *s,
                           const UBYTE *buf, LONG len,
                           BOOL have_dst, ip_addr_t *dst, u16_t port)
 {
-    KprintfH("[bsdsocket] %s: len %ld have_dst %ld port %lu\n", __func__, len, (LONG)have_dst, (ULONG)port);
+    KprintfT("[bsdsocket] %s: len %ld have_dst %ld port %lu\n", __func__, len, (LONG)have_dst, (ULONG)port);
     if (len < 0 || len > 0xFFFF)
         return sb_fail(base, SB_EMSGSIZE);
 
@@ -211,7 +211,7 @@ LONG bsd_sendto(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
                 LONG flags asm("d2"), APTR to asm("a1"), LONG tolen asm("d3"),
                 struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: fd %ld len %ld flags 0x%lx\n", __func__, sock, len, (ULONG)flags);
+    KprintfT("[bsdsocket] %s: fd %ld len %ld flags 0x%lx\n", __func__, sock, len, (ULONG)flags);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -236,14 +236,14 @@ LONG bsd_sendto(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
 LONG bsd_send(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
               LONG flags asm("d2"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: fd %ld len %ld flags 0x%lx\n", __func__, sock, len, (ULONG)flags);
+    KprintfT("[bsdsocket] %s: fd %ld len %ld flags 0x%lx\n", __func__, sock, len, (ULONG)flags);
     return bsd_sendto(sock, buf, len, flags, NULL, 0, base);
 }
 
 LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
                  struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: sock=%ld flags=%ld\n", __func__, sock, flags);
+    KprintfT("[bsdsocket] %s: sock=%ld flags=%ld\n", __func__, sock, flags);
     const struct sb_msghdr *mh = msg;
     struct SbSocket *s = sb_fd_get(base, sock);
 
@@ -260,7 +260,7 @@ LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
     /* ancillary data (SCM_RIGHTS etc.) is not supported; like 4.4BSD's
      * datagram output paths we free/ignore it rather than fail the send */
     if (mh->msg_control != NULL && mh->msg_controllen != 0)
-        KprintfH("[bsdsocket] %s: msg_control ignored (%lu bytes)\n", __func__,
+        KprintfT("[bsdsocket] %s: msg_control ignored (%lu bytes)\n", __func__,
                  mh->msg_controllen);
 
     if (s->type == SBT_TCP)
@@ -362,7 +362,7 @@ LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
 static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
                         UBYTE *buf, LONG len, LONG flags)
 {
-    KprintfH("[bsdsocket] %s: len %ld flags 0x%lx\n", __func__, len, (ULONG)flags);
+    KprintfT("[bsdsocket] %s: len %ld flags 0x%lx\n", __func__, len, (ULONG)flags);
     BOOL dontwait = s->nonblock || (flags & SB_MSG_DONTWAIT);
     BOOL peek = (flags & SB_MSG_PEEK) != 0;
     BOOL waitall = (flags & SB_MSG_WAITALL) != 0;
@@ -544,7 +544,7 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
 static struct SbDgram *sb_dgram_wait(struct SocketBase *base, struct SbSocket *s,
                                      LONG flags, LONG *err)
 {
-    KprintfH("[bsdsocket] %s: flags 0x%lx\n", __func__, (ULONG)flags);
+    KprintfT("[bsdsocket] %s: flags 0x%lx\n", __func__, (ULONG)flags);
     BOOL dontwait = s->nonblock || (flags & SB_MSG_DONTWAIT);
     struct SbTimedWait tw = { 0, FALSE };
 
@@ -589,7 +589,7 @@ static LONG sb_dgram_recv(struct SocketBase *base, struct SbSocket *s,
                           UBYTE *buf, LONG len, LONG flags,
                           APTR from, LONG *fromlen)
 {
-    KprintfH("[bsdsocket] %s: len %ld flags 0x%lx\n", __func__, len, (ULONG)flags);
+    KprintfT("[bsdsocket] %s: len %ld flags 0x%lx\n", __func__, len, (ULONG)flags);
     BOOL peek = (flags & SB_MSG_PEEK) != 0;
     struct SocketBase *root = SB_ROOT(base);
     LONG err = 0;
@@ -620,7 +620,7 @@ static LONG sb_dgram_recv(struct SocketBase *base, struct SbSocket *s,
 static LONG sb_dgram_recvmsg(struct SocketBase *base, struct SbSocket *s,
                              struct sb_msghdr *mh, LONG flags)
 {
-    KprintfH("[bsdsocket] %s: flags 0x%lx\n", __func__, (ULONG)flags);
+    KprintfT("[bsdsocket] %s: flags 0x%lx\n", __func__, (ULONG)flags);
     BOOL peek = (flags & SB_MSG_PEEK) != 0;
     struct SocketBase *root = SB_ROOT(base);
     LONG err = 0;
@@ -669,7 +669,7 @@ LONG bsd_recvfrom(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
                   LONG flags asm("d2"), APTR addr asm("a1"), APTR addrlen asm("a2"),
                   struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: fd %ld len %ld flags 0x%lx\n", __func__, sock, len, (ULONG)flags);
+    KprintfT("[bsdsocket] %s: fd %ld len %ld flags 0x%lx\n", __func__, sock, len, (ULONG)flags);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -696,14 +696,14 @@ LONG bsd_recvfrom(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
 LONG bsd_recv(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
               LONG flags asm("d2"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: fd %ld len %ld flags 0x%lx\n", __func__, sock, len, (ULONG)flags);
+    KprintfT("[bsdsocket] %s: fd %ld len %ld flags 0x%lx\n", __func__, sock, len, (ULONG)flags);
     return bsd_recvfrom(sock, buf, len, flags, NULL, NULL, base);
 }
 
 LONG bsd_recvmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
                  struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: sock=%ld flags=%ld\n", __func__, sock, flags);
+    KprintfT("[bsdsocket] %s: sock=%ld flags=%ld\n", __func__, sock, flags);
     struct sb_msghdr *mh = msg;
     struct SbSocket *s = sb_fd_get(base, sock);
 

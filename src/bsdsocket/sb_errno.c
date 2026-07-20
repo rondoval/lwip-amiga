@@ -11,7 +11,7 @@
 
 void sb_set_errno(struct SocketBase *base, LONG code)
 {
-    KprintfH("[bsdsocket] %s: code=%ld\n", __func__, code);
+    KprintfT("[bsdsocket] %s: code=%ld\n", __func__, code);
     base->internalErrno = code;
     if (base->errnoPtr != NULL && base->errnoPtr != &base->internalErrno)
     {
@@ -32,7 +32,7 @@ void sb_set_errno(struct SocketBase *base, LONG code)
 
 void sb_set_herrno(struct SocketBase *base, LONG code)
 {
-    KprintfH("[bsdsocket] %s: code=%ld\n", __func__, code);
+    KprintfT("[bsdsocket] %s: code=%ld\n", __func__, code);
     base->hErrno = code;
     if (base->hErrnoPtr != NULL)
         *base->hErrnoPtr = code;
@@ -41,21 +41,21 @@ void sb_set_herrno(struct SocketBase *base, LONG code)
 /* the API-wide fail idiom: set errno, return -1 */
 LONG sb_fail(struct SocketBase *base, LONG code)
 {
-    KprintfH("[bsdsocket] %s: code %ld\n", __func__, code);
+    KprintfT("[bsdsocket] %s: code %ld\n", __func__, code);
     sb_set_errno(base, code);
     return -1;
 }
 
 LONG bsd_Errno(struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: errno=%ld\n", __func__, base->internalErrno);
+    KprintfT("[bsdsocket] %s: errno=%ld\n", __func__, base->internalErrno);
     return base->internalErrno;
 }
 
 VOID bsd_SetErrnoPtr(APTR errnoPtr asm("a0"), LONG size asm("d0"),
                      struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: ptr=0x%08lx size=%ld\n", __func__, (ULONG)errnoPtr, size);
+    KprintfT("[bsdsocket] %s: ptr=0x%08lx size=%ld\n", __func__, (ULONG)errnoPtr, size);
     if (errnoPtr != NULL && (size == 1 || size == 2 || size == 4))
     {
         base->errnoPtr = errnoPtr;

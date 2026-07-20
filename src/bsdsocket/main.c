@@ -101,7 +101,7 @@ static struct Library *LibInit(struct Library *base asm("d0"), ULONG seglist asm
 
 static void child_cleanup(struct SocketBase *b)
 {
-    KprintfH("[bsdsocket] %s: base 0x%08lx\n", __func__, (ULONG)b);
+    KprintfT("[bsdsocket] %s: base 0x%08lx\n", __func__, (ULONG)b);
     if (b->fd != NULL)
     {
         /* orphaned sockets die with the base */

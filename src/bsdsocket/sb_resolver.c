@@ -18,7 +18,7 @@
 
 static void sb_dns_cb(const char *name, const ip_addr_t *ipaddr, void *arg)
 {
-    KprintfH("[bsdsocket] %s: name=%s found=%ld\n", __func__, (ULONG)name, (LONG)(ipaddr != NULL));
+    KprintfT("[bsdsocket] %s: name=%s found=%ld\n", __func__, (ULONG)name, (LONG)(ipaddr != NULL));
     struct SocketBase *base = arg;
     (void)name;
 
@@ -37,7 +37,7 @@ static void sb_dns_cb(const char *name, const ip_addr_t *ipaddr, void *arg)
 
 static struct sb_hostent *sb_host_fill(struct SocketBase *base, const char *name, ULONG addr)
 {
-    KprintfH("[bsdsocket] %s: name=%s addr=0x%08lx\n", __func__, (ULONG)name, addr);
+    KprintfT("[bsdsocket] %s: name=%s addr=0x%08lx\n", __func__, (ULONG)name, addr);
     strlcpy(base->hostName, name, sizeof(base->hostName));
     base->hostAddr = addr;
     base->hostAddrList[0] = (char *)&base->hostAddr;
@@ -56,7 +56,7 @@ static struct sb_hostent *sb_host_fill(struct SocketBase *base, const char *name
  * SB_HOST_NOT_FOUND on a negative or failed answer. */
 static LONG sb_dns_query(struct SocketBase *base, const char *name, ULONG *addr)
 {
-    KprintfH("[bsdsocket] %s: name=%s\n", __func__, (ULONG)name);
+    KprintfT("[bsdsocket] %s: name=%s\n", __func__, (ULONG)name);
     netstack_lock();
     base->dnsDone = FALSE;
     base->dnsErr = 0;
@@ -121,7 +121,7 @@ static BOOL sb_qualify(const char *name, const char *domain, char *out, ULONG ou
  * Returns the per-base hostent or NULL. */
 struct sb_hostent *sb_host_resolve(struct SocketBase *base, const char *name, ULONG *addrOut, LONG *herrOut)
 {
-    KprintfH("[bsdsocket] %s: name=%s\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)");
+    KprintfT("[bsdsocket] %s: name=%s\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)");
 
     if (name == NULL)
     {
@@ -163,14 +163,14 @@ struct sb_hostent *sb_host_resolve(struct SocketBase *base, const char *name, UL
 
 APTR bsd_gethostbyname(STRPTR name asm("a0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: name=%s\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)");
+    KprintfT("[bsdsocket] %s: name=%s\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)");
     return sb_host_resolve(base, (const char *)name, NULL, NULL);
 }
 
 APTR bsd_gethostbyaddr(STRPTR addr asm("a0"), LONG len asm("d0"), LONG type asm("d1"),
                        struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: addr=0x%08lx len=%ld\n", __func__, (ULONG)addr, len);
+    KprintfT("[bsdsocket] %s: addr=0x%08lx len=%ld\n", __func__, (ULONG)addr, len);
     if (addr == NULL || len != 4 || type != SB_AF_INET)
     {
         sb_set_herrno(base, SB_HOST_NOT_FOUND);
@@ -190,7 +190,7 @@ APTR bsd_gethostbyaddr(STRPTR addr asm("a0"), LONG len asm("d0"), LONG type asm(
 LONG bsd_gethostname(STRPTR name asm("a0"), LONG namelen asm("d0"),
                      struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: namelen=%ld\n", __func__, namelen);
+    KprintfT("[bsdsocket] %s: namelen=%ld\n", __func__, namelen);
     const char *hostname = SB_ROOT(base)->netCfg.cfg_Hostname;
     if (name == NULL || namelen <= 0)
         return -1;
@@ -200,7 +200,7 @@ LONG bsd_gethostname(STRPTR name asm("a0"), LONG namelen asm("d0"),
 
 ULONG bsd_gethostid(struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s\n", __func__);
+    KprintfT("[bsdsocket] %s\n", __func__);
     (void)base;
     /* BSD convention: the host identifier is the primary IP address;
      * unconfigured hosts still answer non-zero with the loopback address */
@@ -219,7 +219,7 @@ ULONG bsd_gethostid(struct SocketBase *base asm("a6"))
 static struct sb_hostent *sb_host_to_caller(struct sb_hostent *src, struct sb_hostent *hp,
                                             char *buf, ULONG buflen)
 {
-    KprintfH("[bsdsocket] %s: buflen=%lu\n", __func__, buflen);
+    KprintfT("[bsdsocket] %s: buflen=%lu\n", __func__, buflen);
     /* layout in the caller's buffer: addr (4) + addr_list (8) + aliases (4)
      * + name string */
     ULONG need = 4 + 2 * sizeof(char *) + sizeof(char *) + 1;
@@ -251,7 +251,7 @@ APTR bsd_gethostbyname_r(STRPTR name asm("a0"), APTR hp asm("a1"), APTR buf asm(
                          ULONG buflen asm("d0"), LONG *he asm("a3"),
                          struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: name=%s buflen=%lu\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)", buflen);
+    KprintfT("[bsdsocket] %s: name=%s buflen=%lu\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)", buflen);
     LONG herr = 0;
     struct sb_hostent *res = sb_host_resolve(base, (const char *)name, NULL, &herr);
 
@@ -266,7 +266,7 @@ APTR bsd_gethostbyaddr_r(STRPTR addr asm("a0"), LONG len asm("d0"), LONG type as
                          APTR hp asm("a1"), APTR buf asm("a2"), ULONG buflen asm("d2"),
                          LONG *he asm("a3"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: len=%ld type=%ld\n", __func__, len, type);
+    KprintfT("[bsdsocket] %s: len=%ld type=%ld\n", __func__, len, type);
     struct sb_hostent *res = (struct sb_hostent *)bsd_gethostbyaddr(addr, len, type, base);
 
     if (he != NULL)

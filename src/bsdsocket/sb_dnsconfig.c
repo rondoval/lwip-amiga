@@ -18,7 +18,7 @@
 
 LONG bsd_AddDomainNameServer(STRPTR address asm("a0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: address=%s\n", __func__, address != NULL ? (ULONG)address : (ULONG)"(null)");
+    KprintfT("[bsdsocket] %s: address=%s\n", __func__, address != NULL ? (ULONG)address : (ULONG)"(null)");
     ip_addr_t ip;
 
     if (address == NULL || ip4addr_aton((const char *)address, ip_2_ip4(&ip)) == 0)
@@ -54,7 +54,7 @@ LONG bsd_AddDomainNameServer(STRPTR address asm("a0"), struct SocketBase *base a
 
 LONG bsd_RemoveDomainNameServer(STRPTR address asm("a0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: address=%s\n", __func__, address != NULL ? (ULONG)address : (ULONG)"(null)");
+    KprintfT("[bsdsocket] %s: address=%s\n", __func__, address != NULL ? (ULONG)address : (ULONG)"(null)");
     ip_addr_t ip;
 
     if (address == NULL || ip4addr_aton((const char *)address, ip_2_ip4(&ip)) == 0)
@@ -89,7 +89,7 @@ struct sb_dns_list
 
 APTR bsd_ObtainDomainNameServerList(struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s\n", __func__);
+    KprintfT("[bsdsocket] %s\n", __func__);
     struct sb_dns_list *l = AllocVec(sizeof(struct sb_dns_list), MEMF_PUBLIC);
     if (l == NULL)
     {
@@ -121,7 +121,7 @@ APTR bsd_ObtainDomainNameServerList(struct SocketBase *base asm("a6"))
 
 VOID bsd_ReleaseDomainNameServerList(APTR list asm("a0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: list=0x%08lx\n", __func__, (ULONG)list);
+    KprintfT("[bsdsocket] %s: list=0x%08lx\n", __func__, (ULONG)list);
     struct sb_dns_list *l = list;
     (void)base;
 
@@ -139,7 +139,7 @@ VOID bsd_ReleaseDomainNameServerList(APTR list asm("a0"), struct SocketBase *bas
 LONG bsd_GetDefaultDomainName(STRPTR buffer asm("a0"), LONG bufferSize asm("d0"),
                               struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: bufferSize=%ld\n", __func__, bufferSize);
+    KprintfT("[bsdsocket] %s: bufferSize=%ld\n", __func__, bufferSize);
     struct SocketBase *root = SB_ROOT(base);
 
     if (buffer == NULL || bufferSize <= 0 || root->defaultDomain[0] == '\0')
@@ -151,7 +151,7 @@ LONG bsd_GetDefaultDomainName(STRPTR buffer asm("a0"), LONG bufferSize asm("d0")
 
 VOID bsd_SetDefaultDomainName(STRPTR buffer asm("a0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: name=%s\n", __func__, buffer != NULL ? (ULONG)buffer : (ULONG)"(null)");
+    KprintfT("[bsdsocket] %s: name=%s\n", __func__, buffer != NULL ? (ULONG)buffer : (ULONG)"(null)");
     struct SocketBase *root = SB_ROOT(base);
 
     if (buffer == NULL)

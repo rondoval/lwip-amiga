@@ -77,7 +77,7 @@ static const char *sb_dev_basename(const char *name)
 
 static BYTE sb_netdev_cmd(struct IOStdReq *io, UWORD cmd, APTR data, ULONG len)
 {
-    KprintfH("[bsdsocket] %s: cmd 0x%04lx, len %lu\n", __func__, (ULONG)cmd, len);
+    KprintfT("[bsdsocket] %s: cmd 0x%04lx, len %lu\n", __func__, (ULONG)cmd, len);
     io->io_Command = cmd;
     io->io_Data = data;
     io->io_Length = len;
@@ -225,7 +225,7 @@ static void sb_netdev_down(struct SbStackCtx *ctx)
  * publish into the root cache. */
 static void sb_netdev_send(struct IOStdReq *io, UWORD cmd, APTR data, ULONG len)
 {
-    KprintfH("[bsdsocket] %s: cmd 0x%04lx, len %lu\n", __func__, (ULONG)cmd, len);
+    KprintfT("[bsdsocket] %s: cmd 0x%04lx, len %lu\n", __func__, (ULONG)cmd, len);
     io->io_Command = cmd;
     io->io_Data = data;
     io->io_Length = len;

@@ -34,7 +34,7 @@ static LONG sb_select_scan(struct SocketBase *base, LONG nfds,
                            const ULONG *r_in, const ULONG *w_in, const ULONG *e_in,
                            ULONG *r_out, ULONG *w_out, ULONG *e_out)
 {
-    KprintfH("[bsdsocket] %s: nfds %ld\n", __func__, nfds);
+    KprintfT("[bsdsocket] %s: nfds %ld\n", __func__, nfds);
     LONG hits = 0;
     (void)e_out; /* no exceptional conditions defined (no OOB) */
 
@@ -69,7 +69,7 @@ LONG bsd_WaitSelect(LONG nfds asm("d0"), APTR readfds asm("a0"), APTR writefds a
                     APTR exceptfds asm("a2"), APTR timeout asm("a3"), ULONG *signals asm("d1"),
                     struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: nfds %ld, timeout 0x%08lx, sigmask 0x%08lx\n", __func__, nfds, (ULONG)timeout, signals != NULL ? *signals : 0UL);
+    KprintfT("[bsdsocket] %s: nfds %ld, timeout 0x%08lx, sigmask 0x%08lx\n", __func__, nfds, (ULONG)timeout, signals != NULL ? *signals : 0UL);
     const struct sb_timeval *tv = timeout;
     ULONG userMask = signals != NULL ? *signals : 0;
 

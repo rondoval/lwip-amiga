@@ -21,7 +21,7 @@ static const struct
 
 static struct sb_protoent *sb_proto_fill(struct SocketBase *base, ULONG idx)
 {
-    KprintfH("[bsdsocket] %s: proto=%ld\n", __func__, sb_protos[idx].proto);
+    KprintfT("[bsdsocket] %s: proto=%ld\n", __func__, sb_protos[idx].proto);
     base->proto.p_name = (char *)sb_protos[idx].name;
     base->protoAliases[0] = NULL;
     base->proto.p_aliases = base->protoAliases;
@@ -31,7 +31,7 @@ static struct sb_protoent *sb_proto_fill(struct SocketBase *base, ULONG idx)
 
 APTR bsd_getprotobyname(STRPTR name asm("a0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: name=%s\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)");
+    KprintfT("[bsdsocket] %s: name=%s\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)");
     if (name != NULL)
     {
         for (ULONG i = 0; sb_protos[i].name != NULL; i++)
@@ -45,7 +45,7 @@ APTR bsd_getprotobyname(STRPTR name asm("a0"), struct SocketBase *base asm("a6")
 
 APTR bsd_getprotobynumber(LONG proto asm("d0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: proto=%ld\n", __func__, proto);
+    KprintfT("[bsdsocket] %s: proto=%ld\n", __func__, proto);
     for (ULONG i = 0; sb_protos[i].name != NULL; i++)
     {
         if (sb_protos[i].proto == proto)
@@ -58,7 +58,7 @@ APTR bsd_getprotobynumber(LONG proto asm("d0"), struct SocketBase *base asm("a6"
  * Keeps get*ent walking the exact same table as getprotobyname/-number. */
 static struct sb_protoent *sb_proto_at(struct SocketBase *base, ULONG idx)
 {
-    KprintfH("[bsdsocket] %s: idx=%lu\n", __func__, idx);
+    KprintfT("[bsdsocket] %s: idx=%lu\n", __func__, idx);
     ULONG count = sizeof(sb_protos) / sizeof(sb_protos[0]) - 1; /* minus sentinel */
     if (idx >= count)
         return NULL;
@@ -67,20 +67,20 @@ static struct sb_protoent *sb_proto_at(struct SocketBase *base, ULONG idx)
 
 VOID bsd_setprotoent(LONG stayOpen asm("d0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s\n", __func__);
+    KprintfT("[bsdsocket] %s\n", __func__);
     (void)stayOpen;
     base->protoIdx = 0;
 }
 
 VOID bsd_endprotoent(struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s\n", __func__);
+    KprintfT("[bsdsocket] %s\n", __func__);
     base->protoIdx = 0;
 }
 
 APTR bsd_getprotoent(struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: idx=%lu\n", __func__, (ULONG)base->protoIdx);
+    KprintfT("[bsdsocket] %s: idx=%lu\n", __func__, (ULONG)base->protoIdx);
     /* walk the same sb_protos table getprotobyname/-number use — no parallel
      * list to drift out of sync */
     struct sb_protoent *pe = sb_proto_at(base, base->protoIdx);
@@ -169,21 +169,21 @@ static LONG sb_serv_find(const char *name, LONG port, const char *proto)
  * per-base servent involved */
 LONG sb_serv_port_by_name(const char *name, const char *proto)
 {
-    KprintfH("[bsdsocket] %s: name=%s\n", __func__, (ULONG)name);
+    KprintfT("[bsdsocket] %s: name=%s\n", __func__, (ULONG)name);
     LONG idx = sb_serv_find(name, 0, proto);
     return idx < 0 ? -1 : sb_services[idx].port;
 }
 
 const char *sb_serv_name_by_port(UWORD port, const char *proto)
 {
-    KprintfH("[bsdsocket] %s: port=%lu\n", __func__, (ULONG)port);
+    KprintfT("[bsdsocket] %s: port=%lu\n", __func__, (ULONG)port);
     LONG idx = sb_serv_find(NULL, port, proto);
     return idx < 0 ? NULL : sb_services[idx].name;
 }
 
 static struct sb_servent *sb_serv_fill(struct SocketBase *base, ULONG idx)
 {
-    KprintfH("[bsdsocket] %s: name=%s port=%lu\n", __func__, (ULONG)sb_services[idx].name, (ULONG)sb_services[idx].port);
+    KprintfT("[bsdsocket] %s: name=%s port=%lu\n", __func__, (ULONG)sb_services[idx].name, (ULONG)sb_services[idx].port);
     base->serv.s_name = (char *)sb_services[idx].name;
     ULONG n = 0;
     for (ULONG a = 0; a < 2 && sb_services[idx].alias[a] != NULL; a++)
@@ -198,7 +198,7 @@ static struct sb_servent *sb_serv_fill(struct SocketBase *base, ULONG idx)
 APTR bsd_getservbyname(STRPTR name asm("a0"), STRPTR proto asm("a1"),
                        struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: name=%s\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)");
+    KprintfT("[bsdsocket] %s: name=%s\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)");
     if (name == NULL)
         return NULL;
     LONG idx = sb_serv_find((const char *)name, 0, (const char *)proto);
@@ -208,27 +208,27 @@ APTR bsd_getservbyname(STRPTR name asm("a0"), STRPTR proto asm("a1"),
 APTR bsd_getservbyport(LONG port asm("d0"), STRPTR proto asm("a0"),
                        struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: port=%lu\n", __func__, (ULONG)port);
+    KprintfT("[bsdsocket] %s: port=%lu\n", __func__, (ULONG)port);
     LONG idx = sb_serv_find(NULL, port, (const char *)proto);
     return idx < 0 ? NULL : (APTR)sb_serv_fill(base, (ULONG)idx);
 }
 
 VOID bsd_setservent(LONG stayOpen asm("d0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s\n", __func__);
+    KprintfT("[bsdsocket] %s\n", __func__);
     (void)stayOpen;
     base->servIdx = 0;
 }
 
 VOID bsd_endservent(struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s\n", __func__);
+    KprintfT("[bsdsocket] %s\n", __func__);
     base->servIdx = 0;
 }
 
 APTR bsd_getservent(struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: idx=%lu\n", __func__, (ULONG)base->servIdx);
+    KprintfT("[bsdsocket] %s: idx=%lu\n", __func__, (ULONG)base->servIdx);
     if (sb_services[base->servIdx].name == NULL)
         return NULL;
     return sb_serv_fill(base, base->servIdx++);
@@ -253,7 +253,7 @@ static const struct
 
 static struct sb_netent *sb_net_fill(struct SocketBase *base, const char *name, ULONG net)
 {
-    KprintfH("[bsdsocket] %s: name=%s net=%lu\n", __func__, (ULONG)name, net);
+    KprintfT("[bsdsocket] %s: name=%s net=%lu\n", __func__, (ULONG)name, net);
     base->net.n_name = (char *)name;
     base->netAliases[0] = NULL;
     base->net.n_aliases = base->netAliases;
@@ -264,7 +264,7 @@ static struct sb_netent *sb_net_fill(struct SocketBase *base, const char *name, 
 
 APTR bsd_getnetbyname(STRPTR name asm("a0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: name=%s\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)");
+    KprintfT("[bsdsocket] %s: name=%s\n", __func__, name != NULL ? (ULONG)name : (ULONG)"(null)");
     if (name == NULL)
         return NULL;
     const struct SbNetConfig *cfg = &SB_ROOT(base)->netCfg;
@@ -284,7 +284,7 @@ APTR bsd_getnetbyname(STRPTR name asm("a0"), struct SocketBase *base asm("a6"))
 APTR bsd_getnetbyaddr(ULONG net asm("d0"), LONG type asm("d1"),
                       struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: net=%lu type=%ld\n", __func__, net, type);
+    KprintfT("[bsdsocket] %s: net=%lu type=%ld\n", __func__, net, type);
     if (type != SB_AF_INET)
         return NULL;
     const struct SbNetConfig *cfg = &SB_ROOT(base)->netCfg;
@@ -303,20 +303,20 @@ APTR bsd_getnetbyaddr(ULONG net asm("d0"), LONG type asm("d1"),
 
 VOID bsd_setnetent(LONG stayOpen asm("d0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s\n", __func__);
+    KprintfT("[bsdsocket] %s\n", __func__);
     (void)stayOpen;
     base->netIdx = 0;
 }
 
 VOID bsd_endnetent(struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s\n", __func__);
+    KprintfT("[bsdsocket] %s\n", __func__);
     base->netIdx = 0;
 }
 
 APTR bsd_getnetent(struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: idx=%lu\n", __func__, (ULONG)base->netIdx);
+    KprintfT("[bsdsocket] %s: idx=%lu\n", __func__, (ULONG)base->netIdx);
     /* config entries first, then the built-ins — same order lookups use */
     const struct SbNetConfig *cfg = &SB_ROOT(base)->netCfg;
     ULONG idx = base->netIdx;

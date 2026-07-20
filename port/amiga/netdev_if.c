@@ -77,7 +77,7 @@ static const struct NetDevStackOps ndif_stack_ops = {
 
 const struct NetDevStackOps *netdevif_stack_ops(void)
 {
-    KprintfH("[netdevif] %s\n", __func__);
+    KprintfT("[netdevif] %s\n", __func__);
     return &ndif_stack_ops;
 }
 

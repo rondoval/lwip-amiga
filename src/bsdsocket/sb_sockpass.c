@@ -17,7 +17,7 @@
 LONG bsd_Dup2Socket(LONG oldSock asm("d0"), LONG newSock asm("d1"),
                     struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: old=%ld new=%ld\n", __func__, oldSock, newSock);
+    KprintfT("[bsdsocket] %s: old=%ld new=%ld\n", __func__, oldSock, newSock);
     struct SbSocket *s = sb_fd_get(base, oldSock);
     if (s == NULL)
     {
@@ -63,7 +63,7 @@ LONG bsd_Dup2Socket(LONG oldSock asm("d0"), LONG newSock asm("d1"),
 
 static struct SbReleased *sb_released_find(struct SocketBase *root, LONG id)
 {
-    KprintfH("[bsdsocket] %s: id=%ld\n", __func__, id);
+    KprintfT("[bsdsocket] %s: id=%ld\n", __func__, id);
     for (struct MinNode *n = root->releasedSockets.mlh_Head; n->mln_Succ != NULL; n = n->mln_Succ)
     {
         struct SbReleased *r = (struct SbReleased *)n;
@@ -75,7 +75,7 @@ static struct SbReleased *sb_released_find(struct SocketBase *root, LONG id)
 
 static LONG sb_release_common(struct SocketBase *base, LONG sock, LONG id, BOOL copy)
 {
-    KprintfH("[bsdsocket] %s: sock=%ld id=%ld\n", __func__, sock, id);
+    KprintfT("[bsdsocket] %s: sock=%ld id=%ld\n", __func__, sock, id);
     struct SocketBase *root = SB_ROOT(base);
     struct SbSocket *s = sb_fd_get(base, sock);
 
@@ -132,21 +132,21 @@ static LONG sb_release_common(struct SocketBase *base, LONG sock, LONG id, BOOL 
 LONG bsd_ReleaseSocket(LONG sock asm("d0"), LONG id asm("d1"),
                        struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: sock=%ld id=%ld\n", __func__, sock, id);
+    KprintfT("[bsdsocket] %s: sock=%ld id=%ld\n", __func__, sock, id);
     return sb_release_common(base, sock, id, FALSE);
 }
 
 LONG bsd_ReleaseCopyOfSocket(LONG sock asm("d0"), LONG id asm("d1"),
                              struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: sock=%ld id=%ld\n", __func__, sock, id);
+    KprintfT("[bsdsocket] %s: sock=%ld id=%ld\n", __func__, sock, id);
     return sb_release_common(base, sock, id, TRUE);
 }
 
 LONG bsd_ObtainSocket(LONG id asm("d0"), LONG domain asm("d1"), LONG type asm("d2"),
                       LONG protocol asm("d3"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: id=%ld type=%ld\n", __func__, id, type);
+    KprintfT("[bsdsocket] %s: id=%ld type=%ld\n", __func__, id, type);
     struct SocketBase *root = SB_ROOT(base);
     (void)domain;
     (void)protocol;

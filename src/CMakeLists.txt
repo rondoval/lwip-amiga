@@ -30,9 +30,9 @@ set(LWIP_WARN -Wall -Wextra)
 
 find_package(Emu68Common CONFIG REQUIRED)
 
-# Backend compile definitions (DEBUG/DEBUG_SERIAL/DEBUG_HIGH) apply only to
+# Sink + tier compile definitions (DEBUG_SINK/DEBUG_SERIAL/PROFILE/DEBUG/TRACE) apply only to
 # targets created after this call — it must precede every target in this dir.
-emu68_debug_backend_definitions()
+emu68_debug_definitions()
 
 # --- netstack: lwIP core + Amiga port layer ---------------------------------
 # The stack proper as a static library: lwIP compiled with the
@@ -122,6 +122,7 @@ target_link_options(bsdsocket_library
         -nostartfiles
         -s
         -Wl,-e,_doNotExecute
+        -Wl,-Map=bsdsocket.library.map
 )
 
 target_link_libraries(bsdsocket_library

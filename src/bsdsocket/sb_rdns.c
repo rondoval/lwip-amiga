@@ -228,7 +228,7 @@ static LONG sb_rdns_parse(const UBYTE *pkt, LONG len, UWORD id, char *out, LONG 
 
 LONG sb_ptr_resolve(struct SocketBase *base, ULONG addr, char *out, ULONG outmax)
 {
-    KprintfH("[bsdsocket] %s: addr=0x%08lx\n", __func__, addr);
+    KprintfT("[bsdsocket] %s: addr=0x%08lx\n", __func__, addr);
     if (out == NULL || outmax == 0)
         return -1;
 

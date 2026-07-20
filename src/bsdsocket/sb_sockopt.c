@@ -18,7 +18,7 @@ LONG bsd_setsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
                     APTR optval asm("a0"), LONG optlen asm("d3"),
                     struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: fd %ld level %ld optname %ld\n", __func__, sock, level, optname);
+    KprintfT("[bsdsocket] %s: fd %ld level %ld optname %ld\n", __func__, sock, level, optname);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -137,7 +137,7 @@ LONG bsd_getsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
                     APTR optval asm("a0"), APTR optlen asm("a1"),
                     struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: fd %ld level %ld optname %ld\n", __func__, sock, level, optname);
+    KprintfT("[bsdsocket] %s: fd %ld level %ld optname %ld\n", __func__, sock, level, optname);
     struct SbSocket *s = sb_fd_get(base, sock);
     if (s == NULL)
         return sb_fail(base, SB_EBADF);
@@ -232,7 +232,7 @@ LONG bsd_getsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
  * every pending connection produces an event, per the autodoc. */
 LONG bsd_GetSocketEvents(ULONG *eventsp asm("a0"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s\n", __func__);
+    KprintfT("[bsdsocket] %s\n", __func__);
     if (eventsp == NULL)
         return -1;
 
@@ -255,14 +255,14 @@ LONG bsd_GetSocketEvents(ULONG *eventsp asm("a0"), struct SocketBase *base asm("
 
 LONG bsd_getdtablesize(struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s\n", __func__);
+    KprintfT("[bsdsocket] %s\n", __func__);
     return (LONG)base->fdCount;
 }
 
 VOID bsd_SetSocketSignals(ULONG intMask asm("d0"), ULONG ioMask asm("d1"),
                           ULONG urgMask asm("d2"), struct SocketBase *base asm("a6"))
 {
-    KprintfH("[bsdsocket] %s: intMask 0x%08lx ioMask 0x%08lx urgMask 0x%08lx\n", __func__, intMask, ioMask, urgMask);
+    KprintfT("[bsdsocket] %s: intMask 0x%08lx ioMask 0x%08lx urgMask 0x%08lx\n", __func__, intMask, ioMask, urgMask);
     base->breakMask = intMask != 0 ? intMask : SIGBREAKF_CTRL_C;
     base->sigIoMask = ioMask;
     base->sigUrgMask = urgMask;
