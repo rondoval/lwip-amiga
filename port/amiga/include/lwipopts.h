@@ -27,16 +27,16 @@
 #define LWIP_TCPIP_CORE_LOCKING         0
 #define LWIP_NETCONN                    0
 #define LWIP_SOCKET                     0
-/* PROFILE_LEAN (EMU68_PROFILE_LEAN=lwip-amiga): the release-truth profiling
- * tier — DEBUG backend + nsprof stay, but the assert-class overhead that
- * inflates DEBUG profiles goes: LWIP_NOASSERT kills every LWIP_ASSERT, and
- * ASSERT_CORE_LOCKED stops costing a FindTask() per lwIP entry point.
- * Functional LWIP_ERROR guards are unaffected. */
-#ifdef PROFILE_LEAN
+/* Asserts are debug-tier. Below it (TIER=profile, or PROFILE=lwip-amiga) the
+ * assert-class overhead that inflates DEBUG profiles goes: LWIP_NOASSERT kills
+ * every LWIP_ASSERT, and ASSERT_CORE_LOCKED stops costing a FindTask() per
+ * lwIP entry point, so the numbers track release. Functional LWIP_ERROR guards
+ * are unaffected. */
+#ifdef DEBUG
+#define LWIP_ASSERT_CORE_LOCKED()       netstack_assert_locked()
+#else
 #define LWIP_NOASSERT
 #define LWIP_ASSERT_CORE_LOCKED()
-#else
-#define LWIP_ASSERT_CORE_LOCKED()       netstack_assert_locked()
 #endif
 
 /* --- protocols, v1 scope --- */
@@ -78,7 +78,7 @@
 #define MEM_CUSTOM_FREE                 netstack_free
 
 #define MEMP_NUM_PBUF                   512  /* PBUF_REF/ROM headers (TX) */
-#if defined(DEBUG) && defined(DEBUG_HIGH)
+#ifdef TRACE
 /* lwIP's own pool policing: the memp pools (tcp_seg, pcbs, ...) are static
  * arrays outside the netstack heap. OVERFLOW_CHECK pads every element
  * (changing pool layout between build tiers); SANITY_CHECK walks the free
@@ -86,7 +86,7 @@
 #define MEMP_OVERFLOW_CHECK             1
 #define MEMP_SANITY_CHECK               1
 /* Walk-and-compare check of the forked lwIP's cached pcb->unsent_tail —
- * O(n) per call, so DEBUG_HIGH only. */
+ * O(n) per call, so TRACE only. */
 #define TCP_UNSENT_TAIL_DBGCHECK        1
 #endif
 #define MEMP_NUM_TCP_PCB                256
@@ -162,16 +162,20 @@ void netstack_platform_diag(const char *msg);
 #define LWIP_RAND()                     ((u32_t)netstack_lwip_rand())
 #define LWIP_PLATFORM_ASSERT(x)         netstack_platform_diag(x)
 
-/* --- lwIP debug output ---
- * lwIP diag format strings use 32-bit %d/%u, which RawDoFmt-based output
- * would misread as 16-bit (fleet gotcha) — so LWIP_PLATFORM_DIAG goes
- * through netstack_diag_printf, which formats with C argument promotion
- * and hands the backend a finished string. Follows the stack-wide DEBUG;
- * toggle modules below as needed. */
+/* --- lwIP diag output ---
+ * lwIP diag format strings use 32-bit %d/%u and %p, which RawDoFmt-based
+ * output would misread as 16-bit / not support at all (fleet gotcha) — so
+ * LWIP_PLATFORM_DIAG goes through netstack_diag_printf, which formats with C
+ * argument promotion and hands the backend a finished string.
+ *
+ * The SYMBOL is defined in every build: lwIP needs LWIP_PLATFORM_DIAG to
+ * resolve, and its default would pull printf into the link. The BODY is
+ * debug-tier (netstack_diag.c), so all diag output is silent below it. */
+#include "netstack_diag.h"
+#define LWIP_PLATFORM_DIAG(x)           netstack_diag_printf x
+
 #ifdef DEBUG
 #define LWIP_DEBUG
-void netstack_diag_printf(const char *fmt, ...);
-#define LWIP_PLATFORM_DIAG(x)           netstack_diag_printf x
 #define DHCP_DEBUG                      LWIP_DBG_ON
 /* UDP/IP debug print PER PACKET — each Kprintf char is a trap, so under
  * load the logging throttles the very traffic being debugged. Flip on only

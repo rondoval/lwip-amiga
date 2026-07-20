@@ -53,8 +53,13 @@ void fz_free(void *p);
 
 /* TCP_OVERSIZE defaults to TCP_MSS (as on the Amiga build; not overridden
  * there either). LWIP_DEBUG turns on TCP_OVERSIZE_DBGCHECK (per-seg shadow),
- * mirroring the Amiga DEBUG builds; keep the fork's tail self-check on too. */
+ * mirroring the Amiga DEBUG builds. Building with -DFUZZ_RELEASE_CFG drops
+ * LWIP_DEBUG to mirror the RELEASE tier instead: no shadow bookkeeping and
+ * no DBGCHECK-only code paths, but LWIP_ASSERT stays active - exactly like
+ * a debug-tier build of the Amiga stack (asserts on). */
+#ifndef FUZZ_RELEASE_CFG
 #define LWIP_DEBUG                      1
+#endif
 #define TCP_UNSENT_TAIL_DBGCHECK        1
 
 #define PBUF_POOL_SIZE                  1024
