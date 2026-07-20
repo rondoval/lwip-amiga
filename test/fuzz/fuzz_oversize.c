@@ -219,8 +219,23 @@ static err_t fuzz_count_tx(struct netif *netif, struct pbuf *p,
 
 /* ---------- invariant checker ---------- */
 
+static void dump_queue(const char *name, struct tcp_seg *s) {
+  unsigned n = 0;
+  fprintf(stderr, "  %s:", name);
+  for (; s != NULL && n < 10; s = s->next, n++) {
+    fprintf(stderr, " [%u+%u%s%s]", (unsigned)(lwip_ntohl(s->tcphdr->seqno) - stream_base),
+            s->len, (TCPH_FLAGS(s->tcphdr) & TCP_FIN) ? " FIN" : "",
+            (TCPH_FLAGS(s->tcphdr) & TCP_SYN) ? " SYN" : "");
+  }
+  fprintf(stderr, s != NULL ? " ...\n" : "\n");
+}
+
 static void die(struct tcp_pcb *pcb, const char *why) {
   fprintf(stderr, "\nINVARIANT-VIOLATION: %s\n", why);
+  if (pcb != NULL) {
+    dump_queue("unsent", pcb->unsent);
+    dump_queue("unacked", pcb->unacked);
+  }
   if (pcb != NULL) {
     fprintf(stderr,
         "  state=%d ovz=%u mss=%u swnd=%u swm=%u cwnd=%u nrtx=%u flags=0x%x "
@@ -447,13 +462,37 @@ static void run_one(unsigned long seed, unsigned max_ops) {
         if (counters.err_calls > 0) break;
         check_invariants(pcb);
       }
-    } else if (what < 97) { /* fast timer */
+    } else if (what < 96) { /* fast timer */
       tcp_fasttmr();
       logf_op("fasttmr");
-    } else if (what < 99) { /* driver TX-complete: release held pbuf refs */
+    } else if (what < 97) { /* driver TX-complete: release held pbuf refs */
       unsigned n = 1 + rnd(4), i;
       logf_op("txdone x%u (held=%u)", n, held_count);
       for (i = 0; i < n; i++) release_one_held();
+    } else if (what < 99) { /* liveness: queued data must eventually transmit */
+      if ((pcb->unsent != NULL || pcb->unacked != NULL) &&
+          alloc_fail_pct == 0 && tx_fail_pct == 0) {
+        u32_t tx0;
+        /* budget must cover a full RTO cycle (rto is exponentially backed
+           off, base << nrtx, so it can reach thousands of ticks) plus the
+           longest persist backoff interval (tcp_persist_backoff tops out
+           at 120 ticks); an undersized budget makes this oracle fire on
+           states that are merely deep in backoff */
+        unsigned t, budget = (unsigned)(pcb->rto > 0 ? pcb->rto : 3) * 2 + 140;
+        release_all_held(); /* driver TX all complete: nothing stays busy */
+        tx0 = txcounters.num_tx_calls;
+        tcp_output(pcb);
+        for (t = 0; t < budget && txcounters.num_tx_calls == tx0; t++) {
+          tcp_slowtmr();
+          if (counters.err_calls > 0) break;
+          check_invariants(pcb);
+        }
+        logf_op("liveness budget=%u ticks=%u tx %u->%u", budget, t,
+                (unsigned)tx0, (unsigned)txcounters.num_tx_calls);
+        if (counters.err_calls == 0 && txcounters.num_tx_calls == tx0) {
+          die(pcb, "sender liveness lost: queued data, timers ran, nothing sent");
+        }
+      }
     } else if (rnd(2)) { /* rare: shutdown TX side (FIN piggyback on tail) */
       if (!(pcb->flags & TF_FIN)) {
         err_t err = tcp_shutdown(pcb, 0, 1);

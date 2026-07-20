@@ -26,8 +26,14 @@ $LWIP/test/unit/tcp/tcp_helper.c
 $HERE/fuzz_oversize.c
 "
 
-gcc -O1 -g -fsanitize=address,undefined -fno-sanitize=alignment -fno-omit-frame-pointer \
+FLAGS="-O1 -g -fsanitize=address,undefined -fno-sanitize=alignment -fno-omit-frame-pointer \
     -Wall -Wextra -Wno-unused-parameter \
-    -I"$HERE" -I"$HERE/shim" -I"$LWIP/src/include" -I"$LWIP/test/unit/tcp" \
-    $SRCS -o "$HERE/fuzz_oversize"
-echo "built: $HERE/fuzz_oversize"
+    -I$HERE -I$HERE/shim -I$LWIP/src/include -I$LWIP/test/unit/tcp"
+
+# debug-tier mirror: LWIP_DEBUG -> asserts + TCP_OVERSIZE_DBGCHECK shadow
+gcc $FLAGS $SRCS -o "$HERE/fuzz_oversize"
+echo "built: $HERE/fuzz_oversize (debug cfg)"
+
+# release-tier mirror: no LWIP_DEBUG (no DBGCHECK code paths), asserts active
+gcc $FLAGS -DFUZZ_RELEASE_CFG $SRCS -o "$HERE/fuzz_oversize_rel"
+echo "built: $HERE/fuzz_oversize_rel (release cfg)"
