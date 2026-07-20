@@ -175,8 +175,6 @@ void netstack_free(void *ptr)
         return;
 
     struct NsMemHeader *h = (struct NsMemHeader *)ptr - 1;
-    netstack.ns_MemInUse -= h->nsm_Size;
-
     ULONG origin = h->nsm_Origin;
     ULONG size = h->nsm_Size;
 
@@ -196,6 +194,7 @@ void netstack_free(void *ptr)
         }
         return;
     }
+    netstack.ns_MemInUse -= size;
 
     if (origin == NSMEM_ORIGIN_DMA)
         netdevif_dma_free(netstack.ns_ActiveNetdev, h, size);
