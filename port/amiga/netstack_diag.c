@@ -1,15 +1,17 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 /*
- * lwIP debug output (DEBUG builds only; the whole unit compiles away
- * otherwise). lwIP's diag format strings pass 32-bit values as plain
+ * lwIP diag output. lwIP's diag format strings pass 32-bit values as plain
  * %d/%u/%x, which RawDoFmt would read as 16-bit — so the formatting
  * happens here with C argument promotion and only the finished string
- * reaches the debug backend.
+ * reaches the backend.
+ *
+ * Debug tier. The entry point stays defined at every tier (lwIP needs
+ * LWIP_PLATFORM_DIAG to exist, and netstack_platform_diag must still halt)
+ * but its body compiles out below it, so a build with no sink is completely
+ * silent. Hot paths never call this.
  */
 
 #include "netstack_sys.h"
-
-#ifdef DEBUG
 
 #include <stdarg.h>
 #include <stddef.h> /* size_t, for the freestanding snprintf below */
@@ -19,6 +21,8 @@
 /* Covers the conversions lwIP uses (c s p d i u x X, with -/0/width/h/l/z);
  * anything else prints literally. */
 #define NS_DIAG_BUF 256
+
+#ifdef DEBUG
 
 static void ns_diag_putc(char *buf, ULONG *pos, ULONG cap, char c)
 {
@@ -146,11 +150,12 @@ void netstack_diag_printf(const char *fmt, ...)
     ns_vformat(buf, sizeof(buf), fmt, ap);
     va_end(ap);
 
-    Kprintf("%s", buf);
+    Kprintf("%s", buf); /* respect the selected debug backend */
 }
 
-/* Freestanding snprintf. lwIP's debug builds format an assert message with
- * snprintf (MEMP_OVERFLOW_CHECK, enabled by DEBUG_HIGH); pulling libnix's
+#ifdef TRACE
+/* Freestanding snprintf. lwIP formats an assert message with snprintf when
+ * MEMP_OVERFLOW_CHECK is on, which is the TRACE tier; pulling libnix's
  * stdio to satisfy it fails the link, because a ROM-able library has no C
  * startup to supply SysBase/exit. This covers only the small format subset
  * lwIP uses — it is not a complete snprintf. */
@@ -163,6 +168,14 @@ int snprintf(char *buf, size_t size, const char *fmt, ...)
     n = ns_vformat(buf, (ULONG)size, fmt, ap);
     va_end(ap);
     return (int)n;
+}
+#endif /* TRACE */
+
+#else /* !DEBUG: keep the entry point, drop the output */
+
+void netstack_diag_printf(const char *fmt, ...)
+{
+    (void)fmt;
 }
 
 #endif /* DEBUG */

@@ -31,6 +31,7 @@
 #define NSMEM_ORIGIN_SLB0 0x534C4230UL /* 'SLB0' — slab class 0 */
 #define NSMEM_ORIGIN_SLB1 0x534C4231UL /* 'SLB1' */
 #define NSMEM_ORIGIN_SLB2 0x534C4232UL /* 'SLB2' */
+#define NSMEM_ORIGIN_FREE 0x46524545UL /* 'FREE' — on a slab freelist */
 
 struct NsMemHeader
 {
