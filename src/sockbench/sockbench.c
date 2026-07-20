@@ -5,13 +5,21 @@
  * Runs against scripts/tcp-bench-peer.py (start it on a PC; port 5001 discards
  * what we send, port 5002 blasts data at us — same ports for TCP and UDP):
  *
- *   sockbench rx|tx|udprx|udptx <host> [streams] [seconds] [sizeKB]
+ *   sockbench rx|tx|txblock|udprx|udptx <host> [streams] [seconds] [sizeKB]
  *
  * rx/tx are TCP; udprx/udptx are UDP. N nonblocking sockets driven from one
  * WaitSelect loop; per-stream and aggregate Mb/s from ReadEClock. Defaults:
  * 1 stream, 10 s; TCP 64 KB buffer, UDP one 1500-MTU frame per datagram.
  * For UDP the size arg sets the datagram size (fragmented above one frame),
  * and the aggregate is best-effort — the peer's own count shows any loss.
+ *
+ * txblock is a diagnostic mode, not a benchmark: one BLOCKING socket driven by
+ * a tight send() loop with no WaitSelect, mirroring AmiSpeedTest's upload test.
+ * It exists because the nonblocking modes cannot reach sb_tcp_send's blocking
+ * path at all — they take the dontwait early-out on every would-block, so they
+ * never loop over a multi-chunk write, never sleep in sb_send_block, and never
+ * hit the mid-write lock break that re-enters lwIP with a half-built unsent
+ * tail.
  *
  * A developer tool, so it just uses the NDK bsdsocket headers (BSD sockets +
  * the library's inline glue) rather than open-coding LVO stubs.
@@ -91,18 +99,21 @@ int main(int argc, char **argv)
 {
     /* argv: [0]=sockbench [1]=rx|tx|udprx|udptx [2]=host [3]=streams [4]=secs [5]=sizeKB */
     const char *dir = (argc > 1) ? argv[1] : "";
-    BOOL rx = FALSE, udp = FALSE, dir_ok = TRUE;
+    BOOL rx = FALSE, udp = FALSE, blocking = FALSE, dir_ok = TRUE;
     if (strcmp(dir, "rx") == 0)         rx = TRUE;
     else if (strcmp(dir, "tx") == 0)    rx = FALSE;
+    else if (strcmp(dir, "txblock") == 0) { rx = FALSE; blocking = TRUE; }
     else if (strcmp(dir, "udprx") == 0) { rx = TRUE;  udp = TRUE; }
     else if (strcmp(dir, "udptx") == 0) { rx = FALSE; udp = TRUE; }
     else                                dir_ok = FALSE;
 
     if (!dir_ok || argc < 3)
     {
-        printf("usage: sockbench rx|tx|udprx|udptx <host> [streams<=%d] [seconds] [sizeKB]\n"
+        printf("usage: sockbench rx|tx|txblock|udprx|udptx <host> [streams<=%d] [seconds] [sizeKB]\n"
                "  rx/tx = TCP; udprx/udptx = UDP. sizeKB is the TCP buffer or the UDP\n"
-               "  datagram size (default: TCP 64 KB, UDP one 1500-MTU frame).\n",
+               "  datagram size (default: TCP 64 KB, UDP one 1500-MTU frame).\n"
+               "  txblock = diagnostic: 1 blocking socket, tight send() loop, 32 KB\n"
+               "  default — reproduces AmiSpeedTest's upload path.\n",
                BENCH_MAX_STREAMS);
         return 5;
     }
@@ -112,6 +123,13 @@ int main(int argc, char **argv)
     if (streams < 1 || streams > BENCH_MAX_STREAMS || seconds < 1)
     {
         printf("sockbench: bad parameters\n");
+        return 5;
+    }
+    /* A blocking send parks the whole task, so one task can only drive one
+     * stream; multiplexing would need the WaitSelect loop we are avoiding. */
+    if (blocking && streams != 1)
+    {
+        printf("sockbench: txblock drives a single stream\n");
         return 5;
     }
     /* bytes per send()/recv(): a TCP working buffer, or one UDP datagram */
@@ -124,7 +142,10 @@ int main(int argc, char **argv)
     }
     else
     {
-        LONG bufKB = (sizeKB > 0) ? sizeKB : 64;
+        /* 32 KB to match AmiSpeedTest's g_appBufLen: big enough that a single
+         * write splits into several 16 KB chunks inside sb_tcp_send, which is
+         * what puts the lock break in the middle of the write. */
+        LONG bufKB = (sizeKB > 0) ? sizeKB : (blocking ? 32 : 64);
         if (bufKB > 512)
         {
             printf("sockbench: bad parameters\n");
@@ -200,8 +221,11 @@ int main(int argc, char **argv)
             printf("sockbench: stream %ld connect failed, errno %ld\n", (long)i, (long)Errno());
             goto bench_close;
         }
-        LONG one = 1;
-        IoctlSocket(sock[i], FIONBIO, &one);
+        if (!blocking)
+        {
+            LONG one = 1;
+            IoctlSocket(sock[i], FIONBIO, &one);
+        }
     }
     if (rx)
     {
@@ -218,7 +242,8 @@ int main(int argc, char **argv)
             send(sock[i], buf, glen, 0);
     }
     printf("bench %s %s: %ld stream(s) to port %u, %ld s, %lu byte %s\n",
-           udp ? "udp" : "tcp", rx ? "rx" : "tx", (long)streams, port, (long)seconds,
+           udp ? "udp" : "tcp", blocking ? "txblock" : rx ? "rx" : "tx",
+           (long)streams, port, (long)seconds,
            (unsigned long)buflen, udp ? "datagrams" : "buffer");
 
     struct EClockVal ev;
@@ -228,7 +253,27 @@ int main(int argc, char **argv)
     unsigned long long now = start;
     LONG active = streams;
 
-    while (active > 0 && (now = bench_now()) < deadline)
+    /* Blocking mode: no readiness loop at all. send() returns only once the
+     * whole buffer is queued, so the task sits inside sb_tcp_send across
+     * several chunks, sleeping in sb_send_block whenever the window closes.
+     * That is precisely the path the nonblocking modes skip. */
+    while (blocking && active > 0 && (now = bench_now()) < deadline)
+    {
+        LONG r = send(sock[0], buf, (LONG)buflen, 0);
+        if (r > 0)
+        {
+            bytes[0] += (unsigned long long)r;
+            continue;
+        }
+        /* Blocking send has no EWOULDBLOCK to forgive: r<=0 is the end. */
+        if (r < 0)
+            printf("sockbench: stream 0 errno %ld\n", (long)Errno());
+        CloseSocket(sock[0]);
+        sock[0] = -1;
+        active--;
+    }
+
+    while (!blocking && active > 0 && (now = bench_now()) < deadline)
     {
         fd_set set;
         FD_ZERO(&set);

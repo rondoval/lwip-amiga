@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """LAN throughput peer for `sockbench` — TCP and UDP (stdlib only).
 
-    python3 tcp-bench-peer.py [bind-address]
+    python3 tcp-bench-peer.py [--sink-rate KBPS] [--sink-stall ON:OFF] [bind-address]
 
 Port 5001: sink   — discards whatever the client sends (sockbench tx / udptx)
 Port 5002: source — blasts data at the client           (sockbench rx / udprx)
@@ -10,6 +10,23 @@ Port 5002: source — blasts data at the client           (sockbench rx / udprx)
 Both ports listen on TCP and UDP simultaneously. The Amiga side measures
 itself; this peer just moves bytes, but prints its own per-flow byte count
 and rate as a cross-check (for UDP that difference is the loss).
+
+By default this peer drains as fast as it can, so the Amiga's send window
+never closes: `sockbench txblock` then loops through tcp_write without ever
+sleeping in sb_send_block, and the blocking send path is only half exercised.
+Two knobs make the sink the bottleneck instead:
+
+    --sink-rate 200        read at ~200 KB/s, keeping the window near zero
+    --sink-stall 2:5       read 5 s, then stop reading entirely for 2 s
+
+Either one drives tcp_sndbuf() to 0, which is what puts the caller into
+sb_send_block -> sb_wait_to (drop ns_Core, sleep, re-acquire) and opens the
+mid-write lock break. --sink-stall additionally forces a true zero window and
+persist probes. Neither produces retransmissions on a clean LAN; for that, add
+loss on this host's interface, e.g.
+
+    sudo tc qdisc add dev eth0 root netem loss 1% delay 20ms
+    sudo tc qdisc del dev eth0 root          # to remove
 
 UDP has no connection, so flows are keyed by peer address and delimited by
 one-byte "guns": the client sends "G<datagram-bytes>" to a source to start it
@@ -30,6 +47,10 @@ UDP_DEFAULT_DGRAM = 1472  # one 1500-MTU frame, if a start gun omits the size
 UDP_IDLE_TIMEOUT = 3.0    # report + drop a silent UDP flow (lost stop gun)
 UDP_MAX_BLAST = 60.0      # safety cap on how long a source blasts one client
 
+SINK_RATE = 0.0           # KB/s the TCP sink will read; 0 = as fast as possible
+SINK_STALL_ON = 0.0       # seconds the TCP sink stops reading entirely
+SINK_STALL_OFF = 0.0      # seconds it reads between stalls
+
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -42,12 +63,30 @@ def report(role, peer, nbytes, secs):
 
 def sink(conn, peer):
     total, start = 0, time.monotonic()
+    # Read in small pieces when throttled: one 256 KB recv would swallow the
+    # whole window in a single call and defeat the rate limit.
+    chunk = CHUNK if SINK_RATE <= 0 else max(1024, int(SINK_RATE * 1024 / 20))
+    next_stall = start + SINK_STALL_OFF if SINK_STALL_ON > 0 else None
     try:
         while True:
-            data = conn.recv(CHUNK)
+            now = time.monotonic()
+            if next_stall is not None and now >= next_stall:
+                # Stop reading entirely: the window closes to zero and the
+                # sender falls back on persist probes.
+                log(f"sink   {peer}: stalling {SINK_STALL_ON:.1f} s")
+                time.sleep(SINK_STALL_ON)
+                next_stall = time.monotonic() + SINK_STALL_OFF
+                continue
+            data = conn.recv(chunk)
             if not data:
                 break
             total += len(data)
+            if SINK_RATE > 0:
+                # Sleep off however long these bytes "should" have taken.
+                target = start + total / (SINK_RATE * 1024)
+                behind = target - time.monotonic()
+                if behind > 0:
+                    time.sleep(behind)
     except OSError:
         pass
     finally:
@@ -167,7 +206,30 @@ def serve(port, handler, bind_addr):
 
 
 def main():
-    bind_addr = sys.argv[1] if len(sys.argv) > 1 else ""
+    global SINK_RATE, SINK_STALL_ON, SINK_STALL_OFF
+
+    args = sys.argv[1:]
+    positional = []
+    while args:
+        arg = args.pop(0)
+        if arg == "--sink-rate" and args:
+            SINK_RATE = float(args.pop(0))
+        elif arg == "--sink-stall" and args:
+            on, _, off = args.pop(0).partition(":")
+            SINK_STALL_ON = float(on)
+            SINK_STALL_OFF = float(off) if off else 5.0
+        elif arg.startswith("--"):
+            print(__doc__)
+            return
+        else:
+            positional.append(arg)
+    bind_addr = positional[0] if positional else ""
+
+    if SINK_RATE > 0:
+        log(f"TCP sink throttled to {SINK_RATE:.0f} KB/s")
+    if SINK_STALL_ON > 0:
+        log(f"TCP sink stalls {SINK_STALL_ON:.1f} s every {SINK_STALL_OFF:.1f} s")
+
     listeners = (
         (serve, (SINK_PORT, sink, bind_addr)),
         (serve, (SOURCE_PORT, source, bind_addr)),
