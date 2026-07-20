@@ -294,8 +294,6 @@ static void SbStackTask(void)
     }
 
     netstack_init(tick->tr_node.io_Device);
-    /* build banner: ties every log to the exact library binary */
-    Kprintf("[bsdsocket] stack task up, build " __DATE__ " " __TIME__ "\n");
     sb_config_load(&ctx->root->netCfg);
     /* seed the resolver search domain from prefs via the LVO that owns the
      * field's truncation contract; apps may override it later the same way */

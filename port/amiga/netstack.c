@@ -193,13 +193,16 @@ unsigned int netstack_lwip_rand(void)
  * impossible, corrupting memory at some later, unrelated point. Freezing
  * the calling task keeps the failed state intact for post-mortem; other
  * tasks then park on ns_Core, which is a deterministic stall instead of
- * corruption. The message is latched for release builds, where Kprintf
- * compiles out. */
-const char *netstack_assert_msg;
-
+ * corruption.
+ *
+ * Reached only at the debug tier and above. Below it lwipopts.h sets
+ * LWIP_NOASSERT, so every LWIP_ASSERT compiles away and nothing calls this at
+ * all. lwIP's LWIP_ERROR guards are a separate mechanism and are unaffected:
+ * they route through LWIP_PLATFORM_DIAG and always run their handler (typically
+ * `return ERR_ARG`), so argument validation still recovers in every build. */
 void netstack_platform_diag(const char *msg)
 {
-    netstack_assert_msg = msg;
+    (void)msg; /* the only reader is Kprintf, which compiles out below debug */
     Kprintf("[lwip] ASSERT: %s — task '%s' halted\n", (ULONG)msg,
             (ULONG)FindTask(NULL)->tc_Node.ln_Name);
     for (;;)
