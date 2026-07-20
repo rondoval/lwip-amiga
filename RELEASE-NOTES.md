@@ -17,16 +17,20 @@ socket API, installed to `LIBS:`.
 
 ### Performance
 
-On a local wired gigabit network (release build, single stream — not the internet, and
+Measured with `sockbench` on a local wired gigabit network (release build, single stream —
 measured against a pre-release build of `genet.device`; the final tagged 4.x release may
 land slightly different numbers):
 
 | Test | Speed | % of line rate |
 |---|---|---|
-| Download (TCP) | **787 Mb/s** | 83% |
-| Upload (TCP) | **424 Mb/s** | 45% |
-| Download (UDP) | **953 Mb/s** | line rate |
-| Upload (UDP, 64 KB chunks) | **600 Mb/s** | 63% |
+| Download (TCP) | **944 Mb/s** | 94% |
+| Upload (TCP) | **558 Mb/s** | 56% |
+| Download (UDP) | **958 Mb/s** | line rate |
+| Upload (UDP, 64 KB chunks) | **817 Mb/s** | 82% |
+
+Over a real internet connection (measured with AmiSpeedTest), the stack reached
+**846 Mb/s down / 71 Mb/s up** — this network's full ISP line rate in both directions, so
+the internet link, not the Amiga, was the limit.
 
 These gains come from a handful of changes under the hood:
 
@@ -111,7 +115,7 @@ what each does.
 - Recovery from several dropped packets in a row is slower than it could be (falls back
   to a full timeout instead of a fast selective resend) — not an issue on a normal wired
   LAN.
-- TCP upload runs at about 45% of line rate; the driver's packet-submission path is the
+- TCP upload runs at about 56% of line rate; the driver's packet-submission path is the
   current bottleneck, not the stack.
 - A handful of advanced/legacy `bsdsocket.library` calls aren't implemented: Roadshow's
   interface-configuration/routing/monitoring calls, `mbuf_*`/`bpf_*`, and (by design) the

@@ -24,8 +24,8 @@ A fast, modern TCP/IP stack for classic AmigaOS 3.2.
 
 ## Why use it
 
-- **Fast.** On a local gigabit network, lwip-amiga has measured up to 787 Mb/s
-  downloading and 424 Mb/s uploading over TCP, and up to 953 Mb/s over UDP — several
+- **Fast.** On a local gigabit network, lwip-amiga has measured up to 944 Mb/s
+  downloading and 558 Mb/s uploading over TCP, and up to 958 Mb/s over UDP — several
   times what older Amiga TCP/IP stacks manage on the same hardware. See
   [Performance](#performance) below for the full numbers and what they mean.
 - **Modern protocol support.** IPv4, TCP, UDP, ICMP, DHCP, DNS (forward and reverse),
@@ -65,6 +65,7 @@ file at all, lwip-amiga runs DHCP on `networks/genet.device` unit 0.
 | `GATEWAY` | — | your router's address (`STATIC`, optional) |
 | `DNS1`, `DNS2` | — | DNS servers to use (`STATIC`; DHCP supplies its own automatically) |
 | `HOSTNAME` | `amiga` | the name your Amiga reports to the network |
+| `NETWORK` | — | adds an entry to the networks database (`getnetbyname`/`getnetbyaddr`); repeatable up to 8 times, `/etc/networks` notation — `name classful-network` (e.g. `homelan 192.168.0`) |
 
 ## Test results
 
@@ -93,17 +94,22 @@ library.)
 
 ## Performance
 
-Measured on a release build, over a local wired gigabit network — not the internet, so
-your real-world speed also depends on your Amiga, your network card, and what's on the
-other end of the connection. These numbers were measured against a pre-release build of
-`genet.device`; the final tagged 4.x release may land slightly different numbers.
+Measured with `sockbench` on a release build, over a local wired gigabit network — not
+the internet, so your real-world speed also depends on your Amiga, your network card, and
+what's on the other end of the connection. These numbers were measured against a
+pre-release build of `genet.device`; the final tagged 4.x release may land slightly
+different numbers.
 
 | Test | Speed | % of line rate |
 |---|---|---|
-| Download (TCP) | 787 Mb/s | 83% |
-| Upload (TCP) | 424 Mb/s | 45% |
-| Download (UDP) | 953 Mb/s | line rate |
-| Upload (UDP, 64 KB chunks) | 600 Mb/s | 63% |
+| Download (TCP) | 944 Mb/s | 94% |
+| Upload (TCP) | 558 Mb/s | 56% |
+| Download (UDP) | 958 Mb/s | line rate |
+| Upload (UDP, 64 KB chunks) | 817 Mb/s | 82% |
+
+Over a real internet connection (measured with AmiSpeedTest), lwip-amiga reached
+846 Mb/s down and 71 Mb/s up — this network's full ISP line rate in both directions. On
+that link the stack saturated the connection; the ISP, not the Amiga, set the ceiling.
 
 That comes from a few optimizations under the hood:
 
@@ -135,9 +141,9 @@ Both are read-only status tools — the stack itself is configured entirely thro
   (for example, over a flaky link or a long-distance internet path), lwip-amiga's TCP
   falls back to a slow, full timeout before resending, rather than a fast selective
   resend. This isn't an issue on a clean connection, such as a normal wired LAN.
-- **Upload has more headroom than download.** TCP upload currently runs at about 45% of
+- **Upload has more headroom than download.** TCP upload currently runs at about 56% of
   line rate; the bottleneck is the driver's packet-submission path rather than the stack
-  itself.
+  itself. This will be optimized in future releases.
 - **A handful of advanced or legacy `bsdsocket.library` calls aren't implemented**:
   Roadshow's interface-configuration, routing, and monitoring calls (the read-only
   interface *query* calls used by `netinfo` above do work), the low-level
@@ -245,8 +251,9 @@ cmake --build build
 ```
 
 The superproject orders `lwip-amiga` before `genet.device` (which depends on the
-exported `Netdev` package) and shares the stack-wide debug backend / `EMU68_DEBUG_HIGH`
-options — `lwip-amiga` is a valid `EMU68_DEBUG_HIGH` component name.
+exported `Netdev` package) and shares the stack-wide debug backend / `EMU68_TIER`
+options — `lwip-amiga` is a valid component name for `EMU68_PROFILE`,
+`EMU68_DEBUG` and `EMU68_TRACE`.
 
 #### `sockbench` (developer tool, built but not shipped)
 

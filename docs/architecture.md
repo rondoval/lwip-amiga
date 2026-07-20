@@ -79,10 +79,16 @@ interface-*config* LVOs are declined (the stack is configured only from
 
 ## Layer 2 — lwIP core + Amiga port layer (`lwip/`, `port/amiga/`)
 
-lwIP 2.2.1 is a git submodule, forked from `STABLE-2_2_1_RELEASE` — all Amiga-specific code lives in the port layer, which lwIP is
-designed to keep separate.
+lwIP 2.2.1 is a git submodule, forked from `STABLE-2_2_1_RELEASE` — all Amiga-specific
+code lives in the port layer, which lwIP is designed to keep separate. The fork carries a
+small set of local patches to lwIP's TCP send path, all BSD-3-Clause and written to be
+upstreamable: one performance change (the unsent-tail cache below) plus a handful of
+correctness fixes to the retransmit/persist path that the throughput campaign surfaced —
+resetting `unsent_oversize` on an RTO requeue, never extending a segment already requeued
+for retransmission, stopping the persist timer when an ACK empties the unsent queue, and
+merging (not concatenating) the queues in `tcp_rexmit_rto_prepare`.
 
-- **The unsent-tail patch** (the fork's one divergence, written to be upstreamable — it
+- **The unsent-tail cache** (the performance patch, written to be upstreamable — it
   resolves lwIP's own `@todo` in `tcp_out.c`): `struct tcp_pcb` gains `unsent_tail`,
   a cached pointer to the last node of `pcb->unsent` (invariant: NULL iff `unsent` is
   NULL, maintained at every queue mutation). Before it, `tcp_write` and
@@ -90,7 +96,7 @@ designed to keep separate.
   `TCP_SND_BUF` = 1 MB that queue holds ~700 segments and `tcp_write` runs ~2200×/s
   during a saturated upload, so the O(n) walks were a measured hot spot. A
   walk-and-compare self-check exists behind
-  `TCP_UNSENT_TAIL_DBGCHECK` (enabled in the DEBUG_HIGH tier only — it re-adds the
+  `TCP_UNSENT_TAIL_DBGCHECK` (enabled in the TRACE tier only — it re-adds the
   walk the cache removes).
 
 - **Runtime model** (`lwipopts.h`): `NO_SYS=1` with external serialization — the

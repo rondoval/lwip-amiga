@@ -7,7 +7,9 @@ so the whole stack is permissively licensed end to end; any driver or stack,
 under any license, may implement the `netdev` ABI.
 
 - **`lwip/` submodule**: BSD-3-Clause, © the lwIP developers (license text in
-  the submodule; lwIP is used unmodified).
+  the submodule). lwIP is used with a small set of local BSD-3-Clause patches to
+  its TCP send path (performance and correctness fixes, intended for upstream);
+  see the submodule's git history.
 
 ## Third-party build dependency: emu68-common
 
