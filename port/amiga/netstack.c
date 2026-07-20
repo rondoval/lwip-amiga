@@ -17,6 +17,8 @@
 #include <debug.h>
 #include <timing.h> /* get_time(): BCM 1 MHz system timer, lock profiling */
 
+#include "netstack_diag.h" /* netstack_diag_printf: %p / 32-bit %u guard dumps */
+
 #include <lwip/init.h>
 #include <lwip/netif.h>
 #include <lwip/sys.h>
@@ -65,7 +67,7 @@ void netstack_init(struct Device *timerBase)
 
 void netstack_lock(void)
 {
-#ifdef DEBUG
+#ifdef PROFILE
     /* lock wait/hold profiling; outermost holds only */
     u32 t0 = get_time();
     ObtainSemaphore(&netstack.ns_Core);
@@ -103,10 +105,35 @@ void netstack_unlock(void)
      * drained one enqueues on another netif. */
     if (netstack.ns_Core.ss_NestCount == 1)
     {
+        ULONG rounds = 0;
         while (netstack_loopback_pending())
-            netif_poll_all();
-    }
+        {
+            if (++rounds > 1000)
+            {
+                /* Unbounded drain in the unlocking task's context: a stuck
+                 * or cyclic loop queue would spin here forever holding
+                 * ns_Core. Confess and leak the queue instead. */
 #ifdef DEBUG
+                struct netif *nif;
+                netstack_diag_printf("[netstack] LOOP-PUMP-GUARD: drain stuck, task '%s'\n",
+                                     FindTask(NULL)->tc_Node.ln_Name);
+                NETIF_FOREACH(nif)
+                {
+                    struct pbuf *q = nif->loop_first;
+                    netstack_diag_printf("  netif %c%c%d loop_first=%p len=%u tot=%u next=%p last=%p\n",
+                                         nif->name[0], nif->name[1], nif->num,
+                                         (void *)q, q != NULL ? q->len : 0,
+                                         q != NULL ? q->tot_len : 0,
+                                         (void *)(q != NULL ? q->next : NULL),
+                                         (void *)nif->loop_last);
+                }
+#endif
+                break;
+            }
+            netif_poll_all();
+        }
+    }
+#ifdef PROFILE
     if (netstack.ns_Core.ss_NestCount == 1)
     {
         u32 dt = get_time() - netstack.ns_LockT0;
@@ -137,7 +164,7 @@ void netstack_tick(void)
         netstack.ns_LockProfTicks = 0;
         if (netstack.ns_LockHolds != 0)
         {
-            Kprintf("[netstack] lock: %lu holds, wait %lu us, hold %lu us, maxhold %lu us\n",
+            KprintfP("[netstack] lock: %lu holds, wait %lu us, hold %lu us, maxhold %lu us\n",
                     (ULONG)netstack.ns_LockHolds, (ULONG)netstack.ns_LockWaitUs,
                     (ULONG)netstack.ns_LockHoldUs, (ULONG)netstack.ns_LockHoldMaxUs);
             netstack.ns_LockHolds = 0;

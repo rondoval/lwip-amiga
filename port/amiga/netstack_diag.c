@@ -256,10 +256,10 @@ void netstack_diag_printf(const char *fmt, ...)
 #ifdef TRACE
 /* Freestanding snprintf. lwIP formats an assert message with snprintf when
  * MEMP_OVERFLOW_CHECK is on, which is the TRACE tier; pulling libnix's
- * stdio to satisfy it fails the link, because a ROM-able library has no C
- * startup to supply SysBase/exit. This covers only the small format subset
- * lwIP uses — it is not a complete snprintf (notably it returns the length
- * written, not the length required). */
+ * stdio to satisfy it fails the link, because a -nostartfiles library
+ * binary carries no C startup to supply SysBase/exit. This covers only the
+ * small format subset lwIP uses — it is not a complete snprintf (notably it
+ * returns the length written, not the length required). */
 int snprintf(char *buf, size_t size, const char *fmt, ...)
 {
     va_list ap;
