@@ -22,6 +22,9 @@ struct NdRxWrap
     APTR nrw_Cookie;
     struct NetdevIf *nrw_If;
     struct NdRxWrap *nrw_Next;
+#ifdef DEBUG
+    ULONG nrw_Live; /* double-free tripwire: 1 while lent to lwIP */
+#endif
 };
 
 /* Byte offset of the IPv4 header inside a (possibly in-band 802.1Q-tagged)

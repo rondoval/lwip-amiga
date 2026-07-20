@@ -34,6 +34,14 @@ static void ndif_rx_pbuf_freed(struct pbuf *p)
     struct NdRxWrap *w = (struct NdRxWrap *)p;
     struct NetdevIf *ndi = w->nrw_If;
 
+    /* Double-free tripwire: releasing the same wrap twice would push its
+     * driver buffer into the recycle ring twice. Debug-tier invariant check,
+     * not a production safety net. */
+#ifdef DEBUG
+    KASSERT(w->nrw_Live == 1, "RX-WRAP-GUARD: double free");
+    w->nrw_Live = 0;
+#endif
+
     ndi->ndi_Ops->ndo_RxRelease(ndi->ndi_Drv, w->nrw_Cookie);
 
     w->nrw_Next = ndi->ndi_FreeWraps;
@@ -173,7 +181,7 @@ static void ndif_gro_flush(struct NetdevIf *ndi, struct NdGroCtx *c)
         while (sum >> 16)
             sum = (sum & 0xFFFF) + (sum >> 16);
         IPH_LEN_SET(c->ngc_Ip, new_len);
-#if defined(DEBUG) && defined(DEBUG_HIGH)
+#ifdef TRACE
         /* cross-check the incremental fixup against a full recompute */
         IPH_CHKSUM_SET(c->ngc_Ip, 0);
         u16_t full = inet_chksum(c->ngc_Ip, IP_HLEN);
@@ -324,6 +332,9 @@ ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULONG count
 
             w->nrw_Cookie = d->nrd_Cookie;
             w->nrw_Pc.custom_free_function = ndif_rx_pbuf_freed;
+#ifdef DEBUG
+            w->nrw_Live = 1;
+#endif
 
             struct pbuf *p = pbuf_alloced_custom(PBUF_RAW, (u16_t)d->nrd_Len,
                                                  PBUF_REF, &w->nrw_Pc,
