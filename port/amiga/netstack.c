@@ -49,6 +49,7 @@ void netstack_init(struct Device *timerBase)
     TimerBase = timerBase;
 
     InitSemaphore(&netstack.ns_Core);
+    lock_prof_init(&netstack.ns_LockProf, "netstack");
 
     struct EClockVal ev;
     ULONG freq = ReadEClock(&ev);
@@ -67,20 +68,7 @@ void netstack_init(struct Device *timerBase)
 
 void netstack_lock(void)
 {
-#ifdef PROFILE
-    /* lock wait/hold profiling; outermost holds only */
-    u32 t0 = get_time();
-    ObtainSemaphore(&netstack.ns_Core);
-    if (netstack.ns_Core.ss_NestCount == 1)
-    {
-        u32 t1 = get_time();
-        netstack.ns_LockWaitUs += t1 - t0;
-        netstack.ns_LockT0 = t1;
-        netstack.ns_LockHolds++;
-    }
-#else
-    ObtainSemaphore(&netstack.ns_Core);
-#endif
+    lock_prof_obtain(&netstack.ns_LockProf, &netstack.ns_Core);
 }
 
 static BOOL netstack_loopback_pending(void)
@@ -133,16 +121,7 @@ void netstack_unlock(void)
             netif_poll_all();
         }
     }
-#ifdef PROFILE
-    if (netstack.ns_Core.ss_NestCount == 1)
-    {
-        u32 dt = get_time() - netstack.ns_LockT0;
-        netstack.ns_LockHoldUs += dt;
-        if (dt > netstack.ns_LockHoldMaxUs)
-            netstack.ns_LockHoldMaxUs = dt;
-    }
-#endif
-    ReleaseSemaphore(&netstack.ns_Core);
+    lock_prof_release(&netstack.ns_LockProf, &netstack.ns_Core);
 }
 
 void netstack_assert_locked(void)
@@ -158,20 +137,12 @@ void netstack_tick(void)
     netstack_lock();
     sys_check_timeouts();
 #ifdef PROFILE
-    /* lock-profile line every ~2 s (20 × 100 ms ticks) when anything held */
+    /* report every ~2 s (20 × 100 ms ticks): the core-lock wait/hold slots
+     * then the per-stage timings, both through perf_report */
     if (++netstack.ns_LockProfTicks >= 20)
     {
         netstack.ns_LockProfTicks = 0;
-        if (netstack.ns_LockHolds != 0)
-        {
-            KprintfP("[netstack] lock: %lu holds, wait %lu us, hold %lu us, maxhold %lu us\n",
-                    (ULONG)netstack.ns_LockHolds, (ULONG)netstack.ns_LockWaitUs,
-                    (ULONG)netstack.ns_LockHoldUs, (ULONG)netstack.ns_LockHoldMaxUs);
-            netstack.ns_LockHolds = 0;
-            netstack.ns_LockWaitUs = 0;
-            netstack.ns_LockHoldUs = 0;
-            netstack.ns_LockHoldMaxUs = 0;
-        }
+        lock_prof_report(&netstack.ns_LockProf);
         perf_report(&ns_perf);
     }
 #endif

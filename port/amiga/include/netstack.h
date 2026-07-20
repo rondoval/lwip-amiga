@@ -16,6 +16,7 @@
 
 #include <exec/semaphores.h>
 #include <exec/types.h>
+#include <perf.h> /* struct lock_prof: core-lock wait/hold profiling */
 
 struct Device;
 struct NetdevIf;
@@ -48,16 +49,11 @@ struct NetStack
     void *ns_SlabArenas[NS_SLAB_CLASSES]; /* NsSlabArena chains */
     ULONG ns_SlabGrows[NS_SLAB_CLASSES];  /* diagnostic */
 
-    /* Core-lock profiling — written under DEBUG only, but the fields are
-     * unconditional so DEBUG and release share one struct layout.
-     * Outermost holds only (ss_NestCount);
-     * timestamps from the BCM 1 MHz system timer. netstack_tick prints
-     * and zeroes the counters every ~2 s. */
-    ULONG ns_LockT0;
-    ULONG ns_LockHolds;
-    ULONG ns_LockWaitUs;
-    ULONG ns_LockHoldUs;
-    ULONG ns_LockHoldMaxUs;
+    /* Core-lock profiling (emu68-common lock_prof): wait/hold timing of
+     * ns_Core, outermost holds only. Written under PROFILE; the field is
+     * unconditional so all tiers share one struct layout. netstack_tick
+     * reports and rezeroes it every ~2 s via lock_prof_report(). */
+    struct lock_prof ns_LockProf;
     ULONG ns_LockProfTicks;
 };
 
