@@ -74,10 +74,16 @@ static BOOL nslab_grow(struct NetdevIf *nd, ULONG cls)
     netstack.ns_SlabArenas[cls] = a;
     netstack.ns_SlabGrows[cls]++;
 
+    /* Link at offset 0 (over nsm_Size), 'FREE' stamp at offset 4 — different
+     * longwords, so the two writes cannot clobber each other. The stamp must
+     * stay in the SAME tier as the SLAB-CORRUPT test in netstack_malloc: an
+     * unconditional test against a debug-only stamp would find no slot ever
+     * marked FREE, fire on every allocation, and abandon an arena each time. */
     UBYTE *s = (UBYTE *)a + NSLAB_ARENA_HDR;
     for (ULONG i = 0; i < nslab_arena_slots[cls]; i++, s += slot)
     {
         *(void **)s = netstack.ns_SlabFree[cls];
+        ((struct NsMemHeader *)s)->nsm_Origin = NSMEM_ORIGIN_FREE;
         netstack.ns_SlabFree[cls] = s;
     }
     Kprintf("[netstack] slab class %lu grew: %lu arena(s)\n",
@@ -124,6 +130,24 @@ void *netstack_malloc(unsigned int size)
         void *slot = netstack.ns_SlabFree[cls];
         if (slot == NULL && nslab_grow(nd, cls))
             slot = netstack.ns_SlabFree[cls];
+        /* A slot on the freelist must still carry the FREE stamp. Anything else
+         * means the link we followed was not a slot at all — the previous
+         * owner wrote to it after freeing. Drop the rest of the list rather
+         * than hand the caller a wild pointer; the arenas stay owned by us and
+         * are reclaimed at detach, so this leaks slots but never corrupts.
+         *
+         * Every tier, not just debug: the alternative is handing lwIP an
+         * unvalidated pointer, and the check is one load plus a compare on the
+         * cache line the link read already pulled in. Kprintf is DEBUG-gated,
+         * so only the message costs anything below the debug tier. */
+        if (slot != NULL && ((struct NsMemHeader *)slot)->nsm_Origin != NSMEM_ORIGIN_FREE)
+        {
+            Kprintf("[netstack] SLAB-CORRUPT: class %lu freelist head 0x%08lx origin 0x%08lx "
+                    "(expected FREE) — dropping freelist\n",
+                    cls, (ULONG)slot, ((struct NsMemHeader *)slot)->nsm_Origin);
+            netstack.ns_SlabFree[cls] = NULL;
+            slot = nslab_grow(nd, cls) ? netstack.ns_SlabFree[cls] : NULL;
+        }
         if (slot != NULL)
         {
             netstack.ns_SlabFree[cls] = *(void **)slot;
@@ -176,28 +200,72 @@ void netstack_free(void *ptr)
 
     struct NsMemHeader *h = (struct NsMemHeader *)ptr - 1;
     ULONG origin = h->nsm_Origin;
-    ULONG size = h->nsm_Size;
+    ULONG size = h->nsm_Size; /* read before the slab arm clobbers it */
 
-    if (origin == NSMEM_ORIGIN_SLB0 || origin == NSMEM_ORIGIN_SLB1 ||
-        origin == NSMEM_ORIGIN_SLB2)
+    /* Total dispatch: every origin word either names a pool this block can go
+     * back to, or the block is not ours and we drop it. Accounting lives inside
+     * each arm so that no drop path ever subtracts a size it has not validated. */
+    switch (origin)
     {
-        if (netstack.ns_ActiveNetdev != NULL)
-        {
-            ULONG cls = origin - NSMEM_ORIGIN_SLB0;
-            *(void **)h = netstack.ns_SlabFree[cls];
-            netstack.ns_SlabFree[cls] = h;
-        }
-        else
+    case NSMEM_ORIGIN_SLB0:
+    case NSMEM_ORIGIN_SLB1:
+    case NSMEM_ORIGIN_SLB2:
+    {
+        ULONG cls = origin - NSMEM_ORIGIN_SLB0;
+        /* the slot size, not nsm_Size — that is about to become the link */
+        size = nslab_slot[cls];
+        netstack.ns_MemInUse -= size;
+
+        if (netstack.ns_ActiveNetdev == NULL)
         {
             /* arena already returned at detach: do NOT touch the block */
             Kprintf("[netstack] slab free after detach — leaked %lu bytes\n", size);
+            return;
         }
+
+        *(void **)h = netstack.ns_SlabFree[cls]; /* offset 0, over nsm_Size */
+        h->nsm_Origin = NSMEM_ORIGIN_FREE;       /* offset 4, every tier */
+#ifdef DEBUG
+        /* Record who freed this block, in the first user longword — harmless
+         * once freed, and it survives until the slot is reallocated. lwIP
+         * reaches us through MEM_CUSTOM_FREE, so the return address is the lwIP
+         * caller itself (pbuf_free, tcp_seg_free …), which is what the
+         * SLAB-DOUBLE-FREE arm below prints. Resolve with
+         * scripts/hunt-resolve-pc.py against the code anchors sb_stack.c prints
+         * at startup — and those anchors are themselves a Kprintf, which is why
+         * this is debug-tier: a PC captured in a release build could never be
+         * resolved. Offset 8 is in bounds for every class (smallest slot 128). */
+        ((ULONG *)h)[2] = (ULONG)__builtin_return_address(0);
+#endif
+        netstack.ns_SlabFree[cls] = h;
         return;
     }
-    netstack.ns_MemInUse -= size;
 
-    if (origin == NSMEM_ORIGIN_DMA)
+    case NSMEM_ORIGIN_DMA:
+        netstack.ns_MemInUse -= size;
         netdevif_dma_free(netstack.ns_ActiveNetdev, h, size);
-    else
+        return;
+
+    case NSMEM_ORIGIN_EXEC:
+        netstack.ns_MemInUse -= size;
         FreeMem(h, size);
+        return;
+
+    case NSMEM_ORIGIN_FREE:
+        /* Already on a freelist. Relinking would put one slot on the list twice
+         * and hand it to two owners.
+         * Dropping leaks the slot until detach, the cheap side of that trade.
+         * `size` is deliberately neither printed nor subtracted: on a freed slot
+         * that longword holds the freelist link, not a length. */
+        Kprintf("[netstack] SLAB-DOUBLE-FREE: block 0x%08lx already on a freelist,"
+                " first freed at PC 0x%08lx — dropped\n",
+                (ULONG)h, ((ULONG *)h)[2]);
+        return;
+
+    default:
+        Kprintf("[netstack] SLAB-BAD-HEADER: block 0x%08lx origin 0x%08lx size %lu"
+                " — dropped\n",
+                (ULONG)h, origin, size);
+        return;
+    }
 }
