@@ -48,6 +48,13 @@ struct tcp_hdr; /* lwip/prot/tcp.h */
 #define NDIF_HH_ENTRIES    4u  /* direct-mapped by dst-IP low bits */
 #define NDIF_HH_HDR_MAX    18u /* Ethernet 14 + one 802.1Q tag */
 
+/* Exact multicast RX filter: how many distinct multicast MACs the stack
+ * tracks and hands the driver in one NETDEV_CMD_SET_RXFILTER. Beyond this the
+ * glue falls back to NDFF_ALLMULTI (see ndif_igmp_mac_filter). Generous vs
+ * real group counts; the driver imposes its own (smaller) exact-slot bound and
+ * falls back to all-multi independently if the list overruns it. */
+#define NDIF_MCAST_MAX     32u
+
 struct NdHhEntry
 {
     ULONG nhh_DstIp;   /* network-order dst IP; 0 = empty */
@@ -121,6 +128,22 @@ struct NetdevIf
     ULONG ndi_RxNoWrap;                 /* backpressure: wrap pool empty */
     ULONG ndi_TxOversize;               /* dropped: segs > caps even coalesced */
     ULONG ndi_RxCsumBad;                /* RAW-fold verification failures */
+
+    /* IGMP -> exact driver RX filter. ndif_igmp_mac_filter (lwIP hook, under
+     * the core lock) keeps the set of joined multicast MACs — 01:00:5e + the
+     * group's low 23 bits, refcounted so the several IPv4 groups that can alias
+     * one MAC share a slot — and raises ndi_RxFilterDirty on any change. The
+     * stack task (sb_rxfilter_sync) snapshots the list and issues
+     * NETDEV_CMD_SET_RXFILTER OFF the lock — that command runs on the driver
+     * unit task, which takes the core lock in its RX path, so issuing it under
+     * the lock would deadlock. Joins past NDIF_MCAST_MAX bump ndi_McastOverflow,
+     * falling back to NDFF_ALLMULTI until they drain. */
+    UBYTE ndi_McastList[NDIF_MCAST_MAX][6]; /* distinct joined multicast MACs */
+    UWORD ndi_McastRefs[NDIF_MCAST_MAX];    /* per-MAC join refcount */
+    UWORD ndi_McastCount;                   /* distinct MACs in the list */
+    UWORD ndi_McastOverflow;                /* joins that didn't fit -> allmulti */
+    UWORD ndi_RxFilterWant;                 /* desired NDFF_* (0 or NDFF_ALLMULTI) */
+    BOOL ndi_RxFilterDirty;                 /* set changed; stack task must push */
 
     struct NdHhEntry ndi_Hh[NDIF_HH_ENTRIES];
     ULONG ndi_HhPrimeDst;               /* dst IP whose header linkoutput should

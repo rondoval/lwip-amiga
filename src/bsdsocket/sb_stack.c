@@ -57,6 +57,10 @@ struct SbStackCtx
     UBYTE statsPhase; /* 0 idle, 1 GET_STATS out, 2 GET_LINK out */
     struct NetDevStats statsBuf;
     struct NetDevLinkState linkBuf;
+
+    /* off-lock snapshot of ndi_McastList for NETDEV_CMD_SET_RXFILTER: filled
+     * under the core lock, then handed to the driver with the lock dropped */
+    UBYTE rxFilterMacs[NDIF_MCAST_MAX][6];
 };
 
 /* one instance; the library is a singleton and so is the stack */
@@ -274,6 +278,34 @@ static void sb_stats_drain(struct SbStackCtx *ctx)
     ctx->statsPhase = 0;
 }
 
+/* Push a pending multicast RX-filter change (raised by the lwIP igmp_mac_filter
+ * hook) to the driver. Off-lock by construction: NETDEV_CMD_SET_RXFILTER is
+ * serviced on the driver unit task, which takes the core lock in its RX path,
+ * so issuing it under the lock would deadlock. Reuses devIO, so it runs only
+ * when the async stats cycle is idle; a set left dirty is retried next tick. */
+static void sb_rxfilter_sync(struct SbStackCtx *ctx)
+{
+    struct NetdevIf *ndi = &ctx->ndi;
+    if (!ctx->started || ctx->statsPhase != 0 || !ndi->ndi_RxFilterDirty)
+        return;
+
+    netstack_lock();
+    UWORD flags = ndi->ndi_RxFilterWant;
+    UWORD count = ndi->ndi_McastCount;
+    for (UWORD i = 0; i < count; i++)
+        for (int b = 0; b < 6; b++)
+            ctx->rxFilterMacs[i][b] = ndi->ndi_McastList[i][b];
+    ndi->ndi_RxFilterDirty = FALSE;
+    netstack_unlock();
+
+    struct NetDevRxFilter filter;
+    filter.ndrx_Flags = flags;
+    filter.ndrx_NumMcast = count;
+    filter.ndrx_McastList = (const UBYTE(*)[6])ctx->rxFilterMacs;
+    Kprintf("[bsdsocket] RX filter -> flags 0x%04lx, %lu mcast\n", (ULONG)flags, (ULONG)count);
+    sb_netdev_cmd(ctx->devIO, NETDEV_CMD_SET_RXFILTER, &filter, sizeof(filter));
+}
+
 static void SbStackTask(void)
 {
     struct SbStackCtx *ctx = &sb_stack;
@@ -346,6 +378,9 @@ static void SbStackTask(void)
             tick->tr_time.tv_secs = 0;
             tick->tr_time.tv_micro = SB_STACK_TICK_US;
             SendIO(&tick->tr_node);
+
+            /* push any pending multicast filter change (devIO must be idle) */
+            sb_rxfilter_sync(ctx);
 
             /* refresh the NIC stats cache once per second (10 * 100 ms);
              * fire-and-forget — the reply lands via devSig above */

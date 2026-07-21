@@ -503,6 +503,8 @@ void sb_sock_free(struct SocketBase *base, struct SbSocket *s)
     if (--s->refs != 0)
         return;
 
+    sb_mcast_drop_all(s); /* leave any IP_ADD_MEMBERSHIP groups this socket held */
+
     switch (s->type)
     {
     case SBT_TCP:

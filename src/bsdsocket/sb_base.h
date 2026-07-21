@@ -150,9 +150,25 @@ struct sb_timeval
 #define SB_SOCK_STREAM 1
 #define SB_SOCK_DGRAM 2
 #define SB_SOCK_RAW 3
+#define SB_IPPROTO_IP 0
 #define SB_IPPROTO_ICMP 1
 #define SB_IPPROTO_TCP 6
 #define SB_IPPROTO_UDP 17
+
+/* IP-level socket options (level SB_IPPROTO_IP), BSD/AmiTCP numbering */
+#define SB_IP_MULTICAST_IF 9
+#define SB_IP_MULTICAST_TTL 10
+#define SB_IP_MULTICAST_LOOP 11
+#define SB_IP_ADD_MEMBERSHIP 12
+#define SB_IP_DROP_MEMBERSHIP 13
+
+/* setsockopt(IP_ADD_MEMBERSHIP/IP_DROP_MEMBERSHIP) argument. Both addresses
+ * are struct in_addr on the wire — one network-order IPv4 word each. */
+struct sb_ip_mreq
+{
+    ULONG imr_multiaddr; /* group to join, network order */
+    ULONG imr_interface; /* local interface address, network order (0 = any) */
+};
 
 #define SB_SOL_SOCKET 0xFFFF
 #define SB_SO_REUSEADDR 0x0004
@@ -601,6 +617,10 @@ LONG sb_fail(struct SocketBase *base, LONG code);
 /* socket core (sb_socket.c) */
 struct SbSocket *sb_sock_alloc(struct SocketBase *base, SbSockType type);
 void sb_sock_free(struct SocketBase *base, struct SbSocket *s); /* under lock */
+
+/* multicast membership (sb_sockopt.c): leave every group @s joined via
+ * IP_ADD_MEMBERSHIP. Called under the core lock from the socket teardown. */
+void sb_mcast_drop_all(struct SbSocket *s);
 LONG sb_fd_alloc(struct SocketBase *base, struct SbSocket *s);
 struct SbSocket *sb_fd_get(struct SocketBase *base, LONG fd);
 

@@ -67,6 +67,97 @@ int netdevif_vlan_check(struct netif *nif, struct eth_hdr *eth,
     return VLAN_ID(vlan) == (UWORD)(tci & 0xFFF);
 }
 
+/* ------------------------------------------------------- IGMP RX filter --- */
+/* lwIP calls igmp_mac_filter under the core lock on the first join / last
+ * leave of every multicast group (the all-systems group included, added at
+ * igmp_start). We keep the exact set of joined multicast MACs here and let the
+ * stack task push it to the driver; see the ndi_Mcast* comment in netdev_if.h. */
+
+/* IPv4 multicast group -> Ethernet MAC: 01:00:5e | low 23 bits of the group. */
+static void ndif_mcast_mac(const ip4_addr_t *group, UBYTE mac[6])
+{
+    ULONG g = lwip_ntohl(ip4_addr_get_u32(group));
+    mac[0] = 0x01;
+    mac[1] = 0x00;
+    mac[2] = 0x5e;
+    mac[3] = (UBYTE)((g >> 16) & 0x7f);
+    mac[4] = (UBYTE)((g >> 8) & 0xff);
+    mac[5] = (UBYTE)(g & 0xff);
+}
+
+static BOOL ndif_mac_eq(const UBYTE *a, const UBYTE *b)
+{
+    for (int i = 0; i < 6; i++)
+        if (a[i] != b[i])
+            return FALSE;
+    return TRUE;
+}
+
+static err_t ndif_igmp_mac_filter(struct netif *nif, const ip4_addr_t *group,
+                                  enum netif_mac_filter_action action)
+{
+    struct NetdevIf *ndi = nif->state;
+    UBYTE mac[6];
+    ndif_mcast_mac(group, mac);
+
+    LONG idx = -1;
+    for (UWORD i = 0; i < ndi->ndi_McastCount; i++)
+    {
+        if (ndif_mac_eq(ndi->ndi_McastList[i], mac))
+        {
+            idx = (LONG)i;
+            break;
+        }
+    }
+
+    UWORD oldWant = ndi->ndi_RxFilterWant;
+    BOOL listChanged = FALSE;
+
+    if (action == NETIF_ADD_MAC_FILTER)
+    {
+        if (idx >= 0)
+        {
+            ndi->ndi_McastRefs[idx]++; /* another group aliases this MAC */
+        }
+        else if (ndi->ndi_McastCount < NDIF_MCAST_MAX)
+        {
+            UWORD n = ndi->ndi_McastCount++;
+            for (int i = 0; i < 6; i++)
+                ndi->ndi_McastList[n][i] = mac[i];
+            ndi->ndi_McastRefs[n] = 1;
+            listChanged = TRUE;
+        }
+        else
+        {
+            ndi->ndi_McastOverflow++; /* no slot: covered by the all-multi fallback */
+        }
+    }
+    else /* NETIF_DEL_MAC_FILTER */
+    {
+        if (idx >= 0)
+        {
+            if (--ndi->ndi_McastRefs[idx] == 0)
+            {
+                UWORD last = --ndi->ndi_McastCount; /* swap-remove */
+                for (int i = 0; i < 6; i++)
+                    ndi->ndi_McastList[idx][i] = ndi->ndi_McastList[last][i];
+                ndi->ndi_McastRefs[idx] = ndi->ndi_McastRefs[last];
+                listChanged = TRUE;
+            }
+        }
+        else if (ndi->ndi_McastOverflow > 0)
+        {
+            ndi->ndi_McastOverflow--;
+        }
+    }
+
+    UWORD want = ndi->ndi_McastOverflow > 0 ? NDFF_ALLMULTI : 0;
+    ndi->ndi_RxFilterWant = want;
+    if (listChanged || want != oldWant)
+        ndi->ndi_RxFilterDirty = TRUE;
+    return ERR_OK;
+}
+
 /* ------------------------------------------------------------ plumbing --- */
 
 static const struct NetDevStackOps ndif_stack_ops = {
@@ -122,6 +213,10 @@ static err_t ndif_netif_init(struct netif *nif)
     for (int i = 0; i < ETH_HWADDR_LEN; i++)
         nif->hwaddr[i] = ndi->ndi_Caps.ndc_Mac[i];
     nif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_IGMP;
+#if LWIP_IGMP
+    /* exact multicast filtering: joins land as driver RX-filter updates */
+    netif_set_igmp_mac_filter(nif, ndif_igmp_mac_filter);
+#endif
 
     /* Checksum policy from the capabilities:
      *  - TX L4 offload -> stop lwIP generating TCP/UDP checksums (the glue
@@ -152,6 +247,10 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
     ndi->ndi_RxNoWrap = 0;
     ndi->ndi_TxOversize = 0;
     ndi->ndi_RxCsumBad = 0;
+    ndi->ndi_McastCount = 0;
+    ndi->ndi_McastOverflow = 0;
+    ndi->ndi_RxFilterWant = 0;
+    ndi->ndi_RxFilterDirty = FALSE;
     ndi->ndi_VlanTci = -1; /* untagged by default; the opener overrides from prefs */
     for (ULONG i = 0; i < NDIF_HH_ENTRIES; i++)
     {

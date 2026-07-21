@@ -9,10 +9,89 @@
 #include <dos/dos.h> /* SIGBREAKF_CTRL_C */
 
 #include <lwip/tcp.h>
+#include <lwip/igmp.h>
+#include <lwip/ip_addr.h>
 
 #include <debug.h>
 
 #include "netstack.h"
+
+/* Multicast-membership registry. lwIP tracks group membership per netif
+ * (refcounted), not per socket, so we remember which (interface, group) pairs
+ * each socket joined via IP_ADD_MEMBERSHIP and leave them when the socket is
+ * torn down — mirroring lwIP's own sockets.c. All access is under the core
+ * lock; a fixed table suits the handful of groups real apps join. */
+#define SB_MCAST_MEMBERSHIPS 32
+static struct SbMcastMember
+{
+    struct SbSocket *s; /* owning socket; NULL = free slot */
+    ULONG group;        /* group address, network order */
+    ULONG ifAddr;       /* local interface address, network order (0 = any) */
+} sb_mcast[SB_MCAST_MEMBERSHIPS];
+
+/* core lock held. Returns 0 or an SB_* errno. Idempotent per (s, group, if). */
+static LONG sb_mcast_join(struct SbSocket *s, ULONG group, ULONG ifAddr)
+{
+    LONG slot = -1;
+    for (LONG i = 0; i < SB_MCAST_MEMBERSHIPS; i++)
+    {
+        if (sb_mcast[i].s == NULL)
+        {
+            if (slot < 0)
+                slot = i;
+        }
+        else if (sb_mcast[i].s == s && sb_mcast[i].group == group &&
+                 sb_mcast[i].ifAddr == ifAddr)
+        {
+            return 0; /* this socket already joined: no double-count */
+        }
+    }
+    if (slot < 0)
+        return SB_ENOBUFS;
+
+    ip4_addr_t g, ifa;
+    ip4_addr_set_u32(&g, group);
+    ip4_addr_set_u32(&ifa, ifAddr);
+    if (igmp_joingroup(&ifa, &g) != ERR_OK)
+        return SB_EADDRNOTAVAIL;
+
+    sb_mcast[slot].s = s;
+    sb_mcast[slot].group = group;
+    sb_mcast[slot].ifAddr = ifAddr;
+    return 0;
+}
+
+static LONG sb_mcast_leave(struct SbSocket *s, ULONG group, ULONG ifAddr)
+{
+    for (LONG i = 0; i < SB_MCAST_MEMBERSHIPS; i++)
+    {
+        if (sb_mcast[i].s == s && sb_mcast[i].group == group &&
+            sb_mcast[i].ifAddr == ifAddr)
+        {
+            ip4_addr_t g, ifa;
+            ip4_addr_set_u32(&g, group);
+            ip4_addr_set_u32(&ifa, ifAddr);
+            igmp_leavegroup(&ifa, &g);
+            sb_mcast[i].s = NULL;
+            return 0;
+        }
+    }
+    return SB_EADDRNOTAVAIL; /* not a member on this socket */
+}
+
+void sb_mcast_drop_all(struct SbSocket *s)
+{
+    for (LONG i = 0; i < SB_MCAST_MEMBERSHIPS; i++)
+    {
+        if (sb_mcast[i].s != s)
+            continue;
+        ip4_addr_t g, ifa;
+        ip4_addr_set_u32(&g, sb_mcast[i].group);
+        ip4_addr_set_u32(&ifa, sb_mcast[i].ifAddr);
+        igmp_leavegroup(&ifa, &g);
+        sb_mcast[i].s = NULL;
+    }
+}
 
 LONG bsd_setsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm("d2"),
                     APTR optval asm("a0"), LONG optlen asm("d3"),
@@ -120,6 +199,38 @@ LONG bsd_setsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
         else
         {
             e = SB_ENOPROTOOPT;
+        }
+    }
+    else if (level == SB_IPPROTO_IP)
+    {
+        switch (optname)
+        {
+        case SB_IP_ADD_MEMBERSHIP:
+        case SB_IP_DROP_MEMBERSHIP:
+        {
+            const struct sb_ip_mreq *mreq = optval;
+            if (mreq == NULL || optlen < (LONG)sizeof(*mreq))
+            {
+                e = SB_EINVAL;
+                break;
+            }
+            if (optname == SB_IP_ADD_MEMBERSHIP)
+                e = sb_mcast_join(s, mreq->imr_multiaddr, mreq->imr_interface);
+            else
+                e = sb_mcast_leave(s, mreq->imr_multiaddr, mreq->imr_interface);
+            break;
+        }
+        case SB_IP_MULTICAST_TTL:
+        case SB_IP_MULTICAST_LOOP:
+        case SB_IP_MULTICAST_IF:
+            /* TX-side multicast options: accepted so multicast senders don't
+             * fail on them. lwIP's LWIP_MULTICAST_TX_OPTIONS is off and there
+             * is a single netif, so the defaults already match — nothing to
+             * program. */
+            break;
+        default:
+            e = SB_ENOPROTOOPT;
+            break;
         }
     }
     else
