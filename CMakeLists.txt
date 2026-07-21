@@ -1,10 +1,11 @@
-# SPDX-License-Identifier: GPL-2.0-or-later
-cmake_minimum_required(VERSION 3.16)
-project(lwip-amiga C)
+# SPDX-License-Identifier: BSD-3-Clause
+cmake_minimum_required(VERSION 3.14)
+# The component (release) version — the single knob the versioning workflow tags
+# and the stack harvests. The bsdsocket.library ABI version is separate: it keeps
+# major 4 (the AmiTCP/Roadshow contract) with its revision derived from this
+# version in src/CMakeLists.txt.
+project(lwip-amiga VERSION 1.0 LANGUAGES C)
 
-# Standalone builds target the Linux host harness only. Amiga (m68k) binaries are
-# built through the emu68-driver-stack superproject, which provides the toolchain
-# and emu68-common; that wiring arrives with the bsdsocket.library skeleton.
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "AmigaOS")
-    add_subdirectory(harness)
-endif()
+# Amiga (m68k) binaries are built through the emu68-driver-stack superproject,
+# which provides the toolchain and emu68-common.
+add_subdirectory(src)

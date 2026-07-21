@@ -1,0 +1,34 @@
+; netstack.prefs — bsdsocket.library TCP/IP stack configuration
+;
+; The stack reads ENV:netstack.prefs once at startup (the first OpenLibrary
+; of bsdsocket.library). Keep the master copy in ENVARC: so it survives
+; reboots. Every key is optional; the defaults below apply when a key (or
+; this whole file) is absent: DHCP on networks/genet.device unit 0.
+;
+; DEVICE = networks/genet.device    ; loaded from DEVS: by convention
+; UNIT = 0
+; MODE = DHCP                       ; DHCP or STATIC
+; HOSTNAME = amiga                  ; DHCP option 12 / gethostname()
+; DOMAIN = example.com              ; resolver search domain: dot-less names
+;                                   ; are retried as "name.DOMAIN" on a miss
+; VLAN = 100,3                      ; in-band 802.1Q: vid[,pcp] (vid 1..4094,
+;                                   ; pcp 0..7); absent = untagged
+;
+; Static configuration (MODE = STATIC needs ADDRESS and NETMASK;
+; GATEWAY/DNS are optional):
+; MODE = STATIC
+; ADDRESS = 192.168.1.50
+; NETMASK = 255.255.255.0
+; GATEWAY = 192.168.1.1
+; DNS1 = 192.168.1.1
+; DNS2 = 9.9.9.9
+;
+; Networks database (getnetbyname/getnetbyaddr): built-in entries are
+; "default 0" and "loopback 127"; NETWORK adds more (repeatable, up to 8,
+; /etc/networks notation — the number is a classful NETWORK number like
+; "192.168.0", not an IP address). Config entries shadow the built-ins.
+; NETWORK = homelan 192.168.0
+; NETWORK = officelan 10
+;
+; Future: additional interfaces will use IFn_-prefixed keys (IF1_DEVICE,
+; IF1_MODE, ...). Unprefixed keys are interface 0. Unknown keys are ignored.

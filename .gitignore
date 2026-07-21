@@ -3,3 +3,9 @@ build*/
 *.uaem
 compile_commands.json
 .cache/
+
+# Private working notes, not published with the component.
+docs/TODO.md
+
+# Host fuzz harness build output
+test/fuzz/fuzz_oversize
