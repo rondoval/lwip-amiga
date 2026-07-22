@@ -26,7 +26,7 @@
 #include <lwip/netif.h>
 #include <lwip/pbuf.h>
 
-#include <netdev.h>
+#include <devices/netdev.h>
 
 struct NdRxWrap;
 struct ip_hdr;  /* lwip/prot/ip4.h */

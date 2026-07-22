@@ -253,7 +253,8 @@ LONG bsd_QueryInterfaceTagList(STRPTR name asm("a0"), struct TagItem *tags asm("
             *(LONG *)d = (LONG)root->netStats.nds_RxDropped.ndu_Lo;
             break;
         case IFQ_OutputDrops:
-            *(LONG *)d = (LONG)(root->netStats.nds_TxDropped.ndu_Lo + root->netStats.nds_TxBad);
+            /* nds_TxDropped already totals every accepted-but-unsent frame */
+            *(LONG *)d = (LONG)root->netStats.nds_TxDropped.ndu_Lo;
             break;
         case IFQ_InputErrors:
             *(LONG *)d = (LONG)root->netStats.nds_RxErrors.ndu_Lo;

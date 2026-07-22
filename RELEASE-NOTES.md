@@ -1,3 +1,69 @@
+# Release notes — lwip-amiga 1.1
+
+Changes since v1.0.
+
+---
+
+## Breaking changes
+
+### `netdev.h` moves to `include/devices/netdev.h`
+
+The netdev ABI header now installs and ships at `include/devices/netdev.h` — it's a
+device ABI, so it takes the same SDK path shape as `devices/timer.h` and the like.
+Driver and stack sources need `#include <devices/netdev.h>` instead of
+`#include <netdev.h>`; the cmake `Netdev` package exports the new location.
+
+### `NetDevStats` sheds the driver-internal loss-point fields
+
+`nds_RxPoolDry`, `nds_RxBackpressure`, `nds_TxRejected`, `nds_TxBad`, `nds_IrqRx` and
+`nds_RxPoolFree` are gone from the fixed `NetDevStats` struct (128 → 104 bytes,
+reserved padded back out to 8 `ULONG`s). They move to the new open-ended
+`NETDEV_CMD_GET_COUNTERS`, below, alongside whatever else a given driver keeps —
+`NetDevStats` stays the small, portable summary every netdev driver answers
+identically. Code reading those fields (or assuming the old `sizeof`) needs to move to
+`GET_COUNTERS`.
+
+---
+
+## New features
+
+### Reachable by name: mDNS and DNS-SD
+
+The stack answers for `<HOSTNAME>.local`, so any Mac, PC, or phone on the network can
+reach the Amiga by name with no DNS server and no static address — `ping amiga.local`
+just works. Services are advertised too (DNS-SD/Bonjour): list them in `netstack.prefs`
+as `MDNS_SERVICE = _ftp._tcp 21`, or register them as they start with
+`mdns ADD _ftp._tcp PORT 21`, which is usually what you want since Amiga daemons
+launch after the stack. Set `MDNS = no` to turn it all off.
+
+### Driver counters: `NETDEV_CMD_GET_COUNTERS`
+
+A new, optional netdev command returns a self-describing list of whatever diagnostic
+counters a driver keeps — each entry carries its own name, so a renderer needs no
+per-driver knowledge. `netdev-stats COUNTERS` uses it: for `genet.device` that's the
+complete UniMAC hardware MIB, the same set Linux exposes through `ethtool -S`, standing
+alongside the driver's own counters and ring gauges. A driver without it answers `IOERR_NOCMD`.
+
+---
+
+## Bug fixes / Improvements
+
+### `IFQ_OutputDrops` no longer double-counts
+
+`bsd_QueryInterfaceTagList` added `nds_TxDropped` and the now-removed `nds_TxBad`
+together; `nds_TxDropped` already totaled every accepted-but-unsent frame, so the two
+overlapped. `IFQ_OutputDrops` now reports `nds_TxDropped` alone.
+
+---
+
+## Tools
+
+`mdns` ships as a new tool: multicast DNS client and DNS-SD service control (see the
+[README](README.md)). `netdev-stats` gains the `COUNTERS` view above; both tools take
+ReadArgs-style command lines (`?` prints the template).
+
+---
+
 # Release notes — lwip-amiga 1.0
 
 First public release. A fast, modern TCP/IP stack for classic AmigaOS 3.2, released

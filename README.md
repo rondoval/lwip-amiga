@@ -65,6 +65,8 @@ file at all, lwip-amiga runs DHCP on `networks/genet.device` unit 0.
 | `GATEWAY` | — | your router's address (`STATIC`, optional) |
 | `DNS1`, `DNS2` | — | DNS servers to use (`STATIC`; DHCP supplies its own automatically) |
 | `HOSTNAME` | `amiga` | the name your Amiga reports to the network |
+| `MDNS` | `yes` | answer for `HOSTNAME.local` on the local network (Bonjour/Avahi), so other machines can reach the Amiga by name with no DNS server |
+| `MDNS_SERVICE` | — | advertise a service over DNS-SD: `_type._proto port [instance name]` (e.g. `_ftp._tcp 21`); repeatable up to 4 times, and services can also be registered while running with the `mdns` command |
 | `NETWORK` | — | adds an entry to the networks database (`getnetbyname`/`getnetbyaddr`); repeatable up to 8 times, `/etc/networks` notation — `name classful-network` (e.g. `homelan 192.168.0`) |
 
 ## Test results
@@ -130,10 +132,18 @@ See [RELEASE-NOTES.md](RELEASE-NOTES.md) for more on what's behind these numbers
 - **`netinfo`** — shows your current network status at a glance: address, netmask,
   broadcast, MTU, MAC address, link state, DHCP/static, and DNS servers.
 - **`netdev-stats`** — shows live driver statistics (packet/error counters, link state)
-  and lets you tune interrupt coalescing, without restarting the stack.
+  and lets you tune interrupt coalescing, without restarting the stack. `netdev-stats
+  COUNTERS` switches to the driver's own counter list — for `genet.device` that is the
+  complete UniMAC hardware MIB, the same set Linux exposes through `ethtool -S`.
 
-Both are read-only status tools — the stack itself is configured entirely through
-`netstack.prefs`, above.
+- **`mdns`** — multicast DNS. `mdns pi.local` resolves a name on the local network with
+  no DNS server involved, `mdns LISTEN` watches what the network announces, and `mdns
+  STATUS` shows what this Amiga advertises. Services can be advertised as they start —
+  `mdns ADD _ftp._tcp PORT 21` — and withdrawn again with `mdns DEL <slot>`; anything
+  listed under `MDNS_SERVICE` in `netstack.prefs` is advertised from boot.
+
+`netinfo` and `netdev-stats` are read-only status tools; apart from `mdns`'s service
+list, the stack is configured entirely through `netstack.prefs`, above.
 
 ## Known limitations
 

@@ -33,9 +33,10 @@
 #include <lwip/dns.h>
 #include <lwip/netif.h>
 
-#include <netdev.h>
+#include <devices/netdev.h>
 #include "netdev_if.h"
 #include "netstack.h"
+#include "sb_mdns.h"
 
 #define SB_STACK_TICK_US 100000
 
@@ -182,11 +183,17 @@ static void sb_netdev_up(struct SbStackCtx *ctx)
     else
         Kprintf("[bsdsocket] interface up, static %s\n",
                 ip4addr_ntoa(&cfg->cfg_Addr));
+
+    /* mDNS last: the responder probes as soon as it is added, and it wants an
+     * interface that is already up (an address is not required — it re-probes
+     * itself when DHCP supplies one). */
+    sb_mdns_start(&ctx->ndi.ndi_Netif, cfg);
 }
 
 static void sb_netdev_down(struct SbStackCtx *ctx)
 {
     Kprintf("[bsdsocket] %s: started %ld, attached %ld\n", __func__, (LONG)ctx->started, (LONG)ctx->attached);
+    sb_mdns_stop(); /* unpublish before the netif goes away */
     if (ctx->started)
     {
         netstack_lock();
@@ -362,12 +369,17 @@ static void SbStackTask(void)
 
     ULONG statTick = 0;
     ULONG devSig = ctx->devOpen ? (1UL << ctx->devPort->mp_SigBit) : 0;
+    ULONG mdnsSig = sb_mdns_sigmask(); /* fixed: the port outlives the loop */
     for (;;)
     {
-        ULONG sigs = Wait((1UL << timerPort->mp_SigBit) | devSig | SIGBREAKF_CTRL_C);
+        ULONG sigs =
+            Wait((1UL << timerPort->mp_SigBit) | devSig | mdnsSig | SIGBREAKF_CTRL_C);
 
         if (sigs & devSig)
             sb_stats_reply(ctx); /* harvest GET_STATS/GET_LINK, publish cache */
+
+        if (sigs & mdnsSig)
+            sb_mdns_service(); /* `mdns` add/del/list of advertised services */
 
         if (sigs & (1UL << timerPort->mp_SigBit))
         {

@@ -29,6 +29,28 @@ static void sb_cfg_copy(char *dst, ULONG max, const char *src)
     dst[i] = '\0';
 }
 
+/* Cut the leading blank-delimited word off *rest, in place: the word is
+ * NUL-terminated and *rest is left on the first character after it, blanks
+ * skipped. Whatever remains is the caller's — a value whose last field is
+ * free text (an mDNS instance name) just stops calling this. Both the word
+ * and the remainder are "" once the value is exhausted, never NULL. */
+static char *sb_cfg_word(char **rest)
+{
+    char *word = *rest;
+    char *p = word;
+
+    while (*p != '\0' && *p != ' ' && *p != '\t')
+        p++;
+    if (*p != '\0')
+    {
+        *p++ = '\0';
+        while (*p == ' ' || *p == '\t')
+            p++;
+    }
+    *rest = p;
+    return word;
+}
+
 /* /etc/networks notation: 1..4 dot-separated octets, most significant first —
  * "127" = 127, "192.168.6" = 0xC0A806. NOT an IP address (inet_addr pads the
  * missing octets differently). */
@@ -62,6 +84,22 @@ static BOOL sb_cfg_parse_netnum(const char *s, ULONG *out)
     return TRUE;
 }
 
+/* yes/no key: everything else leaves the default alone (and says so) */
+static BOOL sb_cfg_parse_bool(const char *s, BOOL *out)
+{
+    if (_Stricmp((CONST_STRPTR)s, (CONST_STRPTR) "yes") == 0 ||
+        _Stricmp((CONST_STRPTR)s, (CONST_STRPTR) "on") == 0 ||
+        _Stricmp((CONST_STRPTR)s, (CONST_STRPTR) "1") == 0)
+        *out = TRUE;
+    else if (_Stricmp((CONST_STRPTR)s, (CONST_STRPTR) "no") == 0 ||
+             _Stricmp((CONST_STRPTR)s, (CONST_STRPTR) "off") == 0 ||
+             _Stricmp((CONST_STRPTR)s, (CONST_STRPTR) "0") == 0)
+        *out = FALSE;
+    else
+        return FALSE;
+    return TRUE;
+}
+
 static void sb_cfg_defaults(struct SbNetConfig *cfg)
 {
     for (ULONG i = 0; i < sizeof(*cfg); i++)
@@ -70,6 +108,7 @@ static void sb_cfg_defaults(struct SbNetConfig *cfg)
     sb_cfg_copy(cfg->cfg_Hostname, sizeof(cfg->cfg_Hostname), "amiga");
     cfg->cfg_Dhcp = TRUE;
     cfg->cfg_VlanTci = -1;   /* no VLAN (0 would be priority-tagged VID 0) */
+    cfg->cfg_Mdns = TRUE;    /* HOSTNAME.local costs one multicast group */
 }
 
 void sb_config_load(struct SbNetConfig *cfg)
@@ -207,29 +246,54 @@ void sb_config_load(struct SbNetConfig *cfg)
             else
                 Kprintf("[bsdsocket] netstack.prefs: bad VLAN '%s'\n", val);
         }
+        else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "MDNS") == 0)
+        {
+            if (!sb_cfg_parse_bool(val, &cfg->cfg_Mdns))
+                Kprintf("[bsdsocket] netstack.prefs: bad MDNS '%s'\n", val);
+        }
+        else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "MDNS_SERVICE") == 0)
+        {
+            /* MDNS_SERVICE = <_type._proto> <port> [instance name]  (repeatable).
+             * The name is the rest of the line, spaces included ("Amiga 1200");
+             * the type is validated where it is registered (sb_mdns.c). */
+            char *rest = val;
+            char *type = sb_cfg_word(&rest);
+            char *portStr = sb_cfg_word(&rest);
+            char *name = rest;
+
+            LONG port;
+            if (*type == '\0' || !StrToLong((STRPTR)portStr, &port) || port <= 0 ||
+                port > 65535)
+                Kprintf("[bsdsocket] netstack.prefs: bad MDNS_SERVICE '%s'\n", type);
+            else if (cfg->cfg_NumMdnsServices >= SB_CFG_MDNS_MAX)
+                Kprintf("[bsdsocket] netstack.prefs: MDNS_SERVICE table full (max %ld)\n",
+                        (LONG)SB_CFG_MDNS_MAX);
+            else
+            {
+                struct SbCfgMdnsService *s =
+                    &cfg->cfg_MdnsServices[cfg->cfg_NumMdnsServices++];
+                sb_cfg_copy(s->type, sizeof(s->type), type);
+                sb_cfg_copy(s->name, sizeof(s->name), name);
+                s->port = (UWORD)port;
+            }
+        }
         else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "NETWORK") == 0)
         {
             /* NETWORK = <name> <number>  (repeatable): extra networks-database
              * entries for getnetbyname/getnetbyaddr, shadowing the built-ins */
             char *num = val;
-            while (*num && *num != ' ' && *num != '\t')
-                num++;
-            if (*num != '\0')
-            {
-                *num++ = '\0';
-                while (*num == ' ' || *num == '\t')
-                    num++;
-            }
+            char *name = sb_cfg_word(&num);
+
             ULONG netnum;
-            if (*val == '\0' || !sb_cfg_parse_netnum(num, &netnum))
-                Kprintf("[bsdsocket] netstack.prefs: bad NETWORK '%s'\n", val);
+            if (*name == '\0' || !sb_cfg_parse_netnum(num, &netnum))
+                Kprintf("[bsdsocket] netstack.prefs: bad NETWORK '%s'\n", name);
             else if (cfg->cfg_NumNetworks >= SB_CFG_NETWORKS_MAX)
                 Kprintf("[bsdsocket] netstack.prefs: NETWORK table full (max %ld)\n",
                         (LONG)SB_CFG_NETWORKS_MAX);
             else
             {
                 struct SbCfgNetwork *n = &cfg->cfg_Networks[cfg->cfg_NumNetworks++];
-                sb_cfg_copy(n->name, sizeof(n->name), val);
+                sb_cfg_copy(n->name, sizeof(n->name), name);
                 n->net = netnum;
             }
         }

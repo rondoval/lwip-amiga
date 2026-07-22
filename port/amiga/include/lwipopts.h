@@ -45,7 +45,7 @@
 #define LWIP_RAW                        1   /* SOCK_RAW (ping) via bsdsocket */
 #define LWIP_UDP                        1
 #define LWIP_TCP                        1
-#define LWIP_IGMP                       1   /* multicast (mDNS later) */
+#define LWIP_IGMP                       1   /* multicast; required by the mDNS responder */
 #define LWIP_DHCP                       1
 #define LWIP_DNS                        1
 #define LWIP_IPV6                       0   /* design stays v6-ready; off in v1 */
@@ -56,6 +56,18 @@
 #define LWIP_NETIF_STATUS_CALLBACK      1
 #define LWIP_NETIF_LINK_CALLBACK        1
 #define LWIP_SUPPORT_CUSTOM_PBUF        1   /* RX buffers are driver-owned */
+
+/* --- mDNS / DNS-SD responder: <hostname>.local plus the services listed in
+ * netstack.prefs (MDNS_SERVICE) or registered at runtime through the stack
+ * task's control port (sb_mdns.c). The responder needs a netif client-data
+ * slot, and with the ext-status callback it re-probes and re-announces itself
+ * across link and DHCP address changes with no glue on our side.
+ * SO_REUSE_RXTOALL delivers multicast to every matching pcb, so the `mdns`
+ * tool can listen on 5353 beside the responder. */
+#define LWIP_MDNS_RESPONDER             1
+#define LWIP_NUM_NETIF_CLIENT_DATA      1
+#define LWIP_NETIF_EXT_STATUS_CALLBACK  1
+#define MDNS_MAX_SERVICES               4
 
 /* --- in-band 802.1Q VLAN ---
  * Software VLAN: the tag rides inside the frame; the driver moves opaque
@@ -139,6 +151,7 @@
 #define TCP_LISTEN_BACKLOG              1
 #define LWIP_TCP_KEEPALIVE              1
 #define SO_REUSE                        1
+#define SO_REUSE_RXTOALL                1   /* multicast/broadcast to every bound pcb */
 
 /* --- checksums: everything on at compile time, disabled per netif when
  * the driver's capabilities cover it (netdev_if.c) --- */

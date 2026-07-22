@@ -253,13 +253,13 @@ void netstack_diag_printf(const char *fmt, ...)
     Kprintf("%s", buf); /* respect the selected debug backend */
 }
 
-#ifdef TRACE
-/* Freestanding snprintf. lwIP formats an assert message with snprintf when
- * MEMP_OVERFLOW_CHECK is on, which is the TRACE tier; pulling libnix's
- * stdio to satisfy it fails the link, because a -nostartfiles library
- * binary carries no C startup to supply SysBase/exit. This covers only the
- * small format subset lwIP uses — it is not a complete snprintf (notably it
- * returns the length written, not the length required). */
+/* Freestanding snprintf. Two lwIP call sites need one at the debug tier: the
+ * mDNS answer dump (mdns.c, compiled whenever LWIP_DEBUG is defined) and the
+ * MEMP_OVERFLOW_CHECK assert text at TRACE. Pulling libnix's stdio to satisfy
+ * them fails the link, because a -nostartfiles library binary carries no C
+ * startup to supply SysBase/exit — and stdio drags malloc in behind it. This
+ * covers only the small format subset lwIP uses — it is not a complete
+ * snprintf (notably it returns the length written, not the length required). */
 int snprintf(char *buf, size_t size, const char *fmt, ...)
 {
     va_list ap;
@@ -270,7 +270,6 @@ int snprintf(char *buf, size_t size, const char *fmt, ...)
     va_end(ap);
     return (int)n;
 }
-#endif /* TRACE */
 
 #else /* !DEBUG: keep the entry point, drop the output */
 

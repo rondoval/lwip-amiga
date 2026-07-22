@@ -150,8 +150,14 @@ drivers carry no writable globals, so every exported call takes an explicit cont
 first argument.
 
 - **Control ops are synchronous `IOStdReq` commands** (`NETDEV_CMD_*`, base `0x8900`):
-  ATTACH, START, STOP, DETACH, GET_LINK, GET_STATS, SET_COALESCE, SET_MAC, and the
-  declarative RX filter. They are serialized by the driver's unit task. The base sits in
+  ATTACH, START, STOP, DETACH, GET_LINK, GET_STATS, GET_COUNTERS, SET_COALESCE, SET_MAC,
+  and the declarative RX filter. They are serialized by the driver's unit task.
+  GET_STATS and GET_COUNTERS split the two kinds of statistic and are independent of one
+  another: `NetDevStats` is the fixed portable summary (what every NIC has, and what the
+  stack cannot work out for itself), while GET_COUNTERS returns a self-describing list of
+  whatever that particular driver keeps — the same division Linux draws between
+  `rtnl_link_stats64` and `ethtool -S`. A driver reports a figure in both when both
+  apply, so either command answers in full on its own. The base sits in
   the NSD third-party command area (the NSD standard reserves `0x4000-0x7FFF` and
   `0xC000-0xFFFF` for the OS); fleet allocations: nvme passthrough `0x8020..0x8024`,
   xhci context ops `0x8800..0x881f`, netdev `0x8900..0x891f`.

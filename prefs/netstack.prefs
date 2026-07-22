@@ -23,6 +23,15 @@
 ; DNS1 = 192.168.1.1
 ; DNS2 = 9.9.9.9
 ;
+; mDNS / DNS-SD: the stack answers for HOSTNAME.local (Bonjour/Avahi), so the
+; Amiga is reachable by name with no DNS server. MDNS_SERVICE advertises a
+; service too (repeatable, up to 4): type, port, and an optional instance name
+; that defaults to the host name. Services can also be registered while the
+; stack runs — see the `mdns` command.
+; MDNS = yes
+; MDNS_SERVICE = _ftp._tcp 21
+; MDNS_SERVICE = _telnet._tcp 23 Amiga 1200
+;
 ; Networks database (getnetbyname/getnetbyaddr): built-in entries are
 ; "default 0" and "loopback 127"; NETWORK adds more (repeatable, up to 8,
 ; /etc/networks notation — the number is a classful NETWORK number like
