@@ -102,11 +102,13 @@ static void ndif_deliver(struct NetdevIf *ndi, struct pbuf *p)
 }
 
 /* ------------------------------------------------------------ GRO-lite --- */
-/* See netdev_if.h for the scheme. The candidate rule is deliberately narrow
- * (clean-LAN bulk shape): IPv4 without options or fragmentation, TCP without
- * options, flags ⊆ {ACK,PSH} with ACK, payload present, and a pad-free frame
- * (nrd_Len − l2 == IPH_LEN — Ethernet-padded runts would splice pad bytes
- * into the stream). Everything else takes the per-frame path. */
+
+/* wrap-safe: TRUE iff a is strictly newer than b in TCP sequence space
+ * (mirrors lwIP's TCP_SEQ_GT without pulling in <lwip/priv/tcp_priv.h>). */
+static inline BOOL ndif_seq_gt(u32_t a, u32_t b)
+{
+    return ((u32_t)(b - a) & 0x80000000u) != 0;
+}
 
 /* Pre-lock classification of one RX frame; reads frame bytes only. */
 static void ndif_gro_classify(const struct NetDevRxDesc *d, struct NdGroMeta *m)
@@ -137,11 +139,32 @@ static void ndif_gro_classify(const struct NetDevRxDesc *d, struct NdGroMeta *m)
 
     ULONG iplen = lwip_ntohs(IPH_LEN(ip));
     UWORD flags = TCPH_FLAGS(th);
+
+    /* Mergeable-header shape shared by data segments and pure ACKs: no IP
+     * options, not a fragment, no TCP options, flags ⊆ {ACK,PSH} with ACK. */
     if (ihl != IP_HLEN ||
         (IPH_OFFSET(ip) & PP_HTONS(IP_OFFMASK | IP_MF)) != 0 ||
         TCPH_HDRLEN_BYTES(th) != TCP_HLEN ||
-        (flags & ~(ULONG)(TCP_ACK | TCP_PSH)) != 0 || (flags & TCP_ACK) == 0 ||
-        iplen <= IP_HLEN + TCP_HLEN || iplen != d->nrd_Len - l3)
+        (flags & ~(ULONG)(TCP_ACK | TCP_PSH)) != 0 || (flags & TCP_ACK) == 0)
+        return; /* stays NOMERGE */
+
+    if (iplen <= IP_HLEN + TCP_HLEN)
+    {
+        /* No TCP payload. A pure ACK (flags exactly ACK) coalesces to the
+         * freshest per flow; a zero-payload PSH stays per-frame. The frame is
+         * delivered untouched (lwIP trims the Ethernet pad to IPH_LEN), so the
+         * pad-free check the data path needs does not apply here. */
+        if (iplen == IP_HLEN + TCP_HLEN && flags == TCP_ACK)
+        {
+            m->ngm_AckNo = lwip_ntohl(th->ackno);
+            m->ngm_Class = NDIF_GRO_ACK;
+        }
+        return;
+    }
+
+    /* Data segment: require a pad-free frame — padded runts would splice pad
+     * bytes into the reassembled stream. */
+    if (iplen != d->nrd_Len - l3)
         return;
 
     m->ngm_Seq = lwip_ntohl(th->seqno);
@@ -202,7 +225,7 @@ static void ndif_gro_flush_all(struct NetdevIf *ndi)
 }
 
 /* Per-frame dispatch inside the locked RX loop. Only IPv4 TCP frames get
- * here (class NOMERGE or MERGE); the caller short-circuits class NO. */
+ * here (class NOMERGE, MERGE or ACK); the caller short-circuits class NO. */
 static void ndif_gro_rx(struct NetdevIf *ndi, struct pbuf *p,
                         const struct NetDevRxDesc *d, const struct NdGroMeta *m)
 {
@@ -222,7 +245,37 @@ static void ndif_gro_rx(struct NetdevIf *ndi, struct pbuf *p,
         return;
     }
 
-    if (sameflow && m->ngm_Seq == c->ngc_NextSeq &&
+    if (m->ngm_Class == NDIF_GRO_ACK)
+    {
+        /* Coalesce pure ACKs: hold only the freshest (strictly-advancing
+         * ackno) per flow, delivering one per flush instead of one per ACK.
+         * Non-advancing (duplicate/reordered) ACKs are delivered individually,
+         * so lwIP still sees the dup-ACK run fast retransmit needs. */
+        if (sameflow && c->ngc_IsAck && ndif_seq_gt(m->ngm_AckNo, c->ngc_AckNo))
+        {
+            PERF_T0(t_gro);
+            pbuf_free(c->ngc_Head); /* recycle the superseded ACK's buffer */
+            c->ngc_Head = c->ngc_Tail = p;
+            c->ngc_AckNo = m->ngm_AckNo;
+            PERF_ADD(&ns_perf, NSP_RX_GRO, t_gro);
+            return;
+        }
+
+        /* different flow in the slot, a data run held, or a non-advancing
+         * ackno: deliver whatever was held, then hold this ACK */
+        if (c->ngc_Head != NULL)
+            ndif_gro_flush(ndi, c);
+        c->ngc_Head = c->ngc_Tail = p;
+        c->ngc_SrcIp = m->ngm_SrcIp;
+        c->ngc_DstIp = m->ngm_DstIp;
+        c->ngc_Ports = m->ngm_Ports;
+        c->ngc_AckNo = m->ngm_AckNo;
+        c->ngc_Frames = 1;
+        c->ngc_IsAck = TRUE;
+        return;
+    }
+
+    if (sameflow && !c->ngc_IsAck && m->ngm_Seq == c->ngc_NextSeq &&
         c->ngc_Frames < NDIF_GRO_MAX_FRAMES)
     {
         /* absorb: strip headers, link via the tail pointer (tot_len of the
@@ -260,6 +313,7 @@ static void ndif_gro_rx(struct NetdevIf *ndi, struct pbuf *p,
     c->ngc_NextSeq = m->ngm_Seq + m->ngm_PayLen;
     c->ngc_PayloadAdd = 0;
     c->ngc_Frames = 1;
+    c->ngc_IsAck = FALSE;
 }
 
 /* ----------------------------------------------------------- injection --- */

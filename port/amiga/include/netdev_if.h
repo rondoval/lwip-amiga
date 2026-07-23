@@ -81,13 +81,19 @@ struct NdHhEntry
 #define NDIF_GRO_NOMERGE 1  /* IPv4 TCP but unmergeable (SYN/FIN/RST, options,
                                padded, fragment): flush its flow first */
 #define NDIF_GRO_MERGE   2  /* in-order-candidate data segment */
+#define NDIF_GRO_ACK     3  /* payload-free pure ACK: coalesce to the freshest
+                               per flow (a bulk sender only needs the newest
+                               cumulative ackno + window) */
 
 struct NdGroMeta
 {
     ULONG ngm_SrcIp;   /* flow key, raw network order */
     ULONG ngm_DstIp;
     ULONG ngm_Ports;   /* src<<16 | dst, raw */
-    ULONG ngm_Seq;     /* host order */
+    union {
+        ULONG ngm_Seq;   /* MERGE frame: data seqno, host order */
+        ULONG ngm_AckNo; /* ACK frame:   ackno,      host order */
+    };
     UWORD ngm_PayOff;  /* frame offset of TCP payload (l2 + 20 + 20) */
     UWORD ngm_PayLen;  /* TCP payload bytes (from IPH_LEN, pad excluded) */
     UBYTE ngm_Class;   /* NDIF_GRO_* */
@@ -104,9 +110,14 @@ struct NdGroCtx
     ULONG ngc_SrcIp;          /* flow key, raw */
     ULONG ngc_DstIp;
     ULONG ngc_Ports;
-    ULONG ngc_NextSeq;        /* host order: expected next seqno */
+    union {
+        ULONG ngc_NextSeq;    /* data run: host order, expected next seqno */
+        ULONG ngc_AckNo;      /* ack hold: host order, held (freshest) ackno */
+    };
     ULONG ngc_PayloadAdd;     /* Σ payload bytes appended after the head */
     UWORD ngc_Frames;         /* frames absorbed, head included */
+    UBYTE ngc_IsAck;          /* held run is a coalesced pure-ACK, not data
+                                 (valid only while ngc_Head != NULL) */
 };
 
 struct NetdevIf
