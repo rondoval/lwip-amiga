@@ -24,8 +24,8 @@ A fast, modern TCP/IP stack for classic AmigaOS 3.2.
 
 ## Why use it
 
-- **Fast.** On a local gigabit network, lwip-amiga has measured up to 944 Mb/s
-  downloading and 558 Mb/s uploading over TCP, and up to 958 Mb/s over UDP — several
+- **Fast.** On a local gigabit network, lwip-amiga has measured up to 942 Mb/s
+  downloading and 681 Mb/s uploading over TCP, and up to 961 Mb/s over UDP — several
   times what older Amiga TCP/IP stacks manage on the same hardware. See
   [Performance](#performance) below for the full numbers and what they mean.
 - **Modern protocol support.** IPv4, TCP, UDP, ICMP, DHCP, DNS (forward and reverse),
@@ -96,21 +96,19 @@ library.)
 
 ## Performance
 
-Measured with `sockbench` on a release build, over a local wired gigabit network — not
+Measured with `sockbench` on the release build, over a local wired gigabit network — not
 the internet, so your real-world speed also depends on your Amiga, your network card, and
-what's on the other end of the connection. These numbers were measured against a
-pre-release build of `genet.device`; the final tagged 4.x release may land slightly
-different numbers.
+what's on the other end of the connection.
 
 | Test | Speed | % of line rate |
 |---|---|---|
-| Download (TCP) | 944 Mb/s | 94% |
-| Upload (TCP) | 558 Mb/s | 56% |
-| Download (UDP) | 958 Mb/s | line rate |
-| Upload (UDP, 64 KB chunks) | 817 Mb/s | 82% |
+| Download (TCP) | 942 Mb/s | 94% |
+| Upload (TCP) | 681 Mb/s | 68% |
+| Download (UDP) | 944 Mb/s | 94% |
+| Upload (UDP, 64 KB chunks) | 961 Mb/s | 96% |
 
 Over a real internet connection (measured with AmiSpeedTest), lwip-amiga reached
-846 Mb/s down and 71 Mb/s up — this network's full ISP line rate in both directions. On
+847 Mb/s down and 69 Mb/s up — this network's full ISP line rate in both directions. On
 that link the stack saturated the connection; the ISP, not the Amiga, set the ceiling.
 
 That comes from a few optimizations under the hood:
@@ -151,7 +149,7 @@ list, the stack is configured entirely through `netstack.prefs`, above.
   (for example, over a flaky link or a long-distance internet path), lwip-amiga's TCP
   falls back to a slow, full timeout before resending, rather than a fast selective
   resend. This isn't an issue on a clean connection, such as a normal wired LAN.
-- **Upload has more headroom than download.** TCP upload currently runs at about 56% of
+- **Upload has more headroom than download.** TCP upload currently runs at about 68% of
   line rate; the bottleneck is the driver's packet-submission path rather than the stack
   itself. This will be optimized in future releases.
 - **A handful of advanced or legacy `bsdsocket.library` calls aren't implemented**:
@@ -215,7 +213,7 @@ See [docs/architecture.md](docs/architecture.md) for how the stack works.
 batches, driver-provided DMA allocator for the TX pool, offset-based TX L4 checksum
 (GENET TSB shape), dual RX checksum reporting (VALID / RAW), declarative RX filter,
 STOP/DETACH quiesce protocol. genet's negotiated caps: interrupt coalescing, link
-events, TX L4 checksum offload, RX checksum (RAW + VALID).
+events, TX L4 checksum offload, RX checksum (RAW).
 
 **`bsdsocket.library`** — 76 of 121 LVOs implemented, including:
 
