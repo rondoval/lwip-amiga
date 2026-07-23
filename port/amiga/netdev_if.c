@@ -247,6 +247,7 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
     ndi->ndi_RxNoWrap = 0;
     ndi->ndi_TxOversize = 0;
     ndi->ndi_RxCsumBad = 0;
+    ndi->ndi_TxKickPending = FALSE;
     ndi->ndi_McastCount = 0;
     ndi->ndi_McastOverflow = 0;
     ndi->ndi_RxFilterWant = 0;

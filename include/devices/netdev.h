@@ -267,9 +267,17 @@ struct NetDevDrvOps             /* driver provides, stack calls */
 {
     /* Submit a batch. Returns the number of descriptors accepted, from the
      * FRONT of the array (a short return means the TX ring is full — retry
-     * the tail after the next nso_TxDone). One hardware doorbell per call.
+     * the tail after the next nso_TxDone). Stages the descriptors on the ring
+     * but does NOT ring the hardware doorbell; the stack must call ndo_TxKick
+     * to publish them (one doorbell per ndo_TxKick, not per submit).
      * Every accepted cookie returns via nso_TxDone exactly once. */
     LONG    (*ndo_TxSubmit)(APTR drvctx, const struct NetDevTxDesc *descs, ULONG count);
+
+    /* Ring the batched TX doorbell: publish every descriptor staged by prior
+     * ndo_TxSubmit calls since the last kick, so the hardware starts reading
+     * them. The stack calls this once per locked burst — collapsing N
+     * per-frame doorbells into one. Required (a no-op if nothing was staged). */
+    VOID    (*ndo_TxKick)(APTR drvctx);
 
     /* Return one RX buffer to the driver. Callable from any task and cheap
      * (the driver batches refills internally); the caller serializes its

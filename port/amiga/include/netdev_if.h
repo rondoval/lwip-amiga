@@ -139,6 +139,8 @@ struct NetdevIf
     ULONG ndi_RxNoWrap;                 /* backpressure: wrap pool empty */
     ULONG ndi_TxOversize;               /* dropped: segs > caps even coalesced */
     ULONG ndi_RxCsumBad;                /* RAW-fold verification failures */
+    BOOL ndi_TxKickPending;             /* a TX batch is staged awaiting ndo_TxKick;
+                                           set on submit, flushed at outermost unlock */
 
     /* IGMP -> exact driver RX filter. ndif_igmp_mac_filter (lwIP hook, under
      * the core lock) keeps the set of joined multicast MACs — 01:00:5e + the
@@ -186,6 +188,11 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
  * must have quiesced (NETDEV_CMD_STOP) and drained all held RX buffers
  * before this + NETDEV_CMD_DETACH. */
 void netdevif_destroy(struct NetdevIf *ndi);
+
+/* Ring the driver's deferred TX doorbell if a batch was staged since the last
+ * kick (ndi_TxKickPending). Called at every outermost netstack_unlock so a
+ * locked burst's frames go out with a single doorbell. Cheap no-op when idle. */
+void netdevif_tx_kick(struct NetdevIf *ndi);
 
 /* TX-pool memory for the netstack heap (routes to ndo_DmaAlloc/Free).
  * @align: 1:1 with the ABI's ndo_DmaAlloc alignment (the heap passes

@@ -200,8 +200,24 @@ err_t ndif_linkoutput(struct netif *nif, struct pbuf *p)
         return ERR_MEM; /* ring full; TCP retries on timer */
     }
 
+    /* Staged on the ring; the doorbell is deferred to netdevif_tx_kick at the
+     * outermost unlock, so a whole tcp_output burst rings one doorbell. */
+    ndi->ndi_TxKickPending = TRUE;
+
     PERF_ADD(&ns_perf, NSP_TX_LINKOUT, t_out);
     return ERR_OK;
+}
+
+/* Publish a staged TX burst: called at every outermost netstack_unlock (and as
+ * the STOP backstop). A no-op unless ndif_linkoutput staged frames since the
+ * last kick — the common case for the RX/tick/tx-done unlock callers. */
+void netdevif_tx_kick(struct NetdevIf *ndi)
+{
+    if (ndi != NULL && ndi->ndi_TxKickPending)
+    {
+        ndi->ndi_Ops->ndo_TxKick(ndi->ndi_Drv);
+        ndi->ndi_TxKickPending = FALSE;
+    }
 }
 
 /* netif->output — the TX hot path for every IP frame (TCP segments, UDP
