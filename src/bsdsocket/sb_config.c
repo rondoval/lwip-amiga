@@ -17,6 +17,7 @@
 
 #include <debug.h>
 #include <strutil.h>
+#include <prefs.h>
 
 static void sb_cfg_copy(char *dst, ULONG max, const char *src)
 {
@@ -136,39 +137,8 @@ void sb_config_load(struct SbNetConfig *cfg)
     char linebuf[256];
     while (FGets(fh, (STRPTR)linebuf, sizeof(linebuf)))
     {
-        char *line = linebuf;
-        char *eol = line;
-        while (*eol && *eol != '\n' && *eol != '\r')
-            eol++;
-        *eol = '\0';
-
-        while (*line == ' ' || *line == '\t')
-            line++;
-        if (*line == '#' || *line == ';')
-            continue;
-
-        char *eq = line;
-        while (*eq && *eq != '=')
-            eq++;
-        if (*eq != '=')
-            continue;
-
-        *eq = '\0';
-        char *key = line;
-        char *val = eq + 1;
-        while (*val == ' ' || *val == '\t')
-            val++;
-        char *end = val;
-        while (*end)
-            end++;
-        while (end > val && (end[-1] == ' ' || end[-1] == '\t'))
-            *--end = '\0';
-        end = key;
-        while (*end)
-            end++;
-        while (end > key && (end[-1] == ' ' || end[-1] == '\t'))
-            *--end = '\0';
-        if (*key == '\0' || *val == '\0')
+        char *key, *val;
+        if (!prefs_split(linebuf, &key, &val))
             continue;
 
         LONG parsed;

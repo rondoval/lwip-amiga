@@ -395,6 +395,19 @@ struct NetDevU64
     ULONG   ndu_Lo;
 };
 
+/* The ABI stores 64-bit counters as a big-endian hi/lo ULONG pair. These are
+ * the sanctioned way to cross that split, on both sides of the boundary. */
+static inline void netdev_u64_set(struct NetDevU64 *out, unsigned long long value)
+{
+    out->ndu_Hi = (ULONG)(value >> 32);
+    out->ndu_Lo = (ULONG)value;
+}
+
+static inline unsigned long long netdev_u64_get(const struct NetDevU64 *v)
+{
+    return ((unsigned long long)v->ndu_Hi << 32) | (unsigned long long)v->ndu_Lo;
+}
+
 struct NetDevStats
 {
     struct NetDevU64 nds_RxPackets;

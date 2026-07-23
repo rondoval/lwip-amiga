@@ -72,11 +72,6 @@ enum
 
 /* ---------------------------------------------------------- formatting --- */
 
-static unsigned long long u64val(const struct NetDevU64 *v)
-{
-    return ((unsigned long long)v->ndu_Hi << 32) | v->ndu_Lo;
-}
-
 /* decimal without printf %llu (libnix support is not a given) */
 static const char *u64str(unsigned long long v, char *buf)
 {
@@ -118,14 +113,14 @@ static void print_dir(const char *tag, const struct NetDevU64 *pkts,
 {
     char b1[22], b2[22], b3[24];
 
-    printf("%s : pkts %s  bytes %s", tag, u64str(u64val(pkts), b1),
-           u64str(u64val(bytes), b2));
+    printf("%s : pkts %s  bytes %s", tag, u64str(netdev_u64_get(pkts), b1),
+           u64str(netdev_u64_get(bytes), b2));
     if (prevPkts != NULL)
         printf("  [%s Mb/s, +%lu pps]",
-               mbps(u64val(bytes) - u64val(prevBytes), secs, b3),
-               (unsigned long)((u64val(pkts) - u64val(prevPkts)) / (secs ? secs : 1)));
-    printf("\n     errs %s  drops %s\n", u64str(u64val(errs), b1),
-           u64str(u64val(drops), b2));
+               mbps(netdev_u64_get(bytes) - netdev_u64_get(prevBytes), secs, b3),
+               (unsigned long)((netdev_u64_get(pkts) - netdev_u64_get(prevPkts)) / (secs ? secs : 1)));
+    printf("\n     errs %s  drops %s\n", u64str(netdev_u64_get(errs), b1),
+           u64str(netdev_u64_get(drops), b2));
 }
 
 static void print_stats(const struct NetDevStats *s, const struct NetDevStats *prev,
@@ -208,7 +203,7 @@ static void print_counters(const struct NetDevCounterSet *set,
     for (UWORD i = 0; i < n; i++)
     {
         const struct NetDevCounter *c = &set->ndcs_Counters[i];
-        unsigned long long val = u64val(&c->ndcn_Value);
+        unsigned long long val = netdev_u64_get(&c->ndcn_Value);
         BOOL gauge = (c->ndcn_Flags & NDCNTF_GAUGE) != 0;
 
         unsigned long long delta = 0;
@@ -236,7 +231,7 @@ static void counters_save(const struct NetDevCounterSet *set, unsigned long long
     UWORD n = counters_filled(set);
 
     for (UWORD i = 0; i < n; i++)
-        prev[i] = u64val(&set->ndcs_Counters[i].ndcn_Value);
+        prev[i] = netdev_u64_get(&set->ndcs_Counters[i].ndcn_Value);
 }
 
 /* ---------------------------------------------------------- the view --- */
