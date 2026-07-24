@@ -20,16 +20,63 @@
 /* scatter-list bound; pathological chains are coalesced down to it */
 #define NDIF_MAX_STACK_SEGS 16
 
+/* nso_TxDone: the driver's unit task hands up completed TX cookies (the pbufs
+ * transmitted, one per ndo_TxSubmit). Rather than take the core lock here and
+ * ping-pong it with the app sender, stage the cookies on the lock-free reclaim
+ * ring; netdevif_tx_reclaim frees them under the next hold that already owns the
+ * lock. stackctx is the struct NetdevIf * (nda_StackCtx). Single producer (this
+ * unit task, the only nso_* caller), so the enqueue needs no lock and never
+ * blocks the unit task on the app's hold. */
 void ndif_tx_done(APTR stackctx, APTR const *cookies, ULONG count)
 {
-    (void)stackctx;
+    struct NetdevIf *ndi = stackctx;
+    ULONG prod = ndi->ndi_TxFreeProd;
+    ULONG cons = ndi->ndi_TxFreeCons; /* snapshot; a stale (older) value only
+                                         makes the fullness test conservative */
+
+    if ((ULONG)(prod - cons) + count > ndi->ndi_TxFreeMask + 1)
+    {
+        /* Backstop: the ring is sized above the driver's in-flight ceiling, so
+         * this cannot trip at current constants — free inline so a cookie is
+         * never leaked should that sizing ever be invalidated. */
+        ndi->ndi_TxFreeOverflow += count;
+        netstack_lock();
+        for (ULONG i = 0; i < count; i++)
+            pbuf_free((struct pbuf *)cookies[i]);
+        netstack_unlock();
+        return;
+    }
+
+    for (ULONG i = 0; i < count; i++)
+        ndi->ndi_TxFree[prod++ & ndi->ndi_TxFreeMask] = cookies[i];
+    asm volatile("" ::: "memory"); /* publish the cookies before the index */
+    ndi->ndi_TxFreeProd = prod;
+}
+
+/* Free the completed TX cookies ndif_tx_done staged since the last drain. Runs
+ * under the core lock (the outermost netstack_lock, and netdevif_destroy), so
+ * the pbuf_free work folds into a hold that already exists instead of the unit
+ * task taking a contended lock per completion batch. Snapshot-drain-commit,
+ * mirroring the driver's netdev_drain_recycle. */
+void netdevif_tx_reclaim(struct NetdevIf *ndi)
+{
+    if (ndi == NULL)
+        return;
+
+    ULONG cons = ndi->ndi_TxFreeCons;
+    ULONG prod = ndi->ndi_TxFreeProd; /* snapshot bounds this pass */
+    if (cons == prod)
+        return; /* common case: nothing completed since the last hold */
 
     PERF_T0(t_done);
-    netstack_lock();
-    for (ULONG i = 0; i < count; i++)
-        pbuf_free((struct pbuf *)cookies[i]);
+    while (cons != prod)
+    {
+        pbuf_free((struct pbuf *)ndi->ndi_TxFree[cons & ndi->ndi_TxFreeMask]);
+        cons++;
+    }
+    asm volatile("" ::: "memory"); /* commit the frees before releasing slots */
+    ndi->ndi_TxFreeCons = cons;
     PERF_ADD(&ns_perf, NSP_TX_DONE, t_done);
-    netstack_unlock();
 }
 
 /* --------------------------------------------------- L2 header cache --- */

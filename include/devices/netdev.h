@@ -143,7 +143,13 @@ struct NetDevCaps
                                    bytes (0/1 = none). ndo_DmaAlloc output
                                    always satisfies it; this matters when the
                                    stack points segments INTO such a buffer */
-    UWORD   ndc_Pad;
+    UWORD   ndc_TxInFlightMax;  /* max TX cookies the driver can have outstanding
+                                   (submitted via ndo_TxSubmit, not yet completed
+                                   via nso_TxDone); the stack sizes its deferred TX
+                                   reclaim ring to cover this. Distinct from — and
+                                   larger than — ndc_TxRingSlots (the BD ring): a
+                                   completed cookie leaves the ring before it is
+                                   reclaimed. 0 = unknown (stack falls back). */
     ULONG   ndc_RxPoolBufs;     /* total driver RX buffers (ring + spares),
                                    sized at ATTACH from ring depth plus the
                                    stack's nda_RxHoldReq (driver-clamped);
@@ -346,6 +352,12 @@ struct NetDevAttach
                                    buffers support and returns the actual value
                                    in ndc_Mtu (OUT). Mirrors the nda_RxHoldReq
                                    -> ndc_RxPoolBufs negotiation. */
+    UWORD   nda_RxBatch;        /* IN: max NetDevRxDesc the stack accepts per
+                                   nso_RxInput call — its per-hold verdict/GRO
+                                   array capacity. The driver caps its own RX
+                                   batch (flush granularity) to this so a whole
+                                   batch lands in one stack lock hold. 0 = driver
+                                   default. Port-owned; mirrors nda_RxHoldReq. */
     APTR    nda_StackCtx;       /* IN: first arg of every nso_* call */
     const struct NetDevStackOps *nda_StackOps;  /* IN */
     APTR    nda_DrvCtx;         /* OUT: first arg of every ndo_* call */
@@ -486,7 +498,7 @@ NETDEV_ABI_ASSERT(sizeof(struct NetDevSg) == 8);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevTxDesc) == 18);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevRxDesc) == 18);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevCaps) == 40);
-NETDEV_ABI_ASSERT(sizeof(struct NetDevAttach) == 62);
+NETDEV_ABI_ASSERT(sizeof(struct NetDevAttach) == 64);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevRxFilter) == 8);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevCoalesce) == 8);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevLinkState) == 4);

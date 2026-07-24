@@ -32,11 +32,13 @@ struct NdRxWrap;
 struct ip_hdr;  /* lwip/prot/ip4.h */
 struct tcp_hdr; /* lwip/prot/tcp.h */
 
-/* Upper bound on frames processed per netstack_lock() hold in ndif_rx_input.
- * Kept >= the driver's ND_RX_BATCH so a whole driver batch lands in ONE lock
- * hold (no mid-batch re-lock). A ceiling, not a target: the RX lock cadence
- * is swept driver-side via ND_RX_BATCH + budget (see bcmgenet.c). Also sizes
- * the per-chunk verdict arrays (drop[], ndi_GroMeta). */
+/* Upper bound on frames processed per netstack_lock() hold in ndif_rx_input,
+ * and the size of the per-chunk verdict arrays (drop[], ndi_GroMeta). This is
+ * the stack's capacity; it is PROPAGATED to the driver at ATTACH via
+ * nda_RxBatch (netdevif_rx_batch), which caps the driver's flush granularity so
+ * a whole driver batch lands in ONE lock hold. ndif_rx_input still clamps each
+ * pass to this and re-locks, so a driver that ignores it only pays extra holds,
+ * never an overflow. */
 #define NDIF_RX_CHUNK 64
 
 /* L2 header cache: one prebuilt Ethernet (or Ethernet+802.1Q) header
@@ -71,10 +73,9 @@ struct NdHhEntry
  * TCP checksum check active, a rewritten merged header would fail it. */
 #define NDIF_GRO_FLOWS      4u  /* direct-mapped merge contexts */
 #define NDIF_GRO_MAX_FRAMES 44u /* per merge — the u16 IPH_LEN ceiling:
-                                   1500 + 43*1460 = 64280 <= 65535. The
-                                   driver batch (ND_RX_BATCH) is the other
-                                   bound on a run; 64-frame batches split
-                                   into a 44 + a 20. */
+                                   1500 + 43*1460 = 64280 <= 65535. The RX-input
+                                   batch (NDIF_RX_CHUNK) is the other bound on a
+                                   run; 64-frame batches split into a 44 + a 20. */
 
 /* per-frame pre-lock classification verdict */
 #define NDIF_GRO_NO      0  /* not IPv4/TCP: deliver immediately */
@@ -120,6 +121,17 @@ struct NdGroCtx
                                  (valid only while ngc_Head != NULL) */
 };
 
+/* Deferred TX reclaim: nso_TxDone (unit task) enqueues completed pbuf cookies
+ * onto ndi_TxFree instead of freeing them under a dedicated lock hold; the
+ * frees run in bulk at the next outermost netstack_lock, folded into a hold
+ * some task already owns. Single-producer (unit task) / single-consumer (the
+ * core-lock holder, serialized by the lock). The ring is sized at create() to
+ * cover the driver's advertised in-flight ceiling (ndc_TxInFlightMax) so, like
+ * the driver's own recycle ring, it can never fill; the inline-free backstop in
+ * ndif_tx_done is the guarantee if a driver ever under-reports. This floor is
+ * the fallback when the driver advertises 0 (pre-field). */
+#define NDIF_TX_FREE_MIN 256u
+
 struct NetdevIf
 {
     struct netif ndi_Netif;
@@ -141,6 +153,14 @@ struct NetdevIf
     ULONG ndi_RxCsumBad;                /* RAW-fold verification failures */
     BOOL ndi_TxKickPending;             /* a TX batch is staged awaiting ndo_TxKick;
                                            set on submit, flushed at outermost unlock */
+
+    /* Deferred TX-reclaim SPSC ring (see NDIF_TX_FREE_RING_N above). */
+    APTR *ndi_TxFree;                   /* ring of completed TX pbuf cookies */
+    ULONG ndi_TxFreeMask;               /* NDIF_TX_FREE_RING_N - 1 */
+    volatile ULONG ndi_TxFreeProd;      /* unit task (producer) */
+    volatile ULONG ndi_TxFreeCons;      /* core-lock holder (consumer) */
+    ULONG ndi_TxFreeOverflow;           /* backstop: inline frees on a full ring
+                                           (unreachable at correct sizing) */
 
     /* IGMP -> exact driver RX filter. ndif_igmp_mac_filter (lwIP hook, under
      * the core lock) keeps the set of joined multicast MACs — 01:00:5e + the
@@ -177,6 +197,11 @@ const struct NetDevStackOps *netdevif_stack_ops(void);
  * window (port-layer knowledge the exec-side opener doesn't have). */
 UWORD netdevif_rx_hold_budget(void);
 
+/* The RX-input batch to declare in NetDevAttach.nda_RxBatch: the max frames the
+ * stack accepts per nso_RxInput call (its per-hold verdict/GRO array capacity).
+ * The driver caps its flush granularity to this. */
+UWORD netdevif_rx_batch(void);
+
 /* Wire the attach results into lwIP: allocates the RX wrapper pool, adds
  * the netif (down, unconfigured), programs per-netif checksum switches
  * from the capabilities. Returns 0 on success. */
@@ -193,6 +218,12 @@ void netdevif_destroy(struct NetdevIf *ndi);
  * kick (ndi_TxKickPending). Called at every outermost netstack_unlock so a
  * locked burst's frames go out with a single doorbell. Cheap no-op when idle. */
 void netdevif_tx_kick(struct NetdevIf *ndi);
+
+/* Drain the deferred TX-reclaim ring, freeing every completed pbuf cookie
+ * nso_TxDone (ndif_tx_done) staged since the last drain. Called under the core
+ * lock at every outermost netstack_lock entry (and once from netdevif_destroy).
+ * Cheap no-op when the ring is empty. */
+void netdevif_tx_reclaim(struct NetdevIf *ndi);
 
 /* TX-pool memory for the netstack heap (routes to ndo_DmaAlloc/Free).
  * @align: 1:1 with the ABI's ndo_DmaAlloc alignment (the heap passes

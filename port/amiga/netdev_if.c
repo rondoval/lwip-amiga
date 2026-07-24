@@ -184,6 +184,12 @@ UWORD netdevif_rx_hold_budget(void)
     return (UWORD)(NDIF_RX_HOLD_STREAMS * wndFrames + NDIF_RX_HOLD_SLACK);
 }
 
+/* Max frames per nso_RxInput the stack accepts = its per-chunk array capacity. */
+UWORD netdevif_rx_batch(void)
+{
+    return NDIF_RX_CHUNK;
+}
+
 APTR netdevif_dma_alloc(struct NetdevIf *ndi, ULONG size, ULONG align)
 {
     return ndi->ndi_Ops->ndo_DmaAlloc(ndi->ndi_Drv, size, align);
@@ -285,6 +291,30 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
         ndi->ndi_FreeWraps = w;
     }
 
+    /* Deferred TX-reclaim ring (see netdevif_tx_reclaim), sized to cover the
+     * driver's advertised in-flight TX ceiling. next-pow2(want + 1) so an SPSC
+     * ring holding `want` cookies has its reserved slot; same idiom as the
+     * driver's recycle ring. Falls back to 2x the BD ring, then a floor, when
+     * the driver leaves ndc_TxInFlightMax 0. */
+    ULONG want = ndi->ndi_Caps.ndc_TxInFlightMax;
+    if (want == 0)
+        want = (ULONG)ndi->ndi_Caps.ndc_TxRingSlots * 2;
+    if (want < NDIF_TX_FREE_MIN)
+        want = NDIF_TX_FREE_MIN;
+    ULONG ring_n = 1;
+    while (ring_n < want + 1)
+        ring_n <<= 1;
+    ndi->ndi_TxFree = AllocMem(ring_n * sizeof(APTR), MEMF_PUBLIC | MEMF_CLEAR);
+    if (ndi->ndi_TxFree == NULL)
+    {
+        FreeMem(ndi->ndi_WrapStorage, ndi->ndi_WrapStorageSize);
+        return -1;
+    }
+    ndi->ndi_TxFreeMask = ring_n - 1;
+    ndi->ndi_TxFreeProd = 0;
+    ndi->ndi_TxFreeCons = 0;
+    ndi->ndi_TxFreeOverflow = 0;
+
     netstack_lock();
     struct netif *added = netif_add_noaddr(&ndi->ndi_Netif, ndi,
                                            ndif_netif_init, ethernet_input);
@@ -294,6 +324,7 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
 
     if (added == NULL)
     {
+        FreeMem(ndi->ndi_TxFree, (ndi->ndi_TxFreeMask + 1) * sizeof(APTR));
         FreeMem(ndi->ndi_WrapStorage, ndi->ndi_WrapStorageSize);
         return -1;
     }
@@ -307,6 +338,11 @@ void netdevif_destroy(struct NetdevIf *ndi)
 {
     Kprintf("[netdevif] %s: ndi 0x%08lx\n", __func__, (ULONG)ndi);
     netstack_lock();
+    /* Free the cookies STOP completed into the reclaim ring before the slab
+     * arenas go back to the driver. (The netstack_lock entry-drain above already
+     * did this while ns_ActiveNetdev == ndi; the explicit call keeps the ordering
+     * vs. netstack_slab_detach self-evident and is a no-op if already drained.) */
+    netdevif_tx_reclaim(ndi);
     netif_remove(&ndi->ndi_Netif);
     if (netstack.ns_ActiveNetdev == ndi)
     {
@@ -319,4 +355,6 @@ void netdevif_destroy(struct NetdevIf *ndi)
     FreeMem(ndi->ndi_WrapStorage, ndi->ndi_WrapStorageSize);
     ndi->ndi_WrapStorage = NULL;
     ndi->ndi_FreeWraps = NULL;
+    FreeMem(ndi->ndi_TxFree, (ndi->ndi_TxFreeMask + 1) * sizeof(APTR));
+    ndi->ndi_TxFree = NULL;
 }

@@ -123,6 +123,7 @@ static void sb_netdev_up(struct SbStackCtx *ctx)
         ((UBYTE *)&att)[i] = 0;
     att.nda_AbiVersion = NETDEV_ABI_VERSION;
     att.nda_RxHoldReq = netdevif_rx_hold_budget();
+    att.nda_RxBatch = netdevif_rx_batch();
     att.nda_MtuReq = 0; /* driver default MTU (no MTU prefs key) */
     att.nda_StackCtx = &ctx->ndi;
     att.nda_StackOps = netdevif_stack_ops();
