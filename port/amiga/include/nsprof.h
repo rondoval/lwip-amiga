@@ -23,8 +23,9 @@ enum NsProfSlot
     NSP_RX_INPUT,      /* netif.input() per DELIVERY (a GRO merge counts once;
                           merge ratio = driver frames/s over this slot's n) */
     NSP_RX_GRO,        /* under-lock GRO absorb bookkeeping, per frame */
-    /* unit task, TX reclaim (ndif_tx_done) */
-    NSP_TX_DONE,       /* lock wait + batched pbuf_free per completion batch */
+    /* core-lock holder, deferred TX reclaim drain (netdevif_tx_reclaim) */
+    NSP_TX_DONE,       /* batched pbuf_free of completed cookies, folded into an
+                          existing hold (no lock wait; ndif_tx_done only enqueues) */
     /* any task, under the lock (ndif_linkoutput, from tcp_output/udp_send) */
     NSP_TX_LINKOUT,    /* whole linkoutput per frame: offsets+seed+submit */
     NSP_TX_SUBMIT,     /* driver ndo_TxSubmit within it: ring+cache+doorbell */

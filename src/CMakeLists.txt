@@ -44,6 +44,7 @@ include(${LWIP_DIR}/src/Filelists.cmake)
 add_library(netstack STATIC
     ${lwipcore_SRCS}
     ${lwipcore4_SRCS}
+    ${lwipmdns_SRCS}
     ${LWIP_DIR}/src/netif/ethernet.c
     ${CMAKE_SOURCE_DIR}/port/amiga/netstack.c
     ${CMAKE_SOURCE_DIR}/port/amiga/netstack_mem.c
@@ -75,6 +76,7 @@ add_executable(bsdsocket_library
     bsdsocket/vectors.c
     bsdsocket/sb_config.c
     bsdsocket/sb_stack.c
+    bsdsocket/sb_mdns.c
     bsdsocket/sb_socket.c
     bsdsocket/sb_api.c
     bsdsocket/sb_io.c
@@ -139,8 +141,10 @@ set_target_properties(bsdsocket_library PROPERTIES
 )
 
 # The netdev ABI header is installed and exported as the Netdev cmake package —
-# that is how genet.device consumes the contract.
-install(FILES ${CMAKE_SOURCE_DIR}/include/netdev.h DESTINATION include)
+# that is how genet.device consumes the contract. It also ships in the SDK
+# (Developer/include/devices/ — see the root CMakeLists packaging step), hence
+# the devices/ path: it is a device ABI.
+install(FILES ${CMAKE_SOURCE_DIR}/include/devices/netdev.h DESTINATION include/devices)
 
 add_library(netdev_headers INTERFACE)
 target_include_directories(netdev_headers
@@ -227,6 +231,23 @@ target_compile_options(netinfo PRIVATE -O2 ${LWIP_WARN})
 
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/netinfo
+    DESTINATION C
+)
+
+# --- mdns: multicast DNS client + service control ---------------------------
+# Resolves and watches .local names over the wire, and drives the responder's
+# service list through the stack's control port (include/mdns_ctl.h, shared
+# with sb_mdns.c). Shipped alongside the library.
+add_executable(mdns
+    mdns/mdns.c
+)
+
+target_compile_options(mdns PRIVATE -O2 ${LWIP_WARN})
+
+target_include_directories(mdns PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/mdns
     DESTINATION C
 )
 

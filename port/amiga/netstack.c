@@ -25,6 +25,7 @@
 #include <lwip/timeouts.h>
 
 #include "netstack.h"
+#include "netdev_if.h" /* netdevif_tx_kick / netdevif_tx_reclaim at outermost lock */
 #include "nsprof.h"
 
 struct NetStack netstack;
@@ -69,6 +70,13 @@ void netstack_init(struct Device *timerBase)
 void netstack_lock(void)
 {
     lock_prof_obtain(&netstack.ns_LockProf, &netstack.ns_Core);
+    /* Reap completed TX at the outermost obtain, before any tcp_output in this
+     * hold: the frees fold into a hold that already exists (no dedicated reclaim
+     * lock on the unit task) and the transmitted frames' refs drop before RX
+     * fast-retransmit or tcp_write re-examine them. Symmetric with the
+     * netdevif_tx_kick publish at the outermost unlock. */
+    if (netstack.ns_Core.ss_NestCount == 1)
+        netdevif_tx_reclaim(netstack.ns_ActiveNetdev);
 }
 
 static BOOL netstack_loopback_pending(void)
@@ -120,6 +128,11 @@ void netstack_unlock(void)
             }
             netif_poll_all();
         }
+
+        /* Publish any TX batch staged during this hold with a single doorbell.
+         * After the loopback drain so loopback-generated TX is included; still
+         * under the lock, so it cannot race the driver's own datapath. */
+        netdevif_tx_kick(netstack.ns_ActiveNetdev);
     }
     lock_prof_release(&netstack.ns_LockProf, &netstack.ns_Core);
 }

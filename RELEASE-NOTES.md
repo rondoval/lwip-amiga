@@ -1,3 +1,101 @@
+# Release notes — lwip-amiga 1.1
+
+Changes since v1.0.
+
+---
+
+## Breaking changes
+
+These only matter if you're writing a driver or another stack against the `netdev`
+interface — they have no effect on end users.
+
+### The `netdev` header moved
+
+It now lives at `include/devices/netdev.h`, alongside the other Amiga device headers,
+instead of `include/netdev.h`.
+
+### A few driver-only statistics moved out of the standard counters
+
+A handful of low-level counters (RX buffer shortages, rejected sends, and similar) moved
+out of the standard statistics block and into the new `GET_COUNTERS` command described
+below, where each driver can report whatever counters fit its hardware. The standard
+block stays small and the same for every driver. `netdev-stats` already uses the new
+command, so nothing changes for anyone using the tools.
+
+### The netdev interface got a tidy-up alongside the speed work
+
+Transmit completion is now signalled in batches (a new `ndo_TxKick`), and two buffer sizes
+the stack and driver used to assume about each other are now negotiated at attach. 
+
+---
+
+## New features
+
+### Faster TCP upload — now near line rate
+
+TCP upload climbed from **681 to 906 Mb/s**, so uploads and downloads now both run close
+to the wire. Three send-path optimisations did it:
+
+- **Fewer trips for acknowledgements.** Incoming ACKs for data we sent are now merged the
+  same way received data already was, so a burst of them is handled in one pass instead of
+  one at a time.
+- **One "go" signal per burst.** The driver is told to start transmitting once per batch
+  of packets instead of once per packet, cutting a slow hardware write out of the hot path.
+- **Reclaiming sent packets off the critical path.** Finished transmit buffers are freed
+  without competing for the lock the application uses to send, removing a stall between
+  the two.
+
+The stack is now wire-bound in both directions on gigabit: further work on the network
+path frees CPU for the application rather than adding Mb/s.
+
+Measured with `sockbench` on a local wired gigabit network (release build, single stream,
+against `genet.device` 4.0):
+
+| Test | Speed |
+|---|---|
+| Download (TCP) | **945 Mb/s** |
+| Upload (TCP) | **906 Mb/s** |
+| Download (UDP, 64 KB chunks) | **957 Mb/s** |
+| Upload (UDP, 64 KB chunks) | **957 Mb/s** |
+
+Over a real internet connection (measured with AmiSpeedTest), the stack reached
+**854 Mb/s down / 84 Mb/s up** — matching 841/82 Mb/s from a PC on the same line via
+speedtest.net.
+
+### Reachable by name: mDNS and DNS-SD
+
+The stack answers for `<HOSTNAME>.local`, so any Mac, PC, or phone on the network can
+reach the Amiga by name with no DNS server and no static address — `ping amiga.local`
+just works. Services are advertised too (DNS-SD/Bonjour): list them in `netstack.prefs`
+as `MDNS_SERVICE = _ftp._tcp 21`, or register them as they start with
+`mdns ADD _ftp._tcp PORT 21`, which is usually what you want since Amiga daemons
+launch after the stack. Set `MDNS = no` to turn it all off.
+
+### More detailed driver statistics
+
+`netdev-stats COUNTERS` now shows a much fuller picture of what the network hardware is
+doing — for `genet.device`, that's every statistic the chip itself keeps, the same set
+you'd see with `ethtool -S` on Linux, alongside the driver's own counters.
+
+---
+
+## Bug fixes / Improvements
+
+### Fixed a duplicated drop count
+
+A dropped-packet count reported to interface-monitoring tools (`IFQ_OutputDrops`) was
+counting some drops twice. It now reports the correct number.
+
+---
+
+## Tools
+
+`mdns` ships as a new tool: multicast DNS client and DNS-SD service control (see the
+[README](README.md)). `netdev-stats` gains the `COUNTERS` view above; both tools take
+ReadArgs-style command lines (`?` prints the template).
+
+---
+
 # Release notes — lwip-amiga 1.0
 
 First public release. A fast, modern TCP/IP stack for classic AmigaOS 3.2, released
@@ -17,19 +115,18 @@ socket API, installed to `LIBS:`.
 
 ### Performance
 
-Measured with `sockbench` on a local wired gigabit network (release build, single stream —
-measured against a pre-release build of `genet.device`; the final tagged 4.x release may
-land slightly different numbers):
+Measured with `sockbench` on a local wired gigabit network (
+against pre-release `genet.device` 4.0):
 
 | Test | Speed | % of line rate |
 |---|---|---|
-| Download (TCP) | **944 Mb/s** | 94% |
-| Upload (TCP) | **558 Mb/s** | 56% |
-| Download (UDP) | **958 Mb/s** | line rate |
-| Upload (UDP, 64 KB chunks) | **817 Mb/s** | 82% |
+| Download (TCP) | **942 Mb/s** | 94% |
+| Upload (TCP) | **681 Mb/s** | 68% |
+| Download (UDP) | **944 Mb/s** | 94% |
+| Upload (UDP, 64 KB chunks) | **961 Mb/s** | 96% |
 
 Over a real internet connection (measured with AmiSpeedTest), the stack reached
-**846 Mb/s down / 71 Mb/s up** — this network's full ISP line rate in both directions, so
+**847 Mb/s down / 69 Mb/s up** — this network's full ISP line rate in both directions, so
 the internet link, not the Amiga, was the limit.
 
 These gains come from a handful of changes under the hood:
@@ -45,8 +142,8 @@ These gains come from a handful of changes under the hood:
   buffer is sized to line up cleanly with the hardware's cache and DMA requirements.
 - **Cached outgoing headers.** The network header for each destination is worked out
   once and reused, instead of being recalculated for every outgoing packet.
-- **A small upstream-worthy fix in lwIP itself**, tracking where unsent TCP data ends so
-  it doesn't need to be re-scanned on every send.
+- **A small fix to lwIP itself**, speeding up repeated sends on the same
+  connection.
 
 Every change above was measured and verified on real hardware before being kept.
 
@@ -115,7 +212,7 @@ what each does.
 - Recovery from several dropped packets in a row is slower than it could be (falls back
   to a full timeout instead of a fast selective resend) — not an issue on a normal wired
   LAN.
-- TCP upload runs at about 56% of line rate; the driver's packet-submission path is the
+- TCP upload runs at about 68% of line rate; the driver's packet-submission path is the
   current bottleneck, not the stack.
 - A handful of advanced/legacy `bsdsocket.library` calls aren't implemented: Roadshow's
   interface-configuration/routing/monitoring calls, `mbuf_*`/`bpf_*`, and (by design) the

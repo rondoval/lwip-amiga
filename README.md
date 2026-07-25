@@ -24,8 +24,8 @@ A fast, modern TCP/IP stack for classic AmigaOS 3.2.
 
 ## Why use it
 
-- **Fast.** On a local gigabit network, lwip-amiga has measured up to 944 Mb/s
-  downloading and 558 Mb/s uploading over TCP, and up to 958 Mb/s over UDP — several
+- **Fast.** On a local gigabit network, lwip-amiga has measured up to 945 Mb/s
+  downloading and 906 Mb/s uploading over TCP, and up to 957 Mb/s over UDP — several
   times what older Amiga TCP/IP stacks manage on the same hardware. See
   [Performance](#performance) below for the full numbers and what they mean.
 - **Modern protocol support.** IPv4, TCP, UDP, ICMP, DHCP, DNS (forward and reverse),
@@ -65,6 +65,8 @@ file at all, lwip-amiga runs DHCP on `networks/genet.device` unit 0.
 | `GATEWAY` | — | your router's address (`STATIC`, optional) |
 | `DNS1`, `DNS2` | — | DNS servers to use (`STATIC`; DHCP supplies its own automatically) |
 | `HOSTNAME` | `amiga` | the name your Amiga reports to the network |
+| `MDNS` | `yes` | answer for `HOSTNAME.local` on the local network (Bonjour/Avahi), so other machines can reach the Amiga by name with no DNS server |
+| `MDNS_SERVICE` | — | advertise a service over DNS-SD: `_type._proto port [instance name]` (e.g. `_ftp._tcp 21`); repeatable up to 4 times, and services can also be registered while running with the `mdns` command |
 | `NETWORK` | — | adds an entry to the networks database (`getnetbyname`/`getnetbyaddr`); repeatable up to 8 times, `/etc/networks` notation — `name classful-network` (e.g. `homelan 192.168.0`) |
 
 ## Test results
@@ -94,22 +96,20 @@ library.)
 
 ## Performance
 
-Measured with `sockbench` on a release build, over a local wired gigabit network — not
+Measured with `sockbench` on the release build, over a local wired gigabit network — not
 the internet, so your real-world speed also depends on your Amiga, your network card, and
-what's on the other end of the connection. These numbers were measured against a
-pre-release build of `genet.device`; the final tagged 4.x release may land slightly
-different numbers.
+what's on the other end of the connection.
 
-| Test | Speed | % of line rate |
-|---|---|---|
-| Download (TCP) | 944 Mb/s | 94% |
-| Upload (TCP) | 558 Mb/s | 56% |
-| Download (UDP) | 958 Mb/s | line rate |
-| Upload (UDP, 64 KB chunks) | 817 Mb/s | 82% |
+| Test | Speed |
+|---|---|
+| Download (TCP) | 945 Mb/s |
+| Upload (TCP) | 906 Mb/s |
+| Download (UDP, 64KB chunks) | 957 Mb/s |
+| Upload (UDP, 64 KB chunks) | 957 Mb/s |
 
 Over a real internet connection (measured with AmiSpeedTest), lwip-amiga reached
-846 Mb/s down and 71 Mb/s up — this network's full ISP line rate in both directions. On
-that link the stack saturated the connection; the ISP, not the Amiga, set the ceiling.
+854 Mb/s down and 84 Mb/s up — matching 841/82 Mb/s from a PC on the same line via
+speedtest.net.
 
 That comes from a few optimizations under the hood:
 
@@ -130,10 +130,18 @@ See [RELEASE-NOTES.md](RELEASE-NOTES.md) for more on what's behind these numbers
 - **`netinfo`** — shows your current network status at a glance: address, netmask,
   broadcast, MTU, MAC address, link state, DHCP/static, and DNS servers.
 - **`netdev-stats`** — shows live driver statistics (packet/error counters, link state)
-  and lets you tune interrupt coalescing, without restarting the stack.
+  and lets you tune interrupt coalescing, without restarting the stack. `netdev-stats
+  COUNTERS` switches to the driver's own counter list — for `genet.device` that is the
+  complete UniMAC hardware MIB, the same set Linux exposes through `ethtool -S`.
 
-Both are read-only status tools — the stack itself is configured entirely through
-`netstack.prefs`, above.
+- **`mdns`** — multicast DNS. `mdns pi.local` resolves a name on the local network with
+  no DNS server involved, `mdns LISTEN` watches what the network announces, and `mdns
+  STATUS` shows what this Amiga advertises. Services can be advertised as they start —
+  `mdns ADD _ftp._tcp PORT 21` — and withdrawn again with `mdns DEL <slot>`; anything
+  listed under `MDNS_SERVICE` in `netstack.prefs` is advertised from boot.
+
+`netinfo` and `netdev-stats` are read-only status tools; apart from `mdns`'s service
+list, the stack is configured entirely through `netstack.prefs`, above.
 
 ## Known limitations
 
@@ -141,9 +149,8 @@ Both are read-only status tools — the stack itself is configured entirely thro
   (for example, over a flaky link or a long-distance internet path), lwip-amiga's TCP
   falls back to a slow, full timeout before resending, rather than a fast selective
   resend. This isn't an issue on a clean connection, such as a normal wired LAN.
-- **Upload has more headroom than download.** TCP upload currently runs at about 56% of
-  line rate; the bottleneck is the driver's packet-submission path rather than the stack
-  itself. This will be optimized in future releases.
+- **Both directions run near line rate.** TCP upload and download are both close to the
+  wire on gigabit.
 - **A handful of advanced or legacy `bsdsocket.library` calls aren't implemented**:
   Roadshow's interface-configuration, routing, and monitoring calls (the read-only
   interface *query* calls used by `netinfo` above do work), the low-level
@@ -205,7 +212,7 @@ See [docs/architecture.md](docs/architecture.md) for how the stack works.
 batches, driver-provided DMA allocator for the TX pool, offset-based TX L4 checksum
 (GENET TSB shape), dual RX checksum reporting (VALID / RAW), declarative RX filter,
 STOP/DETACH quiesce protocol. genet's negotiated caps: interrupt coalescing, link
-events, TX L4 checksum offload, RX checksum (RAW + VALID).
+events, TX L4 checksum offload, RX checksum (RAW).
 
 **`bsdsocket.library`** — 76 of 121 LVOs implemented, including:
 

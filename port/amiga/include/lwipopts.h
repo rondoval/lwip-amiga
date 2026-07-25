@@ -45,7 +45,7 @@
 #define LWIP_RAW                        1   /* SOCK_RAW (ping) via bsdsocket */
 #define LWIP_UDP                        1
 #define LWIP_TCP                        1
-#define LWIP_IGMP                       1   /* multicast (mDNS later) */
+#define LWIP_IGMP                       1   /* multicast; required by the mDNS responder */
 #define LWIP_DHCP                       1
 #define LWIP_DNS                        1
 #define LWIP_IPV6                       0   /* design stays v6-ready; off in v1 */
@@ -56,6 +56,18 @@
 #define LWIP_NETIF_STATUS_CALLBACK      1
 #define LWIP_NETIF_LINK_CALLBACK        1
 #define LWIP_SUPPORT_CUSTOM_PBUF        1   /* RX buffers are driver-owned */
+
+/* --- mDNS / DNS-SD responder: <hostname>.local plus the services listed in
+ * netstack.prefs (MDNS_SERVICE) or registered at runtime through the stack
+ * task's control port (sb_mdns.c). The responder needs a netif client-data
+ * slot, and with the ext-status callback it re-probes and re-announces itself
+ * across link and DHCP address changes with no glue on our side.
+ * SO_REUSE_RXTOALL delivers multicast to every matching pcb, so the `mdns`
+ * tool can listen on 5353 beside the responder. */
+#define LWIP_MDNS_RESPONDER             1
+#define LWIP_NUM_NETIF_CLIENT_DATA      1
+#define LWIP_NETIF_EXT_STATUS_CALLBACK  1
+#define MDNS_MAX_SERVICES               4
 
 /* --- in-band 802.1Q VLAN ---
  * Software VLAN: the tag rides inside the frame; the driver moves opaque
@@ -77,7 +89,7 @@
 #define MEM_CUSTOM_CALLOC               netstack_calloc
 #define MEM_CUSTOM_FREE                 netstack_free
 
-#define MEMP_NUM_PBUF                   512  /* PBUF_REF/ROM headers (TX) */
+#define MEMP_NUM_PBUF                   1024 /* PBUF_REF/ROM headers (TX) */
 #ifdef TRACE
 /* lwIP's own pool policing: the memp pools (tcp_seg, pcbs, ...) are static
  * arrays outside the netstack heap. OVERFLOW_CHECK pads every element
@@ -89,28 +101,47 @@
  * O(n) per call, so TRACE only. */
 #define TCP_UNSENT_TAIL_DBGCHECK        1
 #endif
-#define MEMP_NUM_TCP_PCB                256
-#define MEMP_NUM_TCP_PCB_LISTEN         16
-#define MEMP_NUM_UDP_PCB                32
-#define MEMP_NUM_RAW_PCB                8
-#define MEMP_NUM_SYS_TIMEOUT            (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8)
-#define PBUF_POOL_SIZE                  64   /* loopback traffic only */
+/* Sizing note: this is a general-purpose multitasking OS — a dozen network
+ * apps may run at once, each with several sockets, and UDP datagrams run up to
+ * the full 64 KB. The protocol pools below are static arrays in the library's
+ * BSS (a few hundred KB at these counts, allocated once at load); packet
+ * payloads are dynamic and DMA-backed. */
+#define MEMP_NUM_TCP_PCB                1024 /* active TCP connections, all apps */
+#define MEMP_NUM_TCP_PCB_LISTEN         64   /* listening/server sockets */
+#define MEMP_NUM_UDP_PCB                256  /* UDP sockets + DHCP/DNS/mDNS */
+#define MEMP_NUM_RAW_PCB                32   /* SOCK_RAW (ping/traceroute) */
+#define MEMP_NUM_SYS_TIMEOUT            (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 64)
+#define PBUF_POOL_SIZE                  256  /* loopback traffic only */
 
-/* --- IP reassembly: each RX frame is one driver-owned custom pbuf, so one
- * IP fragment costs one pbuf. lwIP's default cap of 10 held pbufs limits a
- * reassembled datagram to ~10 x 1480 = 14.8 KB, silently dropping anything
- * larger. Size for a full 64 KB datagram: ceil(65535/1480) = 45 fragments.
- * RX-wrap headroom is ~784 (netdev_if.c), so this is comfortably covered. */
-#define IP_REASS_MAX_PBUFS              48
+/* Concurrent DNS lookups in flight (one table slot each), for a box where many
+ * apps resolve names at once. */
+#define DNS_TABLE_SIZE                  16
+
+/* --- IP reassembly (RX): each RX fragment is one driver-owned custom pbuf,
+ * held from arrival until its datagram completes or ages out, so this caps the
+ * fragments pinned across all in-progress reassemblies at once. One 64 KB
+ * datagram is ceil(65535/1480) = 45 fragments; this depth reassembles ~22 of
+ * them concurrently. It is bounded by the driver RX pool (RX_POOL_BUFS_MAX =
+ * 4096, ~2940 at this TCP_WND): raise RX_POOL_BUFS in genet.prefs before pushing
+ * this higher, or fragmented RX starves fresh RX. Over the cap lwIP evicts the
+ * oldest reassembly, so it is self-bounding. */
+#define IP_REASS_MAX_PBUFS              1024
 
 /* --- IP fragmentation (TX): symmetric to reassembly. ip4_frag emits one
- * PBUF_REF per fragment (MEMP_FRAG_PBUF pool), and the driver holds each
- * frame's pbuf ref until async TX-done — so every fragment of a datagram is
- * outstanding at once. lwIP's default pool of 15 caps a fragmented send at
- * 15 x 1480 = ~21.7 KB, returning ERR_MEM (-> ENOBUFS) above it. Size for a
- * full 64 KB datagram: ceil(65515/1480) = 45 fragments. The genet TX ring
- * (TX_DESCS = 256) covers the descriptor side. */
-#define MEMP_NUM_FRAG_PBUF              48
+ * PBUF_REF per fragment from the MEMP_FRAG_PBUF pool, and the netdev driver
+ * holds every frame's pbuf ref until async TX-done — so all fragments of every
+ * datagram still on the wire are outstanding together, and many apps blasting
+ * 64 KB UDP keep hundreds in flight. Exhausting the pool makes ip4_frag return
+ * ERR_MEM (-> ENOBUFS on the send). One 64 KB datagram is ceil(65515/1480) = 45
+ * fragments.
+ *
+ * The true per-NIC ceiling on outstanding fragments is downstream and smaller:
+ * the genet TX ring is hardware-fixed at TX_DESCS = 256 descriptors (~85
+ * fragment-frames at 3 BDs each), and the TX-done FIFO is ND_TXDONE_RING_N =
+ * 512. This pool sits well above both so it is never the artificial limit —
+ * backpressure then comes from the ring (i.e. the wire rate), which is correct.
+ * Sizing past ~1024 is inert; 2048 is headroom. */
+#define MEMP_NUM_FRAG_PBUF              2048
 
 /* --- TCP, sized for the wire-speed goal: window scaling negotiates, and
  * recovery is fast-retransmit only — lwIP emits SACKs but does not use
@@ -130,7 +161,12 @@
 #define TCP_SND_BUF                     (1024 * 1024)
 #define TCP_SND_QUEUELEN                ((4 * TCP_SND_BUF) / TCP_MSS)
 #define TCP_SNDLOWAT                    (8 * TCP_MSS)
-#define MEMP_NUM_TCP_SEG                TCP_SND_QUEUELEN
+/* Global tcp_seg pool, shared by every connection. TCP_SND_QUEUELEN is the
+ * per-pcb send-queue limit; the pool is sized to a few of those so several
+ * connections can fill their windows at once instead of one starving the rest.
+ * These are just seg descriptors — the queued payload is bounded by each
+ * connection's TCP_SND_BUF, not by this count. */
+#define MEMP_NUM_TCP_SEG                (4 * TCP_SND_QUEUELEN)
 #define LWIP_TCP_SACK_OUT               1
 /* init.c's sanity check requires PBUF_POOL to cover TCP_WND, assuming RX
  * allocates from it. Our RX buffers are driver-owned custom pbufs — the
@@ -139,6 +175,7 @@
 #define TCP_LISTEN_BACKLOG              1
 #define LWIP_TCP_KEEPALIVE              1
 #define SO_REUSE                        1
+#define SO_REUSE_RXTOALL                1   /* multicast/broadcast to every bound pcb */
 
 /* --- checksums: everything on at compile time, disabled per netif when
  * the driver's capabilities cover it (netdev_if.c) --- */

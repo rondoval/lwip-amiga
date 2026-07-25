@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.14)
 # and the stack harvests. The bsdsocket.library ABI version is separate: it keeps
 # major 4 (the AmiTCP/Roadshow contract) with its revision derived from this
 # version in src/CMakeLists.txt.
-project(lwip-amiga VERSION 1.0 LANGUAGES C)
+project(lwip-amiga VERSION 1.1 LANGUAGES C)
 
 # Amiga (m68k) binaries are built through the emu68-driver-stack superproject,
 # which provides the toolchain and emu68-common.

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 /*
-**  netdev.h — the netdev NIC driver ABI (SANA-II replacement), draft 1
+**  netdev.h — the netdev NIC driver ABI (SANA-II replacement), v1
 **
 **  The contract between a TCP/IP stack and a NIC driver on AmigaOS, designed
 **  for zero-copy DMA and hardware offloads.
@@ -80,8 +80,8 @@
 /* ABI version. NETDEV_CMD_ATTACH negotiates min(stack, driver); struct
  * growth and new ops append and are gated by the negotiated version.
  *
- * v1 is the frozen baseline. It carries reserved surface so the two open
- * pre-freeze features can land later WITHOUT another layout break:
+ * v1 carries reserved surface so the two open pre-freeze features can land
+ * later WITHOUT another layout break:
  *   - Jumbo frames: nda_MtuReq/ndc_Mtu negotiate the MTU; NDCF_RX_SCATTER +
  *     NDRF_SOP/NDRF_EOP reserve multi-buffer RX for frames past a single
  *     descriptor. A v1 driver may still cap the MTU at 1500.
@@ -109,6 +109,7 @@
 #define NETDEV_CMD_GET_STATS    (NETDEV_CMD_BASE + 0x06)  /* NetDevStats */
 #define NETDEV_CMD_GET_LINK     (NETDEV_CMD_BASE + 0x07)  /* NetDevLinkState */
 #define NETDEV_CMD_SET_MAC      (NETDEV_CMD_BASE + 0x08)  /* UBYTE[6] */
+#define NETDEV_CMD_GET_COUNTERS (NETDEV_CMD_BASE + 0x09)  /* NetDevCounterSet */
 
 #define NETDEV_IS_CMD(cmd)      ((((UWORD)(cmd)) & 0xFFE0) == NETDEV_CMD_BASE)
 
@@ -142,7 +143,13 @@ struct NetDevCaps
                                    bytes (0/1 = none). ndo_DmaAlloc output
                                    always satisfies it; this matters when the
                                    stack points segments INTO such a buffer */
-    UWORD   ndc_Pad;
+    UWORD   ndc_TxInFlightMax;  /* max TX cookies the driver can have outstanding
+                                   (submitted via ndo_TxSubmit, not yet completed
+                                   via nso_TxDone); the stack sizes its deferred TX
+                                   reclaim ring to cover this. Distinct from — and
+                                   larger than — ndc_TxRingSlots (the BD ring): a
+                                   completed cookie leaves the ring before it is
+                                   reclaimed. 0 = unknown (stack falls back). */
     ULONG   ndc_RxPoolBufs;     /* total driver RX buffers (ring + spares),
                                    sized at ATTACH from ring depth plus the
                                    stack's nda_RxHoldReq (driver-clamped);
@@ -266,9 +273,17 @@ struct NetDevDrvOps             /* driver provides, stack calls */
 {
     /* Submit a batch. Returns the number of descriptors accepted, from the
      * FRONT of the array (a short return means the TX ring is full — retry
-     * the tail after the next nso_TxDone). One hardware doorbell per call.
+     * the tail after the next nso_TxDone). Stages the descriptors on the ring
+     * but does NOT ring the hardware doorbell; the stack must call ndo_TxKick
+     * to publish them (one doorbell per ndo_TxKick, not per submit).
      * Every accepted cookie returns via nso_TxDone exactly once. */
     LONG    (*ndo_TxSubmit)(APTR drvctx, const struct NetDevTxDesc *descs, ULONG count);
+
+    /* Ring the batched TX doorbell: publish every descriptor staged by prior
+     * ndo_TxSubmit calls since the last kick, so the hardware starts reading
+     * them. The stack calls this once per locked burst — collapsing N
+     * per-frame doorbells into one. Required (a no-op if nothing was staged). */
+    VOID    (*ndo_TxKick)(APTR drvctx);
 
     /* Return one RX buffer to the driver. Callable from any task and cheap
      * (the driver batches refills internally); the caller serializes its
@@ -337,6 +352,12 @@ struct NetDevAttach
                                    buffers support and returns the actual value
                                    in ndc_Mtu (OUT). Mirrors the nda_RxHoldReq
                                    -> ndc_RxPoolBufs negotiation. */
+    UWORD   nda_RxBatch;        /* IN: max NetDevRxDesc the stack accepts per
+                                   nso_RxInput call — its per-hold verdict/GRO
+                                   array capacity. The driver caps its own RX
+                                   batch (flush granularity) to this so a whole
+                                   batch lands in one stack lock hold. 0 = driver
+                                   default. Port-owned; mirrors nda_RxHoldReq. */
     APTR    nda_StackCtx;       /* IN: first arg of every nso_* call */
     const struct NetDevStackOps *nda_StackOps;  /* IN */
     APTR    nda_DrvCtx;         /* OUT: first arg of every ndo_* call */
@@ -386,13 +407,26 @@ struct NetDevLinkState
 #define NDLF_FULL_DUPLEX    (1 << 1)
 
 /* NETDEV_CMD_GET_STATS (io_Data -> struct NetDevStats). Monotonic since
- * ATTACH. 64-bit big-endian counter pairs (no UQUAD in NDK 3.2). */
+ * ATTACH. 64-bit big-endian counter pairs. */
 
 struct NetDevU64
 {
     ULONG   ndu_Hi;
     ULONG   ndu_Lo;
 };
+
+/* The ABI stores 64-bit counters as a big-endian hi/lo ULONG pair. These are
+ * the sanctioned way to cross that split, on both sides of the boundary. */
+static inline void netdev_u64_set(struct NetDevU64 *out, unsigned long long value)
+{
+    out->ndu_Hi = (ULONG)(value >> 32);
+    out->ndu_Lo = (ULONG)value;
+}
+
+static inline unsigned long long netdev_u64_get(const struct NetDevU64 *v)
+{
+    return ((unsigned long long)v->ndu_Hi << 32) | (unsigned long long)v->ndu_Lo;
+}
 
 struct NetDevStats
 {
@@ -403,18 +437,60 @@ struct NetDevStats
     struct NetDevU64 nds_TxPackets;
     struct NetDevU64 nds_TxBytes;
     struct NetDevU64 nds_TxErrors;
-    struct NetDevU64 nds_TxDropped;     /* completed-unsent on STOP */
-    /* Loss-point split, each naming a distinct bottleneck: */
+    struct NetDevU64 nds_TxDropped;     /* accepted from the stack, never sent —
+                                           whatever the reason (quiesce, a
+                                           rejected descriptor, ...) */
+    /* Hardware loss, which the stack has no other way of learning. Both are
+     * frames the MAC saw and the driver never did; they are separate because
+     * they fail in different places and point at different fixes. */
     ULONG   nds_RxOverruns;     /* ring full, HW discarded (drain too slow) */
     ULONG   nds_RxFifoOvfl;     /* RBUF FIFO overflow (ring not absorbing bursts) */
-    ULONG   nds_RxPoolDry;      /* free pool empty (stack holding too many buffers) */
-    ULONG   nds_RxBackpressure; /* nso_RxInput refused delivery */
-    ULONG   nds_TxRejected;     /* TxSubmit accepted nothing (ring full) */
-    ULONG   nds_TxBad;          /* descriptors dropped by the TX sanity gate */
-    ULONG   nds_IrqRx;          /* RX-DONE interrupt count */
-    ULONG   nds_RxPoolFree;     /* instantaneous free-pool gauge (NOT monotonic) */
     ULONG   nds_Reserved[8];
 };
+
+/* NETDEV_CMD_GET_COUNTERS (io_Data -> struct NetDevCounterSet).
+ *
+ * The open-ended companion to NetDevStats: that struct is the fixed, portable
+ * set consumed programmatically (bsdsocket's interface query maps named fields
+ * onto it), this one is whatever diagnostic counters the driver happens to
+ * have, each carrying its own name so a renderer needs no per-driver
+ * knowledge.
+ *
+ * A driver is expected to report a counter here even when NetDevStats
+ * already has a field for it.
+ *
+ * Optional: a driver without it answers IOERR_NOCMD, and NSCMD_DEVICEQUERY
+ * lists the command when it is present.
+ *
+ * Two-call sizing, like NSCMD_DEVICEQUERY: call with ndcs_Max 0 to learn
+ * ndcs_Count, size the buffer with NETDEV_COUNTERSET_SIZE, call again. The
+ * driver fills min(Max, Count) entries and always reports the true Count.
+ */
+
+/* ndcn_Flags */
+#define NDCNTF_GAUGE    (1 << 0)    /* instantaneous, not monotonic: no rate */
+#define NDCNTF_WRAP32   (1 << 1)    /* free-running 32-bit hardware counter:
+                                       difference it, never total it (a MAC
+                                       byte counter wraps in ~34 s at 1 Gb/s) */
+#define NDCNTF_ERROR    (1 << 2)    /* loss/error: a renderer may highlight it */
+
+struct NetDevCounter
+{
+    struct NetDevU64 ndcn_Value;
+    CONST_STRPTR     ndcn_Name;     /* driver rodata; valid while the unit is
+                                       open — the caller must not free it */
+    UWORD            ndcn_Flags;    /* NDCNTF_* */
+    UWORD            ndcn_Pad;
+};
+
+struct NetDevCounterSet
+{
+    UWORD   ndcs_Max;       /* [in]  entries ndcs_Counters can hold */
+    UWORD   ndcs_Count;     /* [out] entries the driver has; may exceed ndcs_Max */
+    struct NetDevCounter ndcs_Counters[1];   /* [out] min(Max, Count) entries */
+};
+
+#define NETDEV_COUNTERSET_SIZE(n)   (4UL + (ULONG)(n) * 16UL)
 
 /* ------------------------------------------------------------------------ */
 /* layout freeze */
@@ -422,11 +498,13 @@ NETDEV_ABI_ASSERT(sizeof(struct NetDevSg) == 8);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevTxDesc) == 18);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevRxDesc) == 18);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevCaps) == 40);
-NETDEV_ABI_ASSERT(sizeof(struct NetDevAttach) == 62);
+NETDEV_ABI_ASSERT(sizeof(struct NetDevAttach) == 64);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevRxFilter) == 8);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevCoalesce) == 8);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevLinkState) == 4);
-NETDEV_ABI_ASSERT(sizeof(struct NetDevStats) == 128);
+NETDEV_ABI_ASSERT(sizeof(struct NetDevStats) == 104);
+NETDEV_ABI_ASSERT(sizeof(struct NetDevCounter) == 16);
+NETDEV_ABI_ASSERT(sizeof(struct NetDevCounterSet) == NETDEV_COUNTERSET_SIZE(1));
 
 #if defined(__GNUC__)
 #pragma pack()

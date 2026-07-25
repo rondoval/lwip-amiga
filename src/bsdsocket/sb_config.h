@@ -23,6 +23,13 @@
  *                                      "name.DOMAIN" when the bare lookup fails
  *   VLAN     = vid[,pcp]               in-band 802.1Q (vid 1..4094, pcp 0..7);
  *                                      absent = untagged
+ *   MDNS     = yes | no                advertise HOSTNAME.local over mDNS
+ *                                      (default yes)
+ *   MDNS_SERVICE = _ssh._tcp 22 [name] DNS-SD service to advertise (repeatable,
+ *                                      up to SB_CFG_MDNS_MAX); the instance
+ *                                      name defaults to the advertised host.
+ *                                      More can be registered while running —
+ *                                      see the `mdns` command / mdns_ctl.h
  *   NETWORK  = name number             networks-database entry (repeatable,
  *                                      up to SB_CFG_NETWORKS_MAX), /etc/networks
  *                                      notation ("homelan 192.168.0"); entries
@@ -39,16 +46,27 @@
 #include <exec/types.h>
 
 #include <lwip/ip_addr.h>
+#include <mdns_ctl.h> /* service type/name field sizes, shared with the tool */
 
 #define SB_CFG_DEVICE_MAX   64
 #define SB_CFG_HOSTNAME_MAX 64
 #define SB_CFG_NETWORKS_MAX 8
 #define SB_CFG_NETNAME_MAX  32
+#define SB_CFG_MDNS_MAX     MDNSCTL_MAX_SERVICES
 
 struct SbCfgNetwork
 {
     char  name[SB_CFG_NETNAME_MAX];
     ULONG net; /* classful network number, host order (/etc/networks) */
+};
+
+/* One MDNS_SERVICE line, unvalidated: sb_mdns.c owns the "_base._tcp" split
+ * (it is the same parse the control port's ADD needs). */
+struct SbCfgMdnsService
+{
+    char  type[MDNSCTL_TYPE_MAX];
+    char  name[MDNSCTL_NAME_MAX]; /* "" = use the advertised hostname */
+    UWORD port;
 };
 
 struct SbNetConfig
@@ -63,8 +81,11 @@ struct SbNetConfig
     char       cfg_Hostname[SB_CFG_HOSTNAME_MAX];
     char       cfg_Domain[SB_CFG_HOSTNAME_MAX]; /* resolver search domain; "" = none */
     LONG       cfg_VlanTci;   /* -1 = no VLAN; else (pcp<<13)|(vid&0xFFF) */
+    BOOL       cfg_Mdns;      /* advertise HOSTNAME.local */
     struct SbCfgNetwork cfg_Networks[SB_CFG_NETWORKS_MAX];
     ULONG      cfg_NumNetworks;
+    struct SbCfgMdnsService cfg_MdnsServices[SB_CFG_MDNS_MAX];
+    ULONG      cfg_NumMdnsServices;
 };
 
 /* Defaults, then overrides from ENV:netstack.prefs. Needs a Process (DOS
