@@ -22,9 +22,45 @@ below, where each driver can report whatever counters fit its hardware. The stan
 block stays small and the same for every driver. `netdev-stats` already uses the new
 command, so nothing changes for anyone using the tools.
 
+### The netdev interface got a tidy-up alongside the speed work
+
+Transmit completion is now signalled in batches (a new `ndo_TxKick`), and two buffer sizes
+the stack and driver used to assume about each other are now negotiated at attach. 
+
 ---
 
 ## New features
+
+### Faster TCP upload — now near line rate
+
+TCP upload climbed from **681 to 906 Mb/s**, so uploads and downloads now both run close
+to the wire. Three send-path optimisations did it:
+
+- **Fewer trips for acknowledgements.** Incoming ACKs for data we sent are now merged the
+  same way received data already was, so a burst of them is handled in one pass instead of
+  one at a time.
+- **One "go" signal per burst.** The driver is told to start transmitting once per batch
+  of packets instead of once per packet, cutting a slow hardware write out of the hot path.
+- **Reclaiming sent packets off the critical path.** Finished transmit buffers are freed
+  without competing for the lock the application uses to send, removing a stall between
+  the two.
+
+The stack is now wire-bound in both directions on gigabit: further work on the network
+path frees CPU for the application rather than adding Mb/s.
+
+Measured with `sockbench` on a local wired gigabit network (release build, single stream,
+against `genet.device` 4.0):
+
+| Test | Speed |
+|---|---|
+| Download (TCP) | **945 Mb/s** |
+| Upload (TCP) | **906 Mb/s** |
+| Download (UDP, 64 KB chunks) | **957 Mb/s** |
+| Upload (UDP, 64 KB chunks) | **957 Mb/s** |
+
+Over a real internet connection (measured with AmiSpeedTest), the stack reached
+**854 Mb/s down / 84 Mb/s up** — matching 841/82 Mb/s from a PC on the same line via
+speedtest.net.
 
 ### Reachable by name: mDNS and DNS-SD
 
@@ -79,8 +115,8 @@ socket API, installed to `LIBS:`.
 
 ### Performance
 
-Measured with `sockbench` on a local wired gigabit network (release build, single stream,
-against `genet.device` 4.0):
+Measured with `sockbench` on a local wired gigabit network (
+against pre-release `genet.device` 4.0):
 
 | Test | Speed | % of line rate |
 |---|---|---|

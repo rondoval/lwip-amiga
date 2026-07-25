@@ -24,8 +24,8 @@ A fast, modern TCP/IP stack for classic AmigaOS 3.2.
 
 ## Why use it
 
-- **Fast.** On a local gigabit network, lwip-amiga has measured up to 942 Mb/s
-  downloading and 681 Mb/s uploading over TCP, and up to 961 Mb/s over UDP — several
+- **Fast.** On a local gigabit network, lwip-amiga has measured up to 945 Mb/s
+  downloading and 906 Mb/s uploading over TCP, and up to 957 Mb/s over UDP — several
   times what older Amiga TCP/IP stacks manage on the same hardware. See
   [Performance](#performance) below for the full numbers and what they mean.
 - **Modern protocol support.** IPv4, TCP, UDP, ICMP, DHCP, DNS (forward and reverse),
@@ -100,16 +100,16 @@ Measured with `sockbench` on the release build, over a local wired gigabit netwo
 the internet, so your real-world speed also depends on your Amiga, your network card, and
 what's on the other end of the connection.
 
-| Test | Speed | % of line rate |
-|---|---|---|
-| Download (TCP) | 942 Mb/s | 94% |
-| Upload (TCP) | 681 Mb/s | 68% |
-| Download (UDP) | 944 Mb/s | 94% |
-| Upload (UDP, 64 KB chunks) | 961 Mb/s | 96% |
+| Test | Speed |
+|---|---|
+| Download (TCP) | 945 Mb/s |
+| Upload (TCP) | 906 Mb/s |
+| Download (UDP, 64KB chunks) | 957 Mb/s |
+| Upload (UDP, 64 KB chunks) | 957 Mb/s |
 
 Over a real internet connection (measured with AmiSpeedTest), lwip-amiga reached
-847 Mb/s down and 69 Mb/s up — this network's full ISP line rate in both directions. On
-that link the stack saturated the connection; the ISP, not the Amiga, set the ceiling.
+854 Mb/s down and 84 Mb/s up — matching 841/82 Mb/s from a PC on the same line via
+speedtest.net.
 
 That comes from a few optimizations under the hood:
 
@@ -149,9 +149,8 @@ list, the stack is configured entirely through `netstack.prefs`, above.
   (for example, over a flaky link or a long-distance internet path), lwip-amiga's TCP
   falls back to a slow, full timeout before resending, rather than a fast selective
   resend. This isn't an issue on a clean connection, such as a normal wired LAN.
-- **Upload has more headroom than download.** TCP upload currently runs at about 68% of
-  line rate; the bottleneck is the driver's packet-submission path rather than the stack
-  itself. This will be optimized in future releases.
+- **Both directions run near line rate.** TCP upload and download are both close to the
+  wire on gigabit.
 - **A handful of advanced or legacy `bsdsocket.library` calls aren't implemented**:
   Roadshow's interface-configuration, routing, and monitoring calls (the read-only
   interface *query* calls used by `netinfo` above do work), the low-level
