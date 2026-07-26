@@ -194,7 +194,7 @@ add_executable(netdev-stats
     netdev-stats/netdev-stats.c
 )
 
-target_compile_options(netdev-stats PRIVATE -O2 ${LWIP_WARN})
+target_compile_options(netdev-stats PRIVATE -Os ${LWIP_WARN})
 
 target_link_libraries(netdev-stats
     PRIVATE
@@ -214,7 +214,7 @@ add_executable(sockbench
     sockbench/sockbench.c
 )
 
-target_compile_options(sockbench PRIVATE -O2 ${LWIP_WARN})
+target_compile_options(sockbench PRIVATE -O3 ${LWIP_WARN})
 
 # sockbench is a developer benchmark — built for local HW testing but deliberately
 # not installed, so it stays out of the shipped package.
@@ -227,7 +227,7 @@ add_executable(netinfo
     netinfo/netinfo.c
 )
 
-target_compile_options(netinfo PRIVATE -O2 ${LWIP_WARN})
+target_compile_options(netinfo PRIVATE -Os ${LWIP_WARN})
 
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/netinfo
@@ -242,7 +242,7 @@ add_executable(mdns
     mdns/mdns.c
 )
 
-target_compile_options(mdns PRIVATE -O2 ${LWIP_WARN})
+target_compile_options(mdns PRIVATE -Os ${LWIP_WARN})
 
 target_include_directories(mdns PRIVATE ${CMAKE_SOURCE_DIR}/include)
 

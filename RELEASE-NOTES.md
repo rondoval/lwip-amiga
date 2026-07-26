@@ -1,3 +1,30 @@
+# Release notes — lwip-amiga 1.2
+
+Changes since v1.1.
+
+---
+
+## Breaking changes
+
+None.
+
+---
+
+## Build & tooling
+
+### GCC 16.1 build portability
+
+`netstack` and `bsdsocket_library` now build cleanly under GCC 16.1. No
+behavior change:
+
+- `ndif_pseudo_sum`'s read of the packed `ip_hdr`'s `src` field is now
+  wrapped in a scoped `-Waddress-of-packed-member` pragma. The address is
+  always even here (14-/18-byte Ethernet header + a 12-byte fixed offset into
+  the IP header, both even), which m68k reads natively — the warning doesn't
+  reflect a real alignment risk on this target.
+
+---
+
 # Release notes — lwip-amiga 1.1
 
 Changes since v1.0.
