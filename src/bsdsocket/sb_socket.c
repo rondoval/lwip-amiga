@@ -229,20 +229,27 @@ void sb_peer_ip(struct SbSocket *s, ULONG *addr, UWORD *port)
     }
 }
 
+/* 4.4BSD sowriteable(), in its order. The !connected case is the one that
+ * matters: for a connection-required protocol BSD needs SS_ISCONNECTED, so a
+ * TCP socket whose connect() never got off the ground (no route: tcp_connect
+ * returned ERR_RTE, nothing was ever sent) is NOT ready. Reporting it ready
+ * makes a select-based reachability probe answer "connected" the instant the
+ * link is down — the opposite of the truth. Ready-on-error and
+ * ready-on-CANTSENDMORE stay: there a write really does fail immediately. */
 BOOL sb_sock_writable(struct SbSocket *s)
 {
     KprintfT("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
     if (s->err != 0)
+        return TRUE; /* so_error pending: write reports it at once */
+    if (s->type != SBT_TCP)
         return TRUE;
-    if (s->type == SBT_TCP)
-    {
-        if (s->connecting)
-            return FALSE;
-        if (!s->connected || s->pcb.tcp == NULL)
-            return TRUE; /* write attempt fails immediately — that is "ready" */
-        return tcp_sndbuf(s->pcb.tcp) > 0;
-    }
-    return TRUE;
+    if (s->connecting)
+        return FALSE;
+    if (s->pcb.tcp == NULL || s->shut_wr)
+        return TRUE; /* CANTSENDMORE: write attempt fails immediately */
+    if (!s->connected)
+        return FALSE; /* never connected — no send can be attempted */
+    return tcp_sndbuf(s->pcb.tcp) > 0;
 }
 
 /* ------------------------------------------------------- TCP callbacks --- */

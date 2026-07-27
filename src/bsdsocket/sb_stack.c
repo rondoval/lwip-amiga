@@ -424,7 +424,10 @@ out:
 
     Kprintf("[bsdsocket] %s: exiting\n", __func__);
     ctx->root->stackTask = NULL;
-    Signal(parent, SIGBREAKF_CTRL_F);
+    /* re-read: the startup handshake went to whoever called sb_stack_start,
+     * but the exit handshake belongs to whoever called sb_stack_stop, and
+     * that is a different task in general — the starter may be long gone */
+    Signal(ctx->parent, SIGBREAKF_CTRL_F);
 }
 
 #define SB_STACK_STACK_BYTES 32768
@@ -471,6 +474,12 @@ void sb_stack_stop(struct SocketBase *root)
     if (root->stackTask == NULL)
         return;
 
+    /* Redirect the exit handshake at ourselves before asking for it. The
+     * starter's task is what ctx->parent holds until now, and the stopper is
+     * rarely the starter — expunge runs in whichever task ran low on memory.
+     * Signalling the stale entry would both hang us here and poke a Task
+     * structure that may already be freed. */
+    sb_stack.parent = FindTask(NULL);
     SetSignal(0UL, SIGBREAKF_CTRL_F);
     Signal(root->stackTask, SIGBREAKF_CTRL_C);
     while (root->stackTask != NULL)

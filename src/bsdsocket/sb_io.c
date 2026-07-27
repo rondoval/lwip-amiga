@@ -100,6 +100,17 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
                 return ret;
             continue;
         }
+        if (!s->connected)
+        {
+            /* Never connected — a connect() that never left the ground (no
+             * route) leaves a live pcb in CLOSED. tcp_write() there trips an
+             * lwIP argument guard; BSD says ENOTCONN. Mirrors
+             * sb_sock_writable, which reports not-writable in this state. */
+            netstack_unlock();
+            if (sent > 0)
+                return sent;
+            return sb_fail(base, SB_ENOTCONN);
+        }
 
         ULONG avail = tcp_sndbuf(s->pcb.tcp);
         if (avail == 0)
