@@ -1,3 +1,56 @@
+# Release notes — lwip-amiga 1.2
+
+Changes since v1.1.
+
+---
+
+## Breaking changes
+
+None.
+
+---
+
+## Bug fixes / Improvements
+
+### The library no longer tears the network down when apps close it
+
+Some programs open and close `bsdsocket.library` around every individual
+call instead of holding it open, which routinely drops the library's open
+count to zero. Previously that could let the library be expunged between
+calls — dropping the DHCP lease, detaching the network driver, and unloading
+code the driver's background task was still calling into. The library now
+refuses to expunge while its network stack is running, the same way it
+already refuses while callers still have it open.
+
+### Fixed a false "online" reading from connectivity checks
+
+A `select()`/`WaitSelect()` check for whether a socket is ready to write
+could report a TCP socket as ready before it had actually connected — in
+particular right after a `connect()` that failed immediately because there
+was no route (no DHCP lease, cable unplugged). Software that uses this
+pattern to check connectivity could report the Amiga as online while it had
+no network at all. Writability now correctly waits for the connection to
+complete, matching standard BSD socket behavior. `send()` on such a socket
+also now fails cleanly with `ENOTCONN` instead of an unexpected low-level
+error.
+
+---
+
+## Build & tooling
+
+### GCC 16.1 build portability
+
+`netstack` and `bsdsocket_library` now build cleanly under GCC 16.1. No
+behavior change:
+
+- `ndif_pseudo_sum`'s read of the packed `ip_hdr`'s `src` field is now
+  wrapped in a scoped `-Waddress-of-packed-member` pragma. The address is
+  always even here (14-/18-byte Ethernet header + a 12-byte fixed offset into
+  the IP header, both even), which m68k reads natively — the warning doesn't
+  reflect a real alignment risk on this target.
+
+---
+
 # Release notes — lwip-amiga 1.1
 
 Changes since v1.0.

@@ -58,7 +58,14 @@ static inline ULONG ndif_ip_offset(const UBYTE *frame, ULONG len)
 static inline UWORD ndif_pseudo_sum(const struct ip_hdr *ip, ULONG start)
 {
     ULONG sum = start;
+    /* ip_hdr is a lwIP PACK_STRUCT; src/dst always land on an even offset
+     * here (14- or 18-byte Ethernet header + 12-byte fixed offset into the
+     * IP header, both even), which m68k reads natively -- the packed-member
+     * warning doesn't reflect a real alignment risk on this target. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Waddress-of-packed-member"
     const UWORD *addr = (const UWORD *)&ip->src;
+#pragma GCC diagnostic pop
     for (int i = 0; i < 4; i++)
         sum += addr[i];
     sum += IPH_PROTO(ip);

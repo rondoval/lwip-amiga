@@ -56,6 +56,20 @@ ULONG LibExpunge(struct SocketBase *base asm("a6"))
         return 0;
     }
 
+    /* A running stack is not expungeable. Once sb_stack_start has brought the
+     * netif up we own a DHCP lease, a netdev ATTACH that handed the driver
+     * function pointers into this code, and an interface every other opener
+     * expects to still be there. Apps that open and close the library around
+     * each individual call may drop lib_OpenCnt to zero constantly and letting
+     * exec expunge in those windows would tear the network down under them, 
+     * unloading code the driver's unit task still calls.
+     * Teardown happens only when the stack never started, or failed to. */
+    if (root->stackTask != NULL)
+    {
+        root->libNode.lib_Flags |= LIBF_DELEXP;
+        return 0;
+    }
+
     /* orphaned ReleaseSocket parkings die with the library (the pool frees
      * their memory wholesale; the pcbs die with the stack) */
     sb_stack_stop(root);

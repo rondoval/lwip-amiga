@@ -59,9 +59,15 @@ table included — so every opening task gets its own `errno`, fd table, wait si
   driver selection from `DEVS:Networks/`, DHCP or a static address, DNS, hostname — flat
   `KEY = VALUE`, every key optional, missing file = DHCP on `networks/genet.device`
   unit 0), initializes `netstack`, attaches the configured driver over the netdev ABI,
-  brings the interface up, then ticks `sys_check_timeouts()` every 100 ms until library
-  expunge. It runs at **priority 10** (above the dynamic-scheduler band, matching the
-  driver's unit task) so it is not starved by CPU-bound application tasks.
+  brings the interface up, then ticks `sys_check_timeouts()` every 100 ms. It runs at
+  **priority 10** (above the dynamic-scheduler band, matching the driver's unit task) so
+  it is not starved by CPU-bound application tasks.
+- **A running stack is never expunged** (`main.c` `LibExpunge`). Once the stack task
+  exists the library refuses expunge and defers with `LIBF_DELEXP`, exactly as it does
+  while openers remain. `lib_OpenCnt` legitimately reaches zero all the time — apps that
+  open and close the library around each call do it every few seconds — and expunging
+  there would drop the DHCP lease, detach the driver, and unload code the driver's unit
+  task still calls through `nda_StackOps`. `sb_stack_stop()` therefore only runs for a stack that never started.
 
 The API surface is grouped topically: lifecycle/control (`sb_api.c`), the data path
 (`sb_io.c`), options and events (`sb_sockopt.c`), `WaitSelect` (`sb_select.c`), errno
