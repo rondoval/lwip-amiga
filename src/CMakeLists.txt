@@ -56,6 +56,18 @@ add_library(netstack STATIC
 
 target_compile_options(netstack PRIVATE -O3 ${LWIP_WARN})
 
+# Vendored upstream lwIP; we do not patch it.  At -O3 GCC unrolls the option
+# loops in dhcp_discover/select/renew/reboot but cannot bound options_out_len
+# (dhcp_create_msg hands it back through a pointer out-param), so it flags the
+# last unrolled write as landing exactly at the end of dhcp_msg.options.  The
+# reported offset always equals DHCP_OPTIONS_LEN, whatever that is set to --
+# it tracks the array end, not a specific overflow.  The one genuinely
+# reachable overrun here (dhcp_discover appends the hostname before the
+# parameter request list, and the hostname clamp does not reserve room for it)
+# is fixed by sizing DHCP_OPTIONS_LEN in port/amiga/include/lwipopts.h.
+set_source_files_properties(${LWIP_DIR}/src/core/ipv4/dhcp.c PROPERTIES
+    COMPILE_OPTIONS "-Wno-stringop-overflow")
+
 target_include_directories(netstack
     PUBLIC
         ${CMAKE_SOURCE_DIR}/port/amiga/include
