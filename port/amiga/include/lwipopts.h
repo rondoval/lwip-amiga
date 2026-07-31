@@ -53,6 +53,19 @@
 #define LWIP_NETIF_LOOPBACK             1   /* 127.0.0.1 for local apps */
 #define LWIP_HAVE_LOOPIF                1
 #define LWIP_NETIF_HOSTNAME             1   /* netstack.prefs HOSTNAME; DHCP option 12 */
+
+/* Outgoing DHCP option buffer (struct dhcp_msg.options). lwIP's default is the
+ * 68-byte DHCP_MIN_OPTIONS_LEN, which is NOT enough once option 12 (hostname)
+ * is enabled above: dhcp_discover() appends the hostname BEFORE the parameter
+ * request list, but dhcp_option_hostname()'s clamp only reserves 3 bytes (its
+ * own option header + the trailer) -- not the 6 bytes the request list still
+ * needs.  With a long hostname that runs off the end of the pbuf.  Worst case
+ * for dhcp_discover(): 3 (message type) + 4 (max msg size) + 2 + 63 (hostname,
+ * capped by SB_CFG_HOSTNAME_MAX in sb_config.h) + 2 + 4 (parameter request
+ * list) + 1 (trailer) = 79, padded to 80.  96 leaves headroom.
+ * Costs 28 bytes on a transient pbuf; dhcp_option_trailer() pbuf_realloc()s
+ * down to the actual content, so the packet on the wire is unchanged. */
+#define DHCP_OPTIONS_LEN                96
 #define LWIP_NETIF_STATUS_CALLBACK      1
 #define LWIP_NETIF_LINK_CALLBACK        1
 #define LWIP_SUPPORT_CUSTOM_PBUF        1   /* RX buffers are driver-owned */

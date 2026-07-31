@@ -1,3 +1,38 @@
+# Release notes — lwip-amiga 1.3
+
+Changes since v1.2.
+
+---
+
+## Breaking changes
+
+None.
+
+---
+
+## Bug fixes / Improvements
+
+### Fixed a buffer overrun when the hostname is long
+
+The DHCP client builds its outgoing messages in a fixed-size option buffer
+sized, by default, to the 68-byte protocol minimum. That is not enough once
+the hostname option is included: when requesting a lease the hostname is
+written *before* the parameter request list, but the hostname length check
+only reserved room for its own option header and the end marker — not for
+the request list that still had to follow. A hostname of roughly 53
+characters or more therefore wrote a few bytes past the end of the message
+buffer, corrupting whatever the network stack had allocated next.
+
+The buffer is now sized for the longest hostname `netstack.prefs` accepts
+(63 characters), with headroom. The DHCP packets actually put on the wire
+are unchanged — the message is trimmed to its real content length before
+sending.
+
+Only reachable with a long `HOSTNAME` in `netstack.prefs`; the default
+(`amiga`) is nowhere near the limit.
+
+---
+
 # Release notes — lwip-amiga 1.2
 
 Changes since v1.1.
