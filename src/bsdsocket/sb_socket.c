@@ -112,12 +112,15 @@ void sb_wake(struct SbSocket *s)
      * SBTC_SIGIOMASK): apps park in Wait() on it instead of WaitSelect, so
      * every readiness change must deliver it or they hang. Spurious
      * delivery is fine, SIGIO consumers re-poll. sigEventMask is delivered
-     * on the same rule. */
+     * on the same rule. Sockets default into SIGIO delivery (asyncIo, see
+     * sb_base.h); FIOASYNC(0) opts one out. The sigBit wake is
+     * unconditional — blocking calls depend on it. */
     for (ULONG i = 0; i < SB_SOCK_OWNERS; i++)
     {
         struct SocketBase *b = s->owners[i].base;
         if (b != NULL && b->task != NULL)
-            Signal(b->task, (1UL << b->sigBit) | b->sigIoMask | b->sigEventMask);
+            Signal(b->task, (1UL << b->sigBit) | (s->asyncIo ? b->sigIoMask : 0) |
+                                b->sigEventMask);
     }
 }
 
@@ -494,6 +497,7 @@ struct SbSocket *sb_sock_alloc(struct SocketBase *base, SbSockType type)
     s->rootBase = root;
     s->refs = 1;
     s->type = (UBYTE)type;
+    s->asyncIo = 1; /* SIGIO delivery defaults on; FIOASYNC(0) opts out */
     _NewMinList(&s->dgrams);
     _NewMinList(&s->acceptq);
     return s;

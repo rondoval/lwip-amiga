@@ -200,6 +200,7 @@ struct sb_ip_mreq
 #define SB_FD_ERROR 0x20
 #define SB_FD_CLOSE 0x40
 
+#define SB_FIOASYNC 0x8004667DUL
 #define SB_FIONBIO 0x8004667EUL
 #define SB_FIONREAD 0x4004667FUL
 
@@ -477,6 +478,11 @@ struct SbSocket
     UBYTE rxeof;
     UBYTE shut_rd;
     UBYTE shut_wr;
+    /* FIOASYNC: this socket participates in SIGIO (SBTC_SIGIOMASK) delivery.
+     * Defaults ON, unlike BSD: on Amiga arming the mask is itself the opt-in,
+     * and AmiTCP-era apps park in Wait() on it without ever calling FIOASYNC
+     * (see sb_wake). FIOASYNC(0) opts a socket back out. */
+    UBYTE asyncIo;
 
     UBYTE lingerOn;  /* SO_LINGER; on + time 0 => abort (RST) on close */
     UBYTE forceRst;  /* linger deadline expired: teardown must abort (RST) */

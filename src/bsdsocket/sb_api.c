@@ -535,6 +535,9 @@ LONG bsd_IoctlSocket(LONG sock asm("d0"), ULONG req asm("d1"), APTR argp asm("a0
     case SB_FIONBIO:
         s->nonblock = (*(LONG *)argp != 0);
         return 0;
+    case SB_FIOASYNC:
+        s->asyncIo = (*(LONG *)argp != 0);
+        return 0;
     case SB_FIONREAD:
     {
         LONG n = 0;
