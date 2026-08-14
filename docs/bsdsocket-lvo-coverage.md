@@ -69,7 +69,7 @@ All 46 are implemented.
 | `getsockopt` | −96 | ✅ | ✅ done | |
 | `getsockname` | −102 | ✅ | ✅ done | |
 | `getpeername` | −108 | ✅ | ✅ done | TCP/UDP read the live remote from the pcb; RAW sockets always return `ENOTCONN`. |
-| `IoctlSocket` | −114 | ✅ | ✅ done | `FIONBIO`, `FIONREAD`, `FIOASYNC` (per-socket SIGIO toggle, defaults on — arming `SBTC_SIGIOMASK` is the Amiga-side opt-in), `SIOCATMARK`. |
+| `IoctlSocket` | −114 | ✅ | ✅ done | `FIONBIO`, `FIONREAD`, `FIOASYNC` (per-socket SIGIO toggle, defaults on — arming `SBTC_SIGIOMASK` is the Amiga-side opt-in), `SIOCATMARK`, and the ARP table quartet `SIOCSARP`/`SIOCDARP`/`SIOCGARP` plus whole-table `SIOCGARPT` (classic 4.3BSD/AmiTCP numbering; codes and `struct arptabreq` published in `include/net/if_arp_ioctl.h` — Roadshow's netinclude has `struct arpreq` but no codes). `ATF_PUBL`/`ATF_USETRAILERS` are rejected with `EINVAL`, never supported. |
 | `CloseSocket` | −120 | ✅ | ✅ done | |
 | `WaitSelect` | −126 | ✅ | ✅ done | Waits on socket readiness, the caller's signal mask, the break mask and a real timeout. `exceptfds` reports pending out-of-band data (an unconsumed urgent mark), per BSD. |
 | `SetSocketSignals` | −132 | ✅ | ✅ done | |

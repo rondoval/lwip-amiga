@@ -32,6 +32,25 @@ conformance score from 138/142 (4 skips) to a clean **142/142**:
 The protocol half lives in the lwIP fork behind a new `LWIP_TCP_URG` option
 (off upstream, on here) with a dedicated host regression harness in `test/urg/`.
 
+### `Arp` command + SIOC*ARP ioctls
+
+A port of 4.3BSD arp(8) with a Roadshow-compatible template: `Arp ALL` lists the
+ARP table (pending entries show as `(incomplete)`; `NONAMES` skips reverse DNS),
+`Arp <host>` shows one entry, `Arp SET <host> <mac>` pins one (permanent unless
+`TEMP`), `Arp DELETE <host>` removes one of any state, and `FILE` loads a batch.
+Published/proxy ARP is not supported by this stack: Roadshow's `PUBLISH`/`PROXY`
+switches are omitted from the template, a `pub` token in a batch file is rejected
+with a per-line error, and the library refuses `ATF_PUBL` with `EINVAL`.
+
+Underneath, `IoctlSocket()` gains the classic `SIOCSARP`/`SIOCDARP`/`SIOCGARP`
+requests plus the whole-table `SIOCGARPT` (AmiTCP-style) — published in the new
+`include/net/if_arp_ioctl.h` for third-party use, since Roadshow's netinclude
+ships `struct arpreq` but no request codes. The ARP table grew from 10 to 32
+entries with static-entry support (lwIP fork additions: pending-aware
+`etharp_get_entry_info()`, any-state `etharp_remove_entry()`, dynamic-or-static
+`etharp_add_entry()`), and manual ARP changes now flush the TX fast path's L2
+header cache immediately instead of riding out the 64-frame revalidation window.
+
 ### FIOASYNC
 
 `IoctlSocket(FIOASYNC)` is now a real per-socket toggle for SIGIO

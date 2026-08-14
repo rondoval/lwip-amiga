@@ -107,6 +107,7 @@ add_executable(bsdsocket_library
     bsdsocket/sb_gai.c
     bsdsocket/sb_rdns.c
     bsdsocket/sb_netstat.c
+    bsdsocket/sb_arp.c
     bsdsocket/end.c
 )
 
@@ -158,6 +159,10 @@ set_target_properties(bsdsocket_library PROPERTIES
 # (Developer/include/devices/ — see the root CMakeLists packaging step), hence
 # the devices/ path: it is a device ABI.
 install(FILES ${CMAKE_SOURCE_DIR}/include/devices/netdev.h DESTINATION include/devices)
+
+# SIOC*ARP request codes for IoctlSocket — the NDK netinclude has struct arpreq
+# but no codes. Ships in the SDK (Developer/include/net/) for third parties.
+install(FILES ${CMAKE_SOURCE_DIR}/include/net/if_arp_ioctl.h DESTINATION include/net)
 
 add_library(netdev_headers INTERFACE)
 target_include_directories(netdev_headers
@@ -304,6 +309,21 @@ install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/netshutdown
     DESTINATION C
     RENAME NetShutdown
+)
+
+# --- Arp: ARP table display and control --------------------------------------
+# 4.3BSD arp(8) ported onto the library's SIOC*ARP IoctlSocket requests
+# (include/net/if_arp_ioctl.h, shared with sb_arp.c). Roadshow-compatible
+# template minus the PUBLISH/PROXY switches (unsupported by the stack).
+add_executable(arp
+    arp/arp.c
+)
+target_compile_options(arp PRIVATE -Os ${LWIP_WARN})
+target_include_directories(arp PRIVATE ${CMAKE_SOURCE_DIR}/include)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/arp
+    DESTINATION C
+    RENAME arp
 )
 
 # Sample interface config. Staged under Storage/NetInterfaces (the inactive

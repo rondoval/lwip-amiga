@@ -249,4 +249,10 @@ void netdevif_tx_reclaim(struct NetdevIf *ndi);
 APTR netdevif_dma_alloc(struct NetdevIf *ndi, ULONG size, ULONG align);
 void netdevif_dma_free(struct NetdevIf *ndi, APTR ptr, ULONG size);
 
+/* Drop the whole L2 header cache (and the pending snoop prime). Needed
+ * whenever an IP->MAC binding changes underneath it: link transitions and
+ * manual ARP table mutations (SIOCSARP/SIOCDARP). Caller holds the core
+ * lock; the cache refills lazily through the slow path. */
+void netdevif_hh_invalidate(struct NetdevIf *ndi);
+
 #endif /* LWIPAMIGA_NETDEV_IF_H */

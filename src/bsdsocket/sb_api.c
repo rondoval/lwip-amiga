@@ -564,6 +564,11 @@ LONG bsd_IoctlSocket(LONG sock asm("d0"), ULONG req asm("d1"), APTR argp asm("a0
         *(LONG *)argp = at;
         return 0;
     }
+    case SB_SIOCSARP:
+    case SB_SIOCDARP:
+    case SB_SIOCGARP:
+    case SB_SIOCGARPT:
+        return sb_arp_ioctl(base, req, argp);
     default:
         return sb_fail(base, SB_EINVAL);
     }

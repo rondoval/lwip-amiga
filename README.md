@@ -142,6 +142,17 @@ See [RELEASE-NOTES.md](RELEASE-NOTES.md) for more on what's behind these numbers
   timeout or Ctrl-C it is recalled and the network keeps running. Opening
   `bsdsocket.library` afterwards starts a fresh stack. Note that `LibOpen` returns
   failure while a shutdown is pending, so programs cannot sneak in mid-teardown.
+- **`Arp`** — displays, sets and deletes ARP table entries, ported from 4.3BSD arp(8)
+  (template `-a=ALL/S,-d=DELETE/S,-s=SET/S,HOSTNAME,ADDRESS,TEMP/S,-f=FILE/K,
+  -n=NONAMES/S=NUMBERS/S`). `Arp ALL` lists the table (`NONAMES` skips the reverse-DNS
+  lookups, useful without a reachable resolver), `Arp SET <host> <mac>` pins an entry
+  (permanent unless `TEMP`), `Arp DELETE <host>` removes one, `FILE` loads a batch in
+  the Roadshow/BSD `hostname ether_addr [temp]` format. Entries live in the running
+  stack and are dropped with their interface. Roadshow's `PUBLISH`/`PROXY` (answering
+  ARP for other hosts) is not supported by this stack: the switches are omitted from
+  the template and a `pub` token in a batch file is rejected. Third-party software can
+  drive the same machinery through the classic `SIOCSARP`/`SIOCGARP`/`SIOCDARP` (plus
+  whole-table `SIOCGARPT`) `IoctlSocket()` requests — see `include/net/if_arp_ioctl.h`.
 - **`netinfo`** — shows your current network status at a glance: address, netmask,
   broadcast, MTU, MAC address, link state, DHCP/static, and DNS servers.
 - **`netdev-stats`** — shows live driver statistics (packet/error counters, link state)
@@ -157,7 +168,7 @@ See [RELEASE-NOTES.md](RELEASE-NOTES.md) for more on what's behind these numbers
 
 `netinfo` and `netdev-stats` are read-only status tools; the stack is configured
 through the interface files and `netstack.prefs` above, plus the
-`AddNetInterface`/`RemoveNetInterface`/`NetShutdown` commands at runtime.
+`AddNetInterface`/`RemoveNetInterface`/`NetShutdown`/`Arp` commands at runtime.
 
 Scripts can test the outcome Roadshow-style: with `QUIET`, the commands demote every
 failure to exit code 5 (`IF WARN` in a script), and `AddNetInterface` returns 5 when

@@ -18,6 +18,18 @@
 
 #define NDIF_MIN_WRAPS 64
 
+/* ---------------------------------------------------- L2 header cache --- */
+
+void netdevif_hh_invalidate(struct NetdevIf *ndi)
+{
+    for (ULONG i = 0; i < NDIF_HH_ENTRIES; i++)
+    {
+        ndi->ndi_Hh[i].nhh_DstIp = 0;
+        ndi->ndi_Hh[i].nhh_Left = 0;
+    }
+    ndi->ndi_HhPrimeDst = 0;
+}
+
 /* -------------------------------------------------------- link events --- */
 
 static void ndif_link_change(APTR stackctx, const struct NetDevLinkState *state)
@@ -27,11 +39,7 @@ static void ndif_link_change(APTR stackctx, const struct NetDevLinkState *state)
 
     netstack_lock();
     /* a link transition may mean a new peer/port: drop the L2 header cache */
-    for (ULONG i = 0; i < NDIF_HH_ENTRIES; i++)
-    {
-        ndi->ndi_Hh[i].nhh_DstIp = 0;
-        ndi->ndi_Hh[i].nhh_Left = 0;
-    }
+    netdevif_hh_invalidate(ndi);
     if (state->ndls_Flags & NDLF_UP)
         netif_set_link_up(&ndi->ndi_Netif);
     else
@@ -259,12 +267,7 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
     ndi->ndi_RxFilterWant = 0;
     ndi->ndi_RxFilterDirty = FALSE;
     ndi->ndi_VlanTci = -1; /* untagged by default; the opener overrides from prefs */
-    for (ULONG i = 0; i < NDIF_HH_ENTRIES; i++)
-    {
-        ndi->ndi_Hh[i].nhh_DstIp = 0;
-        ndi->ndi_Hh[i].nhh_Left = 0;
-    }
-    ndi->ndi_HhPrimeDst = 0;
+    netdevif_hh_invalidate(ndi);
     for (ULONG i = 0; i < NDIF_GRO_FLOWS; i++)
         ndi->ndi_Gro[i].ngc_Head = NULL; /* contexts idle outside lock holds */
 

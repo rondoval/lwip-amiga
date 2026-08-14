@@ -41,6 +41,8 @@
 
 /* --- protocols, v1 scope --- */
 #define LWIP_ARP                        1
+#define ETHARP_SUPPORT_STATIC_ENTRIES   1   /* Arp command: permanent entries */
+#define ARP_TABLE_SIZE                  32  /* default 10; static entries pin slots */
 #define LWIP_ICMP                       1
 #define LWIP_RAW                        1   /* SOCK_RAW (ping) via bsdsocket */
 #define LWIP_UDP                        1

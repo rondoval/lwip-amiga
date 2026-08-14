@@ -206,6 +206,20 @@ struct sb_ip_mreq
 #define SB_FIONREAD 0x4004667FUL
 #define SB_SIOCATMARK 0x40047307UL
 
+/* ARP table ioctls (include/net/if_arp_ioctl.h; classic 4.3BSD/AmiTCP
+ * numbering, argument structs mirrored in sb_arp.c) */
+#define SB_SIOCSARP 0x8024691EUL  /* _IOW ('i',30, struct arpreq)    */
+#define SB_SIOCDARP 0x80246920UL  /* _IOW ('i',32, struct arpreq)    */
+#define SB_SIOCGARP 0xC0246926UL  /* _IOWR('i',38, struct arpreq)    */
+#define SB_SIOCGARPT 0xC00C695BUL /* _IOWR('i',91, struct arptabreq) */
+
+/* netinclude/net/if_arp.h arp_flags values */
+#define SB_ATF_INUSE 0x01       /* entry in use */
+#define SB_ATF_COM 0x02         /* completed entry (MAC valid) */
+#define SB_ATF_PERM 0x04        /* permanent entry */
+#define SB_ATF_PUBL 0x08        /* publish entry -- never supported */
+#define SB_ATF_USETRAILERS 0x10 /* trailers -- never supported */
+
 /* TCP urgent-data (MSG_OOB) receive state, 4.4BSD semantics. Transitions in
  * sb_tcp_recv_cb (latch/excise) and sb_tcp_recv (consume/pass the mark). */
 #define SB_OOB_NONE 0   /* no mark; recv(MSG_OOB) = EINVAL */
@@ -215,6 +229,7 @@ struct sb_ip_mreq
 
 /* BSD errno values (netinclude/sys/errno.h) */
 #define SB_EINTR 4
+#define SB_ENXIO 6
 #define SB_EBADF 9
 #define SB_ENOMEM 12
 #define SB_EACCES 13
@@ -701,6 +716,9 @@ void sb_peer_ip(struct SbSocket *s, ULONG *addr, UWORD *port);
 /* app sockaddr_in conversion (sb_api.c); shared with the sb_io.c data path */
 LONG sb_addr_in(const struct sb_sockaddr_in *sa, LONG salen, ip_addr_t *ip, u16_t *port);
 void sb_addr_out(APTR name, LONG *namelen, ULONG addr, UWORD port);
+
+/* ARP table ioctls (sb_arp.c); caller task, takes the core lock itself */
+LONG sb_arp_ioctl(struct SocketBase *base, ULONG req, APTR argp);
 
 /* library plumbing (main.c) */
 extern const APTR bsdsocket_functable[];
