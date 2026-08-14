@@ -7,5 +7,7 @@ compile_commands.json
 # Private working notes, not published with the component.
 docs/TODO.md
 
-# Host fuzz harness build output
+# Host test harness build output
 test/fuzz/fuzz_oversize
+test/fuzz/fuzz_oversize_rel
+test/urg/urg_test

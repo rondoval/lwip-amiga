@@ -181,6 +181,10 @@
  * connection's TCP_SND_BUF, not by this count. */
 #define MEMP_NUM_TCP_SEG                (4 * TCP_SND_QUEUELEN)
 #define LWIP_TCP_SACK_OUT               1
+/* TCP urgent data (fork addition): sb_io.c's MSG_OOB paths arm the TX mark
+ * and consume the RX mark; all policy (excision, SO_OOBINLINE, SIOCATMARK)
+ * lives in the bsdsocket layer. */
+#define LWIP_TCP_URG                    1
 /* init.c's sanity check requires PBUF_POOL to cover TCP_WND, assuming RX
  * allocates from it. Our RX buffers are driver-owned custom pbufs — the
  * pool only serves loopback — so that premise doesn't hold here. */
