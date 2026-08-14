@@ -50,20 +50,37 @@ A fast, modern TCP/IP stack for classic AmigaOS 3.2.
 
 ## Installing / configuring
 
-lwip-amiga reads its settings from **`ENV:netstack.prefs`** once, the first time a
-program opens `bsdsocket.library`. Keep the master copy in `ENVARC:`, alongside a
-commented example, `ENVARC:netstack.prefs.default`. Every setting is optional — with no
-file at all, lwip-amiga runs DHCP on `networks/genet.device` unit 0.
+**Per-interface files in `DEVS:NetInterfaces/`** — one file per network interface; the
+*file name is the interface name*. Opening `bsdsocket.library` only starts the stack
+with the loopback interface; real interfaces are added by the **`AddNetInterface`**
+command, normally from `S:Network-Startup` at boot:
+
+    AddNetInterface DEVS:NetInterfaces/~(#?.info) QUIET
+
+The installer sets this up with a DHCP interface file named `genet` (a commented sample
+also ships in `SYS:Storage/NetInterfaces/`). One option per line; `#`/`;` start
+comments; an unknown option is an error:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `DEVICE` | *(required)* | which network driver to open (path form loads from `DEVS:`) |
+| `UNIT` | `0` | which unit/port on that driver |
+| `ADDRESS` | `DHCP` | `DHCP`, or a fixed dotted-quad address |
+| `NETMASK` | — | subnet mask (required with a fixed `ADDRESS`) |
+| `GATEWAY` | — | your router's address (fixed address only, optional) |
+| `MTU` | driver's | lower the packet size limit (may only shrink it) |
+| `VLAN` | — | in-band 802.1Q tag: `vid[,pcp]` (vid 1..4094, pcp 0..7) |
+| `ID` | `HOSTNAME` | DHCP client hostname for this interface |
+
+**Stack-wide settings in `ENV:netstack.prefs`**, read once when the stack starts. Keep
+the master copy in `ENVARC:`, alongside a commented example,
+`ENVARC:netstack.prefs.default`. Every setting is optional:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `DEVICE` | `networks/genet.device` | which network driver to open (path form loads from `DEVS:`) |
-| `UNIT` | `0` | which unit/port on that driver |
-| `MODE` | `DHCP` | `DHCP` (automatic) or `STATIC` (fixed address) |
-| `ADDRESS`, `NETMASK` | — | your fixed IP address and subnet mask (`STATIC`; else the stack falls back to DHCP) |
-| `GATEWAY` | — | your router's address (`STATIC`, optional) |
-| `DNS1`, `DNS2` | — | DNS servers to use (`STATIC`; DHCP supplies its own automatically) |
 | `HOSTNAME` | `amiga` | the name your Amiga reports to the network |
+| `DOMAIN` | — | resolver search domain: dot-less names are retried as `name.DOMAIN` |
+| `DNS1`, `DNS2` | — | explicit DNS servers; they override whatever a DHCP lease supplies |
 | `MDNS` | `yes` | answer for `HOSTNAME.local` on the local network (Bonjour/Avahi), so other machines can reach the Amiga by name with no DNS server |
 | `MDNS_SERVICE` | — | advertise a service over DNS-SD: `_type._proto port [instance name]` (e.g. `_ftp._tcp 21`); repeatable up to 4 times, and services can also be registered while running with the `mdns` command |
 | `NETWORK` | — | adds an entry to the networks database (`getnetbyname`/`getnetbyaddr`); repeatable up to 8 times, `/etc/networks` notation — `name classful-network` (e.g. `homelan 192.168.0`) |
@@ -109,6 +126,22 @@ See [RELEASE-NOTES.md](RELEASE-NOTES.md) for more on what's behind these numbers
 
 ## Tools
 
+- **`AddNetInterface`** — adds network interfaces from `DEVS:NetInterfaces/` files
+  (name, path, or wildcard; Roadshow-compatible template `INTERFACE/M,QUIET/S,
+  TIMEOUT/K/N`). The add blocks until the interface is operational — link up for a
+  static config, DHCP lease bound for a dynamic one (default timeout 30 s); on
+  timeout the interface stays up and keeps trying in the background (exit code 5).
+  Also works from Workbench as the Default Tool of an interface file (`QUIET`/`TIMEOUT`/
+  `PRI` icon tooltypes).
+- **`RemoveNetInterface`** — takes an interface down again (`INTERFACE/A,FORCE/S,
+  QUIET/S`). Refuses while sockets are still bound to the interface's address unless
+  `FORCE` is given.
+- **`NetShutdown`** — stops the whole stack (`TIMEOUT/N,QUIET/S`, default 5 s): asks
+  every network program to let go, waits for the last one, then removes
+  `bsdsocket.library` from memory. While programs hold out, the shutdown waits; on
+  timeout or Ctrl-C it is recalled and the network keeps running. Opening
+  `bsdsocket.library` afterwards starts a fresh stack. Note that `LibOpen` returns
+  failure while a shutdown is pending, so programs cannot sneak in mid-teardown.
 - **`netinfo`** — shows your current network status at a glance: address, netmask,
   broadcast, MTU, MAC address, link state, DHCP/static, and DNS servers.
 - **`netdev-stats`** — shows live driver statistics (packet/error counters, link state)
@@ -122,8 +155,13 @@ See [RELEASE-NOTES.md](RELEASE-NOTES.md) for more on what's behind these numbers
   `mdns ADD _ftp._tcp PORT 21` — and withdrawn again with `mdns DEL <slot>`; anything
   listed under `MDNS_SERVICE` in `netstack.prefs` is advertised from boot.
 
-`netinfo` and `netdev-stats` are read-only status tools; apart from `mdns`'s service
-list, the stack is configured entirely through `netstack.prefs`, above.
+`netinfo` and `netdev-stats` are read-only status tools; the stack is configured
+through the interface files and `netstack.prefs` above, plus the
+`AddNetInterface`/`RemoveNetInterface`/`NetShutdown` commands at runtime.
+
+Scripts can test the outcome Roadshow-style: with `QUIET`, the commands demote every
+failure to exit code 5 (`IF WARN` in a script), and `AddNetInterface` returns 5 when
+the interface is up but the DHCP lease has not arrived yet.
 
 ## Known limitations
 
@@ -135,8 +173,10 @@ list, the stack is configured entirely through `netstack.prefs`, above.
   wire on gigabit.
 - **A handful of advanced or legacy `bsdsocket.library` calls aren't implemented**:
   Roadshow's interface-configuration, routing, and monitoring calls (the read-only
-  interface *query* calls used by `netinfo` above do work), the low-level
-  `mbuf_*`/`bpf_*` families, and (by design) the private `ipf_*` packet filter.
+  interface *query* calls used by `netinfo` above do work — interface add/remove is
+  done with the bundled `AddNetInterface`/`RemoveNetInterface` commands instead, so
+  genuine Roadshow configuration binaries won't), the low-level `mbuf_*`/`bpf_*`
+  families, and (by design) the private `ipf_*` packet filter.
 
 ## For developers
 

@@ -56,18 +56,27 @@ table included — so every opening task gets its own `errno`, fd table, wait si
   per-call deadline via the opener's `timer.device` request (`sb_wait_to`).
 - **The in-library stack task** (`sb_stack.c`) is a DOS process started under the root's
   open lock by the first `OpenLibrary()`. It reads `ENV:netstack.prefs` (`sb_config.c`:
-  driver selection from `DEVS:Networks/`, DHCP or a static address, DNS, hostname — flat
-  `KEY = VALUE`, every key optional, missing file = DHCP on `networks/genet.device`
-  unit 0), initializes `netstack`, attaches the configured driver over the netdev ABI,
-  brings the interface up, then ticks `sys_check_timeouts()` every 100 ms. It runs at
-  **priority 10** (above the dynamic-scheduler band, matching the driver's unit task) so
-  it is not starved by CPU-bound application tasks.
-- **A running stack is never expunged** (`main.c` `LibExpunge`). Once the stack task
-  exists the library refuses expunge and defers with `LIBF_DELEXP`, exactly as it does
-  while openers remain. `lib_OpenCnt` legitimately reaches zero all the time — apps that
-  open and close the library around each call do it every few seconds — and expunging
-  there would drop the DHCP lease, detach the driver, and unload code the driver's unit
-  task still calls through `nda_StackOps`. `sb_stack_stop()` therefore only runs for a stack that never started.
+  **stack-wide settings only** — hostname, search domain, explicit DNS servers, mDNS;
+  flat `KEY = VALUE`, every key optional), initializes `netstack`, publishes the
+  control port, and ticks `sys_check_timeouts()` every 100 ms. The boot state is
+  **loopback only** (the Roadshow model): network interfaces are added at runtime by
+  the `AddNetInterface` command from per-interface files in `DEVS:NetInterfaces/`
+  (the file name is the interface name), normally from `S:Network-Startup`. The task
+  runs at **priority 10** (above the dynamic-scheduler band, matching the driver's
+  unit task) so it is not starved by CPU-bound application tasks.
+- **A running stack is never expunged — except through the NetShutdown handshake**
+  (`main.c` `LibExpunge`). While the stack task exists the library refuses expunge and
+  defers with `LIBF_DELEXP`: `lib_OpenCnt` legitimately reaches zero all the time — apps
+  that open and close the library around each call do it every few seconds — and
+  expunging there would drop the DHCP lease, detach the driver, and unload code the
+  driver's unit task still calls through `nda_StackOps`. The one sanctioned way down is
+  the control port's SHUTDOWN op (the `NetShutdown` command): the stack asks every
+  registered opener to let go (each opener's `SBTC_BREAKMASK` signal), waits for the
+  last `CloseLibrary`, tears the interface down, and exits — its final act, under
+  `Forbid()`, is the OK reply, upon which `NetShutdown` calls `RemLibrary()` and the
+  now-taskless expunge path runs for real. A fresh `OpenLibrary` then reloads the
+  library from disk and starts anew (`LibOpen` refuses new clients while a shutdown is
+  pending).
 
 The API surface is grouped topically: lifecycle/control (`sb_api.c`), the data path
 (`sb_io.c`), options and events (`sb_sockopt.c`), `WaitSelect` (`sb_select.c`), errno
@@ -79,9 +88,36 @@ plumbing (`sb_errno.c`), `SocketBaseTagList` (`sb_taglist.c`), address conversio
 
 Interface **status** is read-only (`sb_ifquery.c`): the Roadshow interface-query LVOs
 (`ObtainInterfaceList` / `QueryInterfaceTagList`) report the live netif's address, mask,
-MTU, MAC, link state and DNS, which the bundled `netinfo` CLI prints ifconfig-style. The
-interface-*config* LVOs are declined (the stack is configured only from
-`ENVARC:netstack.prefs`); they refuse with `EINVAL`.
+MTU, MAC, link state and DNS, which the bundled `netinfo` CLI prints ifconfig-style.
+Interfaces answer to two names — the Roadshow-style identity from the config file
+("genet", stamped into `NetdevIf` at add time) and lwIP's short name ("nd0");
+`sb_if_find()` resolves both. The interface-*config* LVOs are declined with `EINVAL`:
+runtime configuration runs over the private control port instead (below).
+
+### Runtime control — the netstack control port (`include/netstack_ctl.h`, `sb_netctl.c`)
+
+The stack task owns a public MsgPort, `bsdsocket.netctl`, for its whole lifetime; the
+`AddNetInterface` / `RemoveNetInterface` / `NetShutdown` commands drive it with a
+versioned message protocol (private to this component — library and tools build
+together; the library rejects a version mismatch). Everything is serviced on the stack
+task, which serializes all lifecycle work by construction: `OpenDevice` needs a Process,
+and a netdev `DoIO` must never run under the core lock.
+
+The reply contract: every delivered message is answered — inline, or *parked* and
+answered later. `ADD_IF` executes the attach/configure (`sb_netdev_up`) and parks the
+reply until the interface is *operational*: link up for a static config, DHCP lease
+bound for a dynamic one (a lease implies link) — checked by the 100 ms tick
+(explicitly configured DNS servers are re-applied after a lease so config beats DHCP).
+The client owns the timeout: `CANCEL_ADD` recalls a parked add — after a final
+readiness check that resolves the cancel-vs-completion race in the add's favor — and
+the interface *stays up*, becoming usable when the link or lease arrives (late beats
+never). `REM_IF` refuses
+with a socket count when connections are still bound to the interface address
+(established/listening TCP and bound UDP; TIME_WAIT is stack-owned and ignored) unless
+forced. `SHUTDOWN`/`CANCEL_SHUTDOWN` implement the expunge handshake above. Teardown
+withdraws the port under `Forbid()` and drains stragglers with `ERR_INACTIVE`, so no
+client message is ever lost — which is what lets the commands keep messages on their
+own stacks.
 
 ## Layer 2 — lwIP core + Amiga port layer (`lwip/`, `port/amiga/`)
 
@@ -257,17 +293,19 @@ unblocked. What is already multi-ready:
   everywhere; multiple instances would coexist as-is.
 - **lwIP and the socket layer iterate**: the multi-netif list is compiled in
   (`NETIF_FOREACH` is already used), DHCP is per-netif, DNS is global by design.
-- **The config schema reserves the extension**: unprefixed `netstack.prefs` keys are
-  interface 0; a future `IFn_` prefix (`IF1_DEVICE`, `IF1_MODE`, ...) adds interfaces
-  without a format break (unknown keys are ignored today).
+- **The config model is per-interface already**: one `DEVS:NetInterfaces/<name>` file
+  per interface, added individually over the control port (`struct NetCtlIfConfig`
+  carries everything, and `NetdevIf` carries its own identity) — more interfaces are
+  more files plus more ADD messages, no format change anywhere.
 
 The blockers, in ascending difficulty:
 
 1. *Cosmetic*: the fixed netif name `"nd"` and the unconditional `netif_set_default` —
    index the name, make the default route config-driven.
-2. *Structural, small*: the single `NetdevIf` embedded in the stack task's context and
-   the one-shot up/down path — becomes an array of interface slots driven by an `IFn_`
-   config loop.
+2. *Structural, small*: the single `NetdevIf` embedded in the stack task's context —
+   becomes an array of interface slots; the up/down path is already per-add
+   (control-port driven), so only the one-slot assumption in `SbStackCtx`/`sb_netctl.c`
+   (`ERR_EXISTS` on a second ADD) needs lifting.
 3. *The hard one*: `netstack.ns_ActiveNetdev` routes the **entire** lwIP heap — every
    `PBUF_RAM`/TX allocation — to one driver's DMA allocator, and lwIP allocates TX pbufs
    *before* routing picks the egress netif. Preferred resolution: a shared stack-owned

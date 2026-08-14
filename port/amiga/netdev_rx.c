@@ -34,6 +34,14 @@ static void ndif_rx_pbuf_freed(struct pbuf *p)
     struct NdRxWrap *w = (struct NdRxWrap *)p;
     struct NetdevIf *ndi = w->nrw_If;
 
+    /* A wrap outliving its interface: this pbuf sat in a socket's receive
+     * queue across a (forced) RemoveNetInterface. netdevif_destroy marked
+     * the pool dead and leaked it, and the driver reclaimed the buffer at
+     * (forced) detach — nothing to release, and the NetdevIf may already
+     * describe a successor interface this wrap must not touch. */
+    if (ndi == NULL)
+        return;
+
     /* Double-free tripwire: releasing the same wrap twice would push its
      * driver buffer into the recycle ring twice. Debug-tier invariant check,
      * not a production safety net. */
@@ -44,6 +52,7 @@ static void ndif_rx_pbuf_freed(struct pbuf *p)
 
     ndi->ndi_Ops->ndo_RxRelease(ndi->ndi_Drv, w->nrw_Cookie);
 
+    ndi->ndi_WrapsOut--;
     w->nrw_Next = ndi->ndi_FreeWraps;
     ndi->ndi_FreeWraps = w;
 }
@@ -383,6 +392,7 @@ ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULONG count
                 return consumed; /* backpressure: driver recycles the tail */
             }
             ndi->ndi_FreeWraps = w->nrw_Next;
+            ndi->ndi_WrapsOut++;
 
             w->nrw_Cookie = d->nrd_Cookie;
             w->nrw_Pc.custom_free_function = ndif_rx_pbuf_freed;

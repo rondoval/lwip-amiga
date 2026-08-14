@@ -47,17 +47,35 @@ struct perf ns_perf = { "nsprof", ns_perf_names, ns_perf_slots, NSP_SLOT_COUNT }
 
 void netstack_init(struct Device *timerBase)
 {
-    TimerBase = timerBase;
+    /* One-shot: lwIP state (memp pools, the loopback netif, timers) and the
+     * core lock live in library data space and survive a stack-task exit. A
+     * restarted task (stop via the control port, then a fresh OpenLibrary
+     * while the library stayed loaded) must only re-aim the time base —
+     * running lwip_init() again would add a second loopback netif and reset
+     * pools that parked sockets still reference, and re-InitSemaphore could
+     * wipe a semaphore other tasks know. */
+    static BOOL initialized;
 
-    InitSemaphore(&netstack.ns_Core);
-    lock_prof_init(&netstack.ns_LockProf, "netstack");
+    TimerBase = timerBase;
 
     struct EClockVal ev;
     ULONG freq = ReadEClock(&ev);
     netstack.ns_EClockPerMs = freq / 1000;
     if (netstack.ns_EClockPerMs == 0)
         netstack.ns_EClockPerMs = 1;
+    /* re-baseline the ms clock; ns_Ms keeps running so sys_now() stays
+     * monotonic for lwIP timers that survived a task restart */
     netstack.ns_LastEClockLo = ev.ev_lo;
+
+    if (initialized)
+    {
+        Kprintf("[netstack] re-initialized (stack task restart)\n");
+        return;
+    }
+    initialized = TRUE;
+
+    InitSemaphore(&netstack.ns_Core);
+    lock_prof_init(&netstack.ns_LockProf, "netstack");
     netstack.ns_RandState = ev.ev_lo | 1;
 
     netstack_lock();

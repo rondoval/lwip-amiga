@@ -1,0 +1,33 @@
+; lwip-amiga network interface "genet"
+;
+; The FILE NAME is the interface name (15 characters max). Add it with
+;   AddNetInterface genet
+; or let the boot line in S:Network-Startup pick up every file here:
+;   AddNetInterface DEVS:NetInterfaces/~(#?.info) QUIET
+; Remove it with:  RemoveNetInterface genet
+;
+; One option per line; lines starting with '#' or ';' are comments and an
+; unknown option is an error (no trailing comments on option lines!).
+; DEVICE is required. No ADDRESS (or ADDRESS=DHCP) means DHCP. DNS servers
+; are stack-wide - set them in ENV:netstack.prefs, not here. An optional
+; icon on this file may carry a PRI=<n> tooltype to order multi-file adds.
+
+DEVICE=networks/genet.device
+UNIT=0
+ADDRESS=DHCP
+
+; Static configuration instead of DHCP: a dotted-quad ADDRESS needs
+; NETMASK; GATEWAY is optional.
+;ADDRESS=192.168.1.50
+;NETMASK=255.255.255.0
+;GATEWAY=192.168.1.1
+
+; MTU may only lower the driver's value.
+;MTU=1500
+
+; In-band 802.1Q VLAN tag: vid[,pcp] (vid 1..4094, pcp 0..7).
+;VLAN=100,3
+
+; DHCP client hostname for this interface (option 12); defaults to the
+; stack-wide HOSTNAME from netstack.prefs.
+;ID=amiga

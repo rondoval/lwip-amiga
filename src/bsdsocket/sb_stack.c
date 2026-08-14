@@ -5,14 +5,14 @@
  * Started under root->openLock by the first OpenLibrary(). It is a DOS
  * Process, not a bare Task: it reads ENV:netstack.prefs, and the netdev
  * attach path runs driver open code on this context, which may do DOS
- * I/O too (genet reads ENV:genet.prefs). Initializes the netstack
- * (timer.device EClock), attaches the configured network driver over the
- * netdev ABI, brings the interface up (DHCP by default, static when
- * configured), then ticks lwIP timeouts every 100 ms until told to quit
- * (library expunge).
+ * I/O too (genet reads ENV:genet.prefs).
  *
- * No NIC is not fatal: the stack still runs with just the loopback
- * interface.
+ * The task boots the stack with the loopback
+ * interface only, publishes the netstack_ctl.h control port, and ticks lwIP
+ * timeouts every 100 ms. Network interfaces are added and removed at
+ * runtime through that port (the AddNetInterface / RemoveNetInterface
+ * commands drive sb_netdev_up/down here), and the stack stops through it
+ * too (NetShutdown) — or via sb_stack_stop from a failed-open unwind.
  */
 
 #include "sb_base.h"
@@ -37,32 +37,10 @@
 #include "netdev_if.h"
 #include "netstack.h"
 #include "sb_mdns.h"
+#include "sb_netctl.h"
+#include "sb_stack_priv.h"
 
 #define SB_STACK_TICK_US 100000
-
-struct SbStackCtx
-{
-    struct SocketBase *root;
-    struct Task *parent;
-    volatile LONG startResult; /* 0 ok, else failed */
-    struct NetdevIf ndi;
-    struct MsgPort *devPort;
-    struct IOStdReq *devIO;
-    BOOL devOpen;
-    BOOL attached;
-    BOOL started;
-
-    /* async NIC-stats poll: devIO cycles GET_STATS -> GET_LINK via SendIO so
-     * the 100 ms tick never blocks on the driver unit task; results publish
-     * into the root cache when the GET_LINK reply lands */
-    UBYTE statsPhase; /* 0 idle, 1 GET_STATS out, 2 GET_LINK out */
-    struct NetDevStats statsBuf;
-    struct NetDevLinkState linkBuf;
-
-    /* off-lock snapshot of ndi_McastList for NETDEV_CMD_SET_RXFILTER: filled
-     * under the core lock, then handed to the driver with the lock dropped */
-    UBYTE rxFilterMacs[NDIF_MCAST_MAX][6];
-};
 
 /* one instance; the library is a singleton and so is the stack */
 static struct SbStackCtx sb_stack;
@@ -91,40 +69,46 @@ static BYTE sb_netdev_cmd(struct IOStdReq *io, UWORD cmd, APTR data, ULONG len)
     return io->io_Error;
 }
 
-static void sb_netdev_up(struct SbStackCtx *ctx)
+LONG sb_netdev_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
+                  LONG *aux)
 {
-    const struct SbNetConfig *cfg = &ctx->root->netCfg;
+    *aux = 0;
 
     ctx->devPort = CreateMsgPort();
     ctx->devIO = (struct IOStdReq *)CreateIORequest(ctx->devPort, sizeof(struct IOStdReq));
     if (ctx->devIO == NULL)
-        return;
+    {
+        sb_netdev_down(ctx);
+        return NETCTL_ERR_NOMEM;
+    }
 
     /* the path form loads from DEVS: by convention (DEVS:Networks/...);
      * a resident/expansion module registers under the bare node name, so
      * retry with the basename before giving up */
-    if (OpenDevice((CONST_STRPTR)cfg->cfg_Device, cfg->cfg_Unit,
+    if (OpenDevice((CONST_STRPTR)nif->nif_Device, nif->nif_Unit,
                    (struct IORequest *)ctx->devIO, 0) != 0)
     {
-        const char *base = sb_dev_basename(cfg->cfg_Device);
-        if (base == cfg->cfg_Device ||
-            OpenDevice((CONST_STRPTR)base, cfg->cfg_Unit,
+        const char *base = sb_dev_basename(nif->nif_Device);
+        if (base == nif->nif_Device ||
+            OpenDevice((CONST_STRPTR)base, nif->nif_Unit,
                        (struct IORequest *)ctx->devIO, 0) != 0)
         {
-            Kprintf("[bsdsocket] no %s unit %ld — loopback only\n",
-                    cfg->cfg_Device, cfg->cfg_Unit);
-            return;
+            Kprintf("[bsdsocket] no %s unit %ld\n",
+                    nif->nif_Device, nif->nif_Unit);
+            *aux = ctx->devIO->io_Error;
+            sb_netdev_down(ctx);
+            return NETCTL_ERR_DEVICE;
         }
     }
     ctx->devOpen = TRUE;
 
-    static struct NetDevAttach att; /* library data space; used once */
+    struct NetDevAttach att; /* lives across one synchronous ATTACH DoIO only */
     for (ULONG i = 0; i < sizeof(att); i++)
         ((UBYTE *)&att)[i] = 0;
     att.nda_AbiVersion = NETDEV_ABI_VERSION;
     att.nda_RxHoldReq = netdevif_rx_hold_budget();
     att.nda_RxBatch = netdevif_rx_batch();
-    att.nda_MtuReq = 0; /* driver default MTU (no MTU prefs key) */
+    att.nda_MtuReq = (nif->nif_Flags & NETCTL_IFF_HAS_MTU) ? (UWORD)nif->nif_Mtu : 0;
     att.nda_StackCtx = &ctx->ndi;
     att.nda_StackOps = netdevif_stack_ops();
 
@@ -132,28 +116,55 @@ static void sb_netdev_up(struct SbStackCtx *ctx)
     if (err != 0)
     {
         Kprintf("[bsdsocket] netdev ATTACH failed (%ld)\n", (LONG)err);
-        return;
+        *aux = err;
+        sb_netdev_down(ctx);
+        return NETCTL_ERR_DEVICE;
     }
     ctx->attached = TRUE;
 
     if (netdevif_create(&ctx->ndi, att.nda_DrvCtx, att.nda_DrvOps, &att.nda_Caps) != 0)
     {
         Kprintf("[bsdsocket] netdevif_create failed\n");
-        return;
+        sb_netdev_down(ctx);
+        return NETCTL_ERR_NOMEM;
     }
+    ctx->created = TRUE;
+
+    /* identity: what the query LVOs and the control port know this interface
+     * as; lwIP's own name stays "nd<n>" */
+    for (ULONG i = 0; i < NETCTL_IFNAME_MAX; i++)
+        ctx->ndi.ndi_Name[i] = nif->nif_Name[i];
+    for (ULONG i = 0; i < NETCTL_DEV_MAX; i++)
+        ctx->ndi.ndi_Device[i] = nif->nif_Device[i];
+    ctx->ndi.ndi_Unit = nif->nif_Unit;
+    ctx->ndi.ndi_Dhcp = (nif->nif_Flags & NETCTL_IFF_DHCP) != 0;
+
+    /* netif_set_hostname keeps the pointer, so the name needs storage that
+     * lives with the interface — the per-add ID, or the global pref */
+    const char *host = nif->nif_Id[0] != '\0' ? nif->nif_Id
+                                              : ctx->root->netCfg.cfg_Hostname;
+    ULONG h = 0;
+    for (; h < NETCTL_ID_MAX - 1 && host[h] != '\0'; h++)
+        ctx->ndi.ndi_Hostname[h] = host[h];
+    ctx->ndi.ndi_Hostname[h] = '\0';
 
     /* in-band 802.1Q VID (-1 = untagged); read per-packet by the VLAN hooks */
-    ctx->ndi.ndi_VlanTci = cfg->cfg_VlanTci;
-    if (cfg->cfg_VlanTci >= 0)
+    ctx->ndi.ndi_VlanTci = nif->nif_VlanTci;
+    if (nif->nif_VlanTci >= 0)
         Kprintf("[bsdsocket] VLAN enabled: vid %ld pcp %ld\n",
-                (LONG)(cfg->cfg_VlanTci & 0xFFF), (LONG)((cfg->cfg_VlanTci >> 13) & 7));
+                (LONG)(nif->nif_VlanTci & 0xFFF), (LONG)((nif->nif_VlanTci >> 13) & 7));
 
     netstack_lock();
     netif_set_default(&ctx->ndi.ndi_Netif);
-    netif_set_hostname(&ctx->ndi.ndi_Netif, ctx->root->netCfg.cfg_Hostname);
-    if (!cfg->cfg_Dhcp)
-        netif_set_addr(&ctx->ndi.ndi_Netif, &cfg->cfg_Addr, &cfg->cfg_Mask,
-                       &cfg->cfg_Gateway);
+    netif_set_hostname(&ctx->ndi.ndi_Netif, ctx->ndi.ndi_Hostname);
+    if (!(nif->nif_Flags & NETCTL_IFF_DHCP))
+    {
+        ip4_addr_t addr, mask, gw;
+        addr.addr = nif->nif_Addr;
+        mask.addr = nif->nif_Mask;
+        gw.addr = nif->nif_Gateway;
+        netif_set_addr(&ctx->ndi.ndi_Netif, &addr, &mask, &gw);
+    }
     netif_set_up(&ctx->ndi.ndi_Netif);
     netstack_unlock();
 
@@ -161,37 +172,33 @@ static void sb_netdev_up(struct SbStackCtx *ctx)
     if (err != 0)
     {
         Kprintf("[bsdsocket] netdev START failed (%ld)\n", (LONG)err);
-        return;
+        *aux = err;
+        sb_netdev_down(ctx);
+        return NETCTL_ERR_DEVICE;
     }
     ctx->started = TRUE;
 
-    netstack_lock();
-    if (cfg->cfg_Dhcp)
+    if (nif->nif_Flags & NETCTL_IFF_DHCP)
     {
+        netstack_lock();
         dhcp_start(&ctx->ndi.ndi_Netif);
+        netstack_unlock();
     }
-    else
-    {
-        for (u8_t i = 0; i < 2; i++)
-        {
-            if (!ip4_addr_isany_val(cfg->cfg_Dns[i]))
-                dns_setserver(i, &cfg->cfg_Dns[i]);
-        }
-    }
-    netstack_unlock();
-    if (cfg->cfg_Dhcp)
+    if (nif->nif_Flags & NETCTL_IFF_DHCP)
         Kprintf("[bsdsocket] interface up, DHCP running\n");
     else
-        Kprintf("[bsdsocket] interface up, static %s\n",
-                ip4addr_ntoa(&cfg->cfg_Addr));
+        Kprintf("[bsdsocket] interface up, static %lu.%lu.%lu.%lu\n",
+                (nif->nif_Addr >> 24) & 0xFF, (nif->nif_Addr >> 16) & 0xFF,
+                (nif->nif_Addr >> 8) & 0xFF, nif->nif_Addr & 0xFF);
 
     /* mDNS last: the responder probes as soon as it is added, and it wants an
      * interface that is already up (an address is not required — it re-probes
      * itself when DHCP supplies one). */
-    sb_mdns_start(&ctx->ndi.ndi_Netif, cfg);
+    sb_mdns_start(&ctx->ndi.ndi_Netif, &ctx->root->netCfg);
+    return NETCTL_OK;
 }
 
-static void sb_netdev_down(struct SbStackCtx *ctx)
+void sb_netdev_down(struct SbStackCtx *ctx)
 {
     Kprintf("[bsdsocket] %s: started %ld, attached %ld\n", __func__, (LONG)ctx->started, (LONG)ctx->attached);
     sb_mdns_stop(); /* unpublish before the netif goes away */
@@ -204,9 +211,13 @@ static void sb_netdev_down(struct SbStackCtx *ctx)
         sb_netdev_cmd(ctx->devIO, NETDEV_CMD_STOP, NULL, 0);
         ctx->started = FALSE;
     }
-    if (ctx->attached)
+    if (ctx->created)
     {
         netdevif_destroy(&ctx->ndi);
+        ctx->created = FALSE;
+    }
+    if (ctx->attached)
+    {
         if (sb_netdev_cmd(ctx->devIO, NETDEV_CMD_DETACH, NULL, 0) != 0)
             Kprintf("[bsdsocket] netdev DETACH failed — RX buffers leaked?\n");
         ctx->attached = FALSE;
@@ -277,7 +288,7 @@ static void sb_stats_reply(struct SbStackCtx *ctx)
 }
 
 /* reclaim a stats request still in flight before devIO is reused (STOP/DETACH) */
-static void sb_stats_drain(struct SbStackCtx *ctx)
+void sb_stats_drain(struct SbStackCtx *ctx)
 {
     if (ctx->statsPhase == 0)
         return;
@@ -348,16 +359,28 @@ static void SbStackTask(void)
             " bsd_SetDefaultDomainName@0x%08lx\n",
             (ULONG)netstack_init, (ULONG)sb_config_load,
             (ULONG)bsd_SetDefaultDomainName);
-    sb_netdev_up(ctx);
-    /* stamp interface-start time for IFQ_LastStart (UNIT_MICROHZ answers
-     * TR_GETSYSTIME); harmless if no NIC came up */
-    if (ctx->started)
+    /* stack-wide DNS overrides apply from boot; sb_netctl re-applies them
+     * whenever a DHCP lease lands, so explicit config beats the lease */
+    netstack_lock();
+    for (u8_t i = 0; i < 2; i++)
     {
-        tick->tr_node.io_Command = TR_GETSYSTIME;
-        DoIO(&tick->tr_node);
-        ctx->root->netLastStart.tv_secs = tick->tr_time.tv_secs;
-        ctx->root->netLastStart.tv_micro = tick->tr_time.tv_micro;
+        if (!ip4_addr_isany_val(ctx->root->netCfg.cfg_Dns[i]))
+            dns_setserver(i, &ctx->root->netCfg.cfg_Dns[i]);
     }
+    netstack_unlock();
+
+    /* the stack boots with loopback only; interfaces are
+     * added at runtime through the control port (AddNetInterface). No port
+     * means no way to ever add one — treat that OOM as a failed start. */
+    if (sb_netctl_start() != 0)
+    {
+        Kprintf("[bsdsocket] stack task: no control port\n");
+        CloseDevice(&tick->tr_node);
+        ctx->startResult = -1;
+        Signal(parent, SIGBREAKF_CTRL_F);
+        goto out;
+    }
+    Kprintf("[bsdsocket] stack up (loopback only) — waiting for AddNetInterface\n");
 
     ctx->startResult = 0;
     ctx->root->stackTask = FindTask(NULL);
@@ -369,18 +392,25 @@ static void SbStackTask(void)
     SendIO(&tick->tr_node);
 
     ULONG statTick = 0;
-    ULONG devSig = ctx->devOpen ? (1UL << ctx->devPort->mp_SigBit) : 0;
-    ULONG mdnsSig = sb_mdns_sigmask(); /* fixed: the port outlives the loop */
     for (;;)
     {
-        ULONG sigs =
-            Wait((1UL << timerPort->mp_SigBit) | devSig | mdnsSig | SIGBREAKF_CTRL_C);
+        /* recomputed every pass: interfaces (and their ports) now come and
+         * go at runtime, so no signal may be latched across an iteration */
+        ULONG devSig = ctx->devPort != NULL ? (1UL << ctx->devPort->mp_SigBit) : 0;
+        ULONG mdnsSig = sb_mdns_sigmask();
+        ULONG ctlSig = sb_netctl_sigmask();
+        /* CTRL_E: LibClose's "last client of a pending shutdown left" wake */
+        ULONG sigs = Wait((1UL << timerPort->mp_SigBit) | devSig | mdnsSig |
+                          ctlSig | SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_E);
 
         if (sigs & devSig)
             sb_stats_reply(ctx); /* harvest GET_STATS/GET_LINK, publish cache */
 
         if (sigs & mdnsSig)
             sb_mdns_service(); /* `mdns` add/del/list of advertised services */
+
+        if (sigs & ctlSig)
+            sb_netctl_service(ctx); /* interface add/remove, stack shutdown */
 
         if (sigs & (1UL << timerPort->mp_SigBit))
         {
@@ -392,6 +422,9 @@ static void SbStackTask(void)
             tick->tr_time.tv_micro = SB_STACK_TICK_US;
             SendIO(&tick->tr_node);
 
+            /* answer a parked AddNetInterface once its DHCP lease is bound */
+            sb_netctl_tick(ctx);
+
             /* push any pending multicast filter change (devIO must be idle) */
             sb_rxfilter_sync(ctx);
 
@@ -401,10 +434,14 @@ static void SbStackTask(void)
             {
                 statTick = 0;
                 sb_stats_kick(ctx);
+                sb_netctl_nudge(ctx); /* re-ask shutdown holdouts to leave */
             }
         }
 
-        if (sigs & SIGBREAKF_CTRL_C)
+        /* checked every pass, not only on CTRL_E: a SHUTDOWN that arrives
+         * with zero clients must complete without waiting for a wake */
+        BOOL quit = (sigs & SIGBREAKF_CTRL_C) != 0 || sb_netctl_shutdown_ready(ctx);
+        if (quit)
         {
             AbortIO(&tick->tr_node);
             WaitIO(&tick->tr_node);
@@ -412,22 +449,57 @@ static void SbStackTask(void)
         }
     }
 
+    sb_netctl_stop(ctx); /* withdraw the port, answer everything owed
+                            (except a parked SHUTDOWN — see below) */
     sb_stats_drain(ctx); /* devIO must be idle before STOP/DETACH reuse it */
     sb_netdev_down(ctx);
     CloseDevice(&tick->tr_node);
 
 out:
+    /* Everything the epilogue needs, captured BEFORE stackTask is cleared:
+     * the moment it is, a racing OpenLibrary may restart the stack and
+     * sb_stack_start re-zeroes the shared ctx — locals only from here on. */
+    struct SocketBase *root = ctx->root;
+    struct NetCtlMsg *shutdownMsg = ctx->pendingShutdown;
+    struct Task *stopper = ctx->stopRequested ? ctx->parent : NULL;
+    ctx->pendingShutdown = NULL;
+
     if (tick != NULL)
         DeleteIORequest(&tick->tr_node);
     if (timerPort != NULL)
         DeleteMsgPort(timerPort);
 
     Kprintf("[bsdsocket] %s: exiting\n", __func__);
-    ctx->root->stackTask = NULL;
-    /* re-read: the startup handshake went to whoever called sb_stack_start,
-     * but the exit handshake belongs to whoever called sb_stack_stop, and
-     * that is a different task in general — the starter may be long gone */
-    Signal(ctx->parent, SIGBREAKF_CTRL_F);
+
+    /* Atomically under openLock: a LibOpen must see either "shutting down"
+     * (refuse) or "no stack task" (fresh start) — never a stale stackTask
+     * with the flag already clear, which would hand out a child base wired
+     * to a task that no longer ticks. */
+    ObtainSemaphore(&root->openLock);
+    root->stackTask = NULL;
+    root->shuttingDown = FALSE;
+    ReleaseSemaphore(&root->openLock);
+
+    /* Exit handshake only when sb_stack_stop asked for one — it re-aims
+     * ctx->parent at itself first (the startup handshake's target is the
+     * starter, long gone in general). Other exits have no waiter;
+     * signalling the stale starter would poke a freed Task. */
+    if (stopper != NULL)
+        Signal(stopper, SIGBREAKF_CTRL_F);
+
+    /* The NetShutdown reply is this task's very LAST act, under Forbid():
+     * the client calls RemLibrary the moment the reply lands, unloading the
+     * seglist this code lives in. Forbid held across the final RTS (which
+     * returns into dos.library's process glue, outside this seglist)
+     * guarantees nothing of ours executes after the reply is visible. The
+     * Forbid dies with the task (RemTask resets it). */
+    if (shutdownMsg != NULL)
+    {
+        shutdownMsg->ncm_Result = NETCTL_OK;
+        shutdownMsg->ncm_Count = 0;
+        Forbid();
+        ReplyMsg(&shutdownMsg->ncm_Msg);
+    }
 }
 
 #define SB_STACK_STACK_BYTES 32768
@@ -479,6 +551,7 @@ void sb_stack_stop(struct SocketBase *root)
      * rarely the starter — expunge runs in whichever task ran low on memory.
      * Signalling the stale entry would both hang us here and poke a Task
      * structure that may already be freed. */
+    sb_stack.stopRequested = TRUE;
     sb_stack.parent = FindTask(NULL);
     SetSignal(0UL, SIGBREAKF_CTRL_F);
     Signal(root->stackTask, SIGBREAKF_CTRL_C);

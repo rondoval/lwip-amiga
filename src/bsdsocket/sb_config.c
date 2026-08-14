@@ -2,7 +2,7 @@
 /*
  * ENV:netstack.prefs reader — see sb_config.h for the schema. The same
  * defaults-then-override pattern as genet's runtime config: a missing or
- * unreadable file is not an error, it is the DHCP default configuration.
+ * unreadable file is not an error, it is the default configuration.
  */
 
 #include "sb_base.h"
@@ -105,11 +105,24 @@ static void sb_cfg_defaults(struct SbNetConfig *cfg)
 {
     for (ULONG i = 0; i < sizeof(*cfg); i++)
         ((UBYTE *)cfg)[i] = 0;
-    sb_cfg_copy(cfg->cfg_Device, sizeof(cfg->cfg_Device), "networks/genet.device");
     sb_cfg_copy(cfg->cfg_Hostname, sizeof(cfg->cfg_Hostname), "amiga");
-    cfg->cfg_Dhcp = TRUE;
-    cfg->cfg_VlanTci = -1;   /* no VLAN (0 would be priority-tagged VID 0) */
     cfg->cfg_Mdns = TRUE;    /* HOSTNAME.local costs one multicast group */
+}
+
+/* The previous model interface keys: recognized so a stale prefs file
+ * gets one clear notice instead of silent misconfiguration. Interfaces are
+ * configured in DEVS:NetInterfaces/ via AddNetInterface now. */
+static BOOL sb_cfg_key_obsolete(const char *key)
+{
+    static const char *const obsolete[] = {
+        "DEVICE", "UNIT", "MODE", "ADDRESS", "NETMASK", "GATEWAY", "VLAN",
+    };
+    for (ULONG i = 0; i < sizeof(obsolete) / sizeof(obsolete[0]); i++)
+    {
+        if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR)obsolete[i]) == 0)
+            return TRUE;
+    }
+    return FALSE;
 }
 
 void sb_config_load(struct SbNetConfig *cfg)
@@ -133,7 +146,7 @@ void sb_config_load(struct SbNetConfig *cfg)
     }
     KprintfT("[bsdsocket] %s: reading ENV:netstack.prefs\n", __func__);
 
-    BOOL staticMode = FALSE;
+    BOOL warnedObsolete = FALSE;
     char linebuf[256];
     while (FGets(fh, (STRPTR)linebuf, sizeof(linebuf)))
     {
@@ -141,40 +154,15 @@ void sb_config_load(struct SbNetConfig *cfg)
         if (!prefs_split(linebuf, &key, &val))
             continue;
 
-        LONG parsed;
-
-        if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "DEVICE") == 0)
+        if (sb_cfg_key_obsolete(key))
         {
-            sb_cfg_copy(cfg->cfg_Device, sizeof(cfg->cfg_Device), val);
-        }
-        else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "UNIT") == 0)
-        {
-            if (StrToLong((STRPTR)val, &parsed) && parsed >= 0)
-                cfg->cfg_Unit = parsed;
-        }
-        else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "MODE") == 0)
-        {
-            if (_Stricmp((CONST_STRPTR)val, (CONST_STRPTR) "STATIC") == 0)
-                staticMode = TRUE;
-            else if (_Stricmp((CONST_STRPTR)val, (CONST_STRPTR) "DHCP") == 0)
-                staticMode = FALSE;
-            else
-                Kprintf("[bsdsocket] netstack.prefs: bad MODE '%s'\n", val);
-        }
-        else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "ADDRESS") == 0)
-        {
-            if (!ip4addr_aton(val, &cfg->cfg_Addr))
-                Kprintf("[bsdsocket] netstack.prefs: bad ADDRESS '%s'\n", val);
-        }
-        else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "NETMASK") == 0)
-        {
-            if (!ip4addr_aton(val, &cfg->cfg_Mask))
-                Kprintf("[bsdsocket] netstack.prefs: bad NETMASK '%s'\n", val);
-        }
-        else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "GATEWAY") == 0)
-        {
-            if (!ip4addr_aton(val, &cfg->cfg_Gateway))
-                Kprintf("[bsdsocket] netstack.prefs: bad GATEWAY '%s'\n", val);
+            if (!warnedObsolete)
+            {
+                Kprintf("[bsdsocket] netstack.prefs: DEVICE/UNIT/MODE/ADDRESS/"
+                        "NETMASK/GATEWAY/VLAN are obsolete — interfaces are "
+                        "configured in DEVS:NetInterfaces/ (see AddNetInterface)\n");
+                warnedObsolete = TRUE;
+            }
         }
         else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "DNS1") == 0)
         {
@@ -193,28 +181,6 @@ void sb_config_load(struct SbNetConfig *cfg)
         else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "DOMAIN") == 0)
         {
             sb_cfg_copy(cfg->cfg_Domain, sizeof(cfg->cfg_Domain), val);
-        }
-        else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "VLAN") == 0)
-        {
-            /* VLAN = <vid>[,<pcp>]  (in-band 802.1Q; vid 1..4094, pcp 0..7) */
-            char *comma = val;
-            while (*comma && *comma != ',')
-                comma++;
-            LONG pcp = 0;
-            BOOL ok = TRUE;
-            if (*comma == ',')
-            {
-                *comma = '\0';
-                char *pcpStr = comma + 1;
-                while (*pcpStr == ' ' || *pcpStr == '\t')
-                    pcpStr++;
-                ok = StrToLong((STRPTR)pcpStr, &pcp) && pcp >= 0 && pcp <= 7;
-            }
-            LONG vid;
-            if (ok && StrToLong((STRPTR)val, &vid) && vid >= 1 && vid <= 4094)
-                cfg->cfg_VlanTci = ((pcp & 7) << 13) | (vid & 0xFFF);
-            else
-                Kprintf("[bsdsocket] netstack.prefs: bad VLAN '%s'\n", val);
         }
         else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "MDNS") == 0)
         {
@@ -267,20 +233,9 @@ void sb_config_load(struct SbNetConfig *cfg)
                 n->net = netnum;
             }
         }
-        /* unknown keys are ignored (incl. future IFn_ prefixes) */
+        /* unknown keys are ignored */
     }
 
     Close(fh);
     CloseLibrary((struct Library *)DOSBase);
-
-    /* fail-safe: an incomplete static config must not leave the machine
-     * unreachable — fall back to DHCP */
-    if (staticMode &&
-        (ip4_addr_isany_val(cfg->cfg_Addr) || ip4_addr_isany_val(cfg->cfg_Mask)))
-    {
-        Kprintf("[bsdsocket] netstack.prefs: MODE=STATIC needs ADDRESS and "
-                "NETMASK — falling back to DHCP\n");
-        staticMode = FALSE;
-    }
-    cfg->cfg_Dhcp = !staticMode;
 }

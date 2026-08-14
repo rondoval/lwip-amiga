@@ -556,6 +556,13 @@ struct SocketBase
     struct Task *stackTask;         /* the lwIP stack task; NULL while the stack is down */
     APTR sockPool;      /* objects; alloc/free under the core lock only */
     ULONG openCount;    /* child bases alive */
+    struct MinList openers; /* their openNode links (under openLock): the
+                             * registry NetShutdown uses to ask every client
+                             * to let go (Signal via each opener's breakMask) */
+    UBYTE shuttingDown; /* NetShutdown in progress: LibOpen refuses new
+                         * clients; LibClose of the last one signals the
+                         * stack task (SIGBREAKF_CTRL_E). Under openLock. */
+    UBYTE pad3[3];
     struct MinList releasedSockets; /* ReleaseSocket parking lot (core lock) */
     LONG nextSockId;    /* ReleaseSocket UNIQUE_ID allocator; wraps to 1 rather
                          * than going negative, and skips ids still parked */
@@ -579,6 +586,7 @@ struct SocketBase
     UBYTE pad2[3];
 
     /* --- per-opener state (child bases; garbage in the root) --- */
+    struct MinNode openNode; /* link in root->openers (under openLock) */
     struct Task *task;  /* the opener; the Signal() target of every wake */
     BYTE sigBit;        /* the wait bit of the header's blocking pattern; -1 if AllocSignal failed */
     UBYTE pad0[3];
@@ -634,6 +642,10 @@ struct SocketBase
 };
 
 #define SB_ROOT(b) ((b)->root != NULL ? (b)->root : (b))
+
+/* opener registry: openNode link back to its child base */
+#define SB_OPENER_FROM_NODE(n) \
+    ((struct SocketBase *)((UBYTE *)(n) - __builtin_offsetof(struct SocketBase, openNode)))
 
 /* --- internals ------------------------------------------------------------- */
 
@@ -702,6 +714,12 @@ APTR LibStubNull(void); /* for the pointer-returning unimplemented LVOs */
 /* stack task (sb_stack.c) */
 LONG sb_stack_start(struct SocketBase *root); /* under root->openLock */
 void sb_stack_stop(struct SocketBase *root);
+
+/* interface-name resolution (sb_ifquery.c): matches the Roadshow-style
+ * identity (NetdevIf ndi_Name, case-insensitive) first, then lwIP's own
+ * short name ("nd0", "lo0"). Core lock held; NULL when nothing matches. */
+struct netif;
+struct netif *sb_if_find(const char *name);
 
 /* --- the implemented API surface (register conventions from the NDK sfd) --- */
 

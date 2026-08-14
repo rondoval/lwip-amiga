@@ -284,6 +284,7 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
 
     struct NdRxWrap *w = ndi->ndi_WrapStorage;
     ndi->ndi_FreeWraps = NULL;
+    ndi->ndi_WrapsOut = 0;
     for (ULONG i = 0; i < count; i++, w++)
     {
         w->nrw_If = ndi;
@@ -350,11 +351,32 @@ void netdevif_destroy(struct NetdevIf *ndi)
         netstack_slab_detach(ndi);
         netstack.ns_ActiveNetdev = NULL;
     }
+
+    /* Wrap-pool disposition, decided under the lock (wrap frees run under it
+     * too, so ndi_WrapsOut is exact). Sockets may still hold RX wraps — their
+     * pbufs sit in receive queues across a forced RemoveNetInterface and are
+     * freed only when the app drains or closes, possibly after a successor
+     * interface reuses this NetdevIf. The pool must then outlive this
+     * interface: mark every wrap dead (nrw_If = NULL turns its free into a
+     * no-op — the driver reclaims the buffers itself at forced detach) and
+     * leak the storage. */
+    BOOL leakWraps = ndi->ndi_WrapsOut != 0;
+    if (leakWraps)
+    {
+        Kprintf("[netdevif] %lu RX wraps still held by sockets — wrap pool leaked\n",
+                ndi->ndi_WrapsOut);
+        struct NdRxWrap *w = ndi->ndi_WrapStorage;
+        for (ULONG i = 0; i < ndi->ndi_WrapStorageSize / sizeof(struct NdRxWrap); i++)
+            w[i].nrw_If = NULL;
+    }
     netstack_unlock();
 
-    FreeMem(ndi->ndi_WrapStorage, ndi->ndi_WrapStorageSize);
+    if (!leakWraps)
+        FreeMem(ndi->ndi_WrapStorage, ndi->ndi_WrapStorageSize);
     ndi->ndi_WrapStorage = NULL;
+    ndi->ndi_WrapStorageSize = 0;
     ndi->ndi_FreeWraps = NULL;
+    ndi->ndi_WrapsOut = 0;
     FreeMem(ndi->ndi_TxFree, (ndi->ndi_TxFreeMask + 1) * sizeof(APTR));
     ndi->ndi_TxFree = NULL;
 }

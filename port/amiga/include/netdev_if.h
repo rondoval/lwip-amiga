@@ -27,6 +27,7 @@
 #include <lwip/pbuf.h>
 
 #include <devices/netdev.h>
+#include <netstack_ctl.h> /* NETCTL_* identity field sizes */
 
 struct NdRxWrap;
 struct ip_hdr;  /* lwip/prot/ip4.h */
@@ -144,7 +145,24 @@ struct NetdevIf
                                            the opener overrides from prefs before
                                            the interface is brought up. */
 
+    /* Identity, stamped by the opener (sb_stack.c) right after create():
+     * the Roadshow-style interface name (from the AddNetInterface config
+     * file), the OpenDevice pair it came from, and the address mode. Read
+     * under the core lock by the query LVOs (sb_ifquery.c) and the control
+     * port. lwIP's own short name stays "nd<n>". */
+    char ndi_Name[NETCTL_IFNAME_MAX];   /* "" until stamped */
+    char ndi_Device[NETCTL_DEV_MAX];
+    LONG ndi_Unit;
+    BOOL ndi_Dhcp;
+    char ndi_Hostname[NETCTL_ID_MAX];   /* stable storage: netif_set_hostname
+                                           keeps the pointer */
+
     struct NdRxWrap *ndi_FreeWraps;     /* under the core lock */
+    ULONG ndi_WrapsOut;                 /* wraps lent to lwIP (under the core
+                                           lock). Nonzero at destroy = sockets
+                                           still hold RX pbufs past a forced
+                                           remove -> the pool is marked dead
+                                           and leaked (see netdevif_destroy) */
     APTR ndi_WrapStorage;
     ULONG ndi_WrapStorageSize;
     BOOL ndi_RxOffload;                 /* lwIP TCP/UDP checking disabled */

@@ -25,9 +25,9 @@ The library has two tiers:
 > address-conversion, reentrant/getaddrinfo, **status**, **interface**) report
 > `TRUE`, the rest `FALSE`, and `SBTC_NUM_PACKET_FILTER_CHANNELS` reports `0`. The
 > interface tag reports `TRUE` for its read-only query subset; the config LVOs
-> in that group refuse gracefully with `EINVAL` (configuration is
-> prefs-file-only). Feature-probing apps get a definitive answer instead of an
-> "unknown tag" error.
+> in that group refuse gracefully with `EINVAL` (configuration runs over the
+> private control port via the bundled commands). Feature-probing apps get a
+> definitive answer instead of an "unknown tag" error.
 
 ## Summary
 
@@ -137,24 +137,30 @@ lwIP has no route table beyond netif + gateway, so there is nothing to expose.
 
 ### `SBTC_HAVE_INTERFACE_API` — interface management (10 LVOs)
 
-The stack self-configures from `ENVARC:netstack.prefs`, so **configuration is
-declined**: the config/create family refuses gracefully with `EINVAL` (a shared
-`bsd_InterfaceConfigUnsupported` stub, `sb_ifquery.c`). The **read-only query
-subset is implemented** (`sb_ifquery.c`) and backs the `netinfo` CLI; the
-capability tag is advertised so third-party status apps can use it too.
+Interface **configuration is declined at the LVO level by decision**: runtime
+add/remove and stack shutdown run over the private control port instead
+(`include/netstack_ctl.h`, served by `sb_netctl.c`; driven by the bundled
+`AddNetInterface` / `RemoveNetInterface` / `NetShutdown` commands from
+`DEVS:NetInterfaces/` config files). The config/create LVO family refuses
+gracefully with `EINVAL` (a shared `bsd_InterfaceConfigUnsupported` stub,
+`sb_ifquery.c`) — genuine Roadshow config binaries and third-party config
+GUIs are NOT supported; implementing these LVOs as marshaling front-ends to
+the control port is a known possible future step (see TODO). The **read-only
+query subset is implemented** (`sb_ifquery.c`) and backs the `netinfo` CLI;
+the capability tag is advertised so third-party status apps can use it too.
 
 | LVO | Off. | Impl. | Decision | Notes |
 |---|---|---|---|---|
-| `AddInterfaceTagList` (+ `AddInterfaceTags`) | −444 | 🟡 | ❌ no | Refuses with `EINVAL`; config is prefs-file-only. |
+| `AddInterfaceTagList` (+ `AddInterfaceTags`) | −444 | 🟡 | ❌ no | Refuses with `EINVAL`; use `AddNetInterface` (control port). |
 | `ConfigureInterfaceTagList` (+ `ConfigureInterfaceTags`) | −450 | 🟡 | ❌ no | Refuses with `EINVAL`. |
 | `ReleaseInterfaceList` | −456 | ✅ | ✅ done | |
 | `ObtainInterfaceList` | −462 | ✅ | ✅ done | Names of the live (non-loopback) interfaces. |
 | `QueryInterfaceTagList` (+ `QueryInterfaceTags`) | −468 | ✅ | ✅ done | Address/mask/broadcast/MTU/MAC/state/bind-type/DNS tags, plus packet/byte/error/drop counters (`IFQ_PacketsReceived`, `IFQ_GetBytesIn/Out`, `IFQ_Input/OutputDrops`, `IFQ_IPDrops`, …) backed by the NIC-stats cache and lwIP stats. Counter/link tags are answered only for the active NIC's interface (skipped for e.g. loopback — the cache describes one NIC). Multicast counters, the Max/Pending request tags, `IFQ_AddressLeaseExpires` and `IFQ_GetSANA2CopyStats` are not answered (left untouched). |
-| `CreateAddrAllocMessageA` (+ `CreateAddrAllocMessage`) | −474 | ⛔ | ❌ no | Config; `NULL` stub. |
+| `CreateAddrAllocMessageA` (+ `CreateAddrAllocMessage`) | −474 | ⛔ | ❌ no | Config; `NULL` stub. DHCP waits run inside the stack (`ADD_IF` parks until the lease binds), not via AAM messages. |
 | `DeleteAddrAllocMessage` | −480 | ⛔ | ❌ no | |
 | `BeginInterfaceConfig` | −486 | ⛔ | ❌ no | |
 | `AbortInterfaceConfig` | −492 | ⛔ | ❌ no | |
-| `RemoveInterface` | −732 | 🟡 | ❌ no | Refuses with `EINVAL`. (SFD lists it later, same feature.) |
+| `RemoveInterface` | −732 | 🟡 | ❌ no | Refuses with `EINVAL`; use `RemoveNetInterface` (control port). (SFD lists it later, same feature.) |
 
 ### `SBTC_HAVE_MONITORING_API` — monitor management (2 LVOs)
 

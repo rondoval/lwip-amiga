@@ -60,9 +60,15 @@ struct NetStack
 /* The singleton (defined in netstack.c). */
 extern struct NetStack netstack;
 
-/* One-time init. @timerBase: an opened timer.device base (UNIT_ECLOCK or
- * UNIT_MICROHZ; only ReadEClock is used) owned by the caller and valid for
- * the stack's lifetime. Calls lwip_init() internally (under the lock). */
+/* The stack task's timer.device base (defined in netstack.c, set by
+ * netstack_init): ReadEClock for the ms clock, GetSysTime for timestamps. */
+extern struct Device *TimerBase;
+
+/* Init. @timerBase: an opened timer.device base (UNIT_ECLOCK or UNIT_MICROHZ;
+ * only library calls are used) owned by the caller and valid for the stack's
+ * lifetime. The first call runs lwip_init() (under the lock); later calls
+ * (stack-task restart while the library stays loaded) only re-aim the time
+ * base. */
 void netstack_init(struct Device *timerBase);
 
 void netstack_lock(void);

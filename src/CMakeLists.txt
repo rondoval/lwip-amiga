@@ -88,6 +88,7 @@ add_executable(bsdsocket_library
     bsdsocket/vectors.c
     bsdsocket/sb_config.c
     bsdsocket/sb_stack.c
+    bsdsocket/sb_netctl.c
     bsdsocket/sb_mdns.c
     bsdsocket/sb_socket.c
     bsdsocket/sb_api.c
@@ -261,6 +262,57 @@ target_include_directories(mdns PRIVATE ${CMAKE_SOURCE_DIR}/include)
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/mdns
     DESTINATION C
+)
+
+# --- Roadshow-style network commands ----------------------------------------
+# AddNetInterface / RemoveNetInterface / NetShutdown: runtime interface
+# management and stack shutdown over the stack's control port
+# (include/netstack_ctl.h, shared with sb_netctl.c). Roadshow-compatible CLI
+# templates; the interface config-file format (DEVS:NetInterfaces/) is
+# lwip-amiga's own. Installed under their canonical mixed-case names.
+add_executable(addnetinterface
+    netctl/addnetinterface.c
+    netctl/netctl_client.c
+)
+target_compile_options(addnetinterface PRIVATE -Os ${LWIP_WARN})
+target_include_directories(addnetinterface PRIVATE ${CMAKE_SOURCE_DIR}/include)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/addnetinterface
+    DESTINATION C
+    RENAME AddNetInterface
+)
+
+add_executable(removenetinterface
+    netctl/removenetinterface.c
+    netctl/netctl_client.c
+)
+target_compile_options(removenetinterface PRIVATE -Os ${LWIP_WARN})
+target_include_directories(removenetinterface PRIVATE ${CMAKE_SOURCE_DIR}/include)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/removenetinterface
+    DESTINATION C
+    RENAME RemoveNetInterface
+)
+
+add_executable(netshutdown
+    netctl/netshutdown.c
+    netctl/netctl_client.c
+)
+target_compile_options(netshutdown PRIVATE -Os ${LWIP_WARN})
+target_include_directories(netshutdown PRIVATE ${CMAKE_SOURCE_DIR}/include)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/netshutdown
+    DESTINATION C
+    RENAME NetShutdown
+)
+
+# Sample interface config. Staged under Storage/NetInterfaces (the inactive
+# drawer, AmigaOS-style) so a dev-loop upload can never feed the
+# DEVS:NetInterfaces boot wildcard a stray file; the Installer copies it to
+# DEVS:NetInterfaces/genet only when absent.
+install(
+    FILES ${CMAKE_SOURCE_DIR}/prefs/NetInterfaces/genet
+    DESTINATION Storage/NetInterfaces
 )
 
 # The shippable library.

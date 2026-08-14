@@ -1,25 +1,26 @@
-; netstack.prefs — bsdsocket.library TCP/IP stack configuration
+; netstack.prefs - bsdsocket.library TCP/IP stack configuration (STACK-WIDE)
 ;
 ; The stack reads ENV:netstack.prefs once at startup (the first OpenLibrary
 ; of bsdsocket.library). Keep the master copy in ENVARC: so it survives
-; reboots. Every key is optional; the defaults below apply when a key (or
-; this whole file) is absent: DHCP on networks/genet.device unit 0.
+; reboots. Every key is optional; sensible defaults apply when a key (or
+; this whole file) is absent.
 ;
-; DEVICE = networks/genet.device    ; loaded from DEVS: by convention
-; UNIT = 0
-; MODE = DHCP                       ; DHCP or STATIC
-; HOSTNAME = amiga                  ; DHCP option 12 / gethostname()
+; NETWORK INTERFACES ARE NOT CONFIGURED HERE. Each interface has its own
+; file in DEVS:NetInterfaces/ (the file name is the interface name) and is
+; added at runtime with the AddNetInterface command - the boot line lives in
+; S:Network-Startup:
+;   AddNetInterface DEVS:NetInterfaces/~(#?.info) QUIET
+; See the sample in SYS:Storage/NetInterfaces/genet. The old interface keys
+; (DEVICE, UNIT, MODE, ADDRESS, NETMASK, GATEWAY, VLAN) are obsolete and
+; ignored here.
+;
+; HOSTNAME = amiga                  ; DHCP option 12 / gethostname(); an
+;                                   ; interface file's ID= overrides it there
 ; DOMAIN = example.com              ; resolver search domain: dot-less names
 ;                                   ; are retried as "name.DOMAIN" on a miss
-; VLAN = 100,3                      ; in-band 802.1Q: vid[,pcp] (vid 1..4094,
-;                                   ; pcp 0..7); absent = untagged
 ;
-; Static configuration (MODE = STATIC needs ADDRESS and NETMASK;
-; GATEWAY/DNS are optional):
-; MODE = STATIC
-; ADDRESS = 192.168.1.50
-; NETMASK = 255.255.255.0
-; GATEWAY = 192.168.1.1
+; Explicit DNS servers (optional). They override whatever a DHCP lease
+; supplies, on every interface:
 ; DNS1 = 192.168.1.1
 ; DNS2 = 9.9.9.9
 ;
@@ -27,17 +28,14 @@
 ; Amiga is reachable by name with no DNS server. MDNS_SERVICE advertises a
 ; service too (repeatable, up to 4): type, port, and an optional instance name
 ; that defaults to the host name. Services can also be registered while the
-; stack runs — see the `mdns` command.
+; stack runs - see the `mdns` command.
 ; MDNS = yes
 ; MDNS_SERVICE = _ftp._tcp 21
 ; MDNS_SERVICE = _telnet._tcp 23 Amiga 1200
 ;
 ; Networks database (getnetbyname/getnetbyaddr): built-in entries are
 ; "default 0" and "loopback 127"; NETWORK adds more (repeatable, up to 8,
-; /etc/networks notation — the number is a classful NETWORK number like
+; /etc/networks notation - the number is a classful NETWORK number like
 ; "192.168.0", not an IP address). Config entries shadow the built-ins.
 ; NETWORK = homelan 192.168.0
 ; NETWORK = officelan 10
-;
-; Future: additional interfaces will use IFn_-prefixed keys (IF1_DEVICE,
-; IF1_MODE, ...). Unprefixed keys are interface 0. Unknown keys are ignored.
