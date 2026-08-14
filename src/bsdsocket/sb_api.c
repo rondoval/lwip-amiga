@@ -550,6 +550,20 @@ LONG bsd_IoctlSocket(LONG sock asm("d0"), ULONG req asm("d1"), APTR argp asm("a0
         *(LONG *)argp = n;
         return 0;
     }
+    case SB_SIOCATMARK:
+    {
+        /* at-mark: the next byte the app reads is the one right after the
+         * urgent byte (or, with SO_OOBINLINE, the urgent byte itself).
+         * Non-TCP reports 0, per 4.4BSD's socket-level handling. */
+        LONG at = 0;
+        netstack_lock();
+        if (s->type == SBT_TCP && s->oobMarkDist == 0 &&
+            (s->oobState == SB_OOB_HAVE || s->oobState == SB_OOB_READ))
+            at = 1;
+        netstack_unlock();
+        *(LONG *)argp = at;
+        return 0;
+    }
     default:
         return sb_fail(base, SB_EINVAL);
     }

@@ -60,18 +60,18 @@ All 46 are implemented.
 | `listen` | −42 | ✅ | ✅ done | |
 | `accept` | −48 | ✅ | ✅ done | |
 | `connect` | −54 | ✅ | ✅ done | |
-| `sendto` | −60 | ✅ | ✅ done | |
-| `send` | −66 | ✅ | ✅ done | |
-| `recvfrom` | −72 | ✅ | ✅ done | |
-| `recv` | −78 | ✅ | ✅ done | |
+| `sendto` | −60 | ✅ | ✅ done | `MSG_OOB` sends TCP urgent data (last byte of the write; real URG + urgent pointer on the wire). Refused on UDP/RAW (`EOPNOTSUPP`), per BSD. |
+| `send` | −66 | ✅ | ✅ done | Same `MSG_OOB` support as `sendto`. |
+| `recvfrom` | −72 | ✅ | ✅ done | `MSG_OOB` returns the out-of-band byte (4.4BSD PRU_RCVOOB semantics: `EINVAL` with no mark pending or with `SO_OOBINLINE`; the byte is excised from the in-band stream, and normal reads stop at the urgent mark). |
+| `recv` | −78 | ✅ | ✅ done | Same `MSG_OOB` support as `recvfrom`. |
 | `shutdown` | −84 | ✅ | ✅ done | |
-| `setsockopt` | −90 | 🟡 | ✅ done | `SO_REUSEADDR/KEEPALIVE/BROADCAST/LINGER/SNDTIMEO/RCVTIMEO/EVENTMASK` and `TCP_NODELAY` are real. `SO_SNDBUF`/`SO_RCVBUF` **accept-and-ignore** — the value is dropped and success returned (buffers are compile-time fixed; `getsockopt` honestly reports `TCP_SND_BUF`/`TCP_WND`). Other options → `ENOPROTOOPT`. `SO_LINGER` with a non-zero timeout now does a real timed drain on close (timeout ⇒ RST); `MSG_OOB` is refused. |
+| `setsockopt` | −90 | 🟡 | ✅ done | `SO_REUSEADDR/KEEPALIVE/BROADCAST/LINGER/SNDTIMEO/RCVTIMEO/EVENTMASK` and `TCP_NODELAY` are real. `SO_SNDBUF`/`SO_RCVBUF` **accept-and-ignore** — the value is dropped and success returned (buffers are compile-time fixed; `getsockopt` honestly reports `TCP_SND_BUF`/`TCP_WND`). Other options → `ENOPROTOOPT`. `SO_LINGER` with a non-zero timeout now does a real timed drain on close (timeout ⇒ RST); `SO_OOBINLINE` is real (urgent byte stays in-stream, affects marks latched from then on). |
 | `getsockopt` | −96 | ✅ | ✅ done | |
 | `getsockname` | −102 | ✅ | ✅ done | |
 | `getpeername` | −108 | ✅ | ✅ done | TCP/UDP read the live remote from the pcb; RAW sockets always return `ENOTCONN`. |
-| `IoctlSocket` | −114 | ✅ | ✅ done | |
+| `IoctlSocket` | −114 | ✅ | ✅ done | `FIONBIO`, `FIONREAD`, `FIOASYNC` (per-socket SIGIO toggle, defaults on — arming `SBTC_SIGIOMASK` is the Amiga-side opt-in), `SIOCATMARK`. |
 | `CloseSocket` | −120 | ✅ | ✅ done | |
-| `WaitSelect` | −126 | ✅ | ✅ done | Waits on socket readiness, the caller's signal mask, the break mask and a real timeout. `exceptfds` is always cleared — there is no out-of-band data, so no exceptional condition ever fires. |
+| `WaitSelect` | −126 | ✅ | ✅ done | Waits on socket readiness, the caller's signal mask, the break mask and a real timeout. `exceptfds` reports pending out-of-band data (an unconsumed urgent mark), per BSD. |
 | `SetSocketSignals` | −132 | ✅ | ✅ done | |
 | `getdtablesize` | −138 | ✅ | ✅ done | Returns the opener's current fd-table size (`SB_FD_COUNT` by default, grows via `SBTC_DTABLESIZE`). |
 | `ObtainSocket` | −144 | ✅ | ✅ done | |
@@ -328,7 +328,7 @@ Legend as above — **Impl.**: ✅ handled · 🟡 handled, one direction/limita
 |---|---|---|---|---|---|
 | `SBTC_BREAKMASK` | 1 | Signal mask that aborts blocking calls (^C) | ✅ | ✅ done | Per-opener; defaults to `SIGBREAKF_CTRL_C`. |
 | `SBTC_SIGIOMASK` | 2 | Signal delivered on async socket readiness (SIGIO) | ✅ | ✅ done | |
-| `SBTC_SIGURGMASK` | 3 | Signal delivered on out-of-band data (SIGURG) | 🟡 | 🟡 stored, never delivered | The mask is stored and read back, but **SIGURG is never sent** — there is no out-of-band/urgent-data path anywhere (`MSG_OOB` refused, `FD_OOB` never raised, `exceptfds` never fires). Kept so OOB-probing apps don't error; matches Roadshow (which also fails `recv(MSG_OOB)`). |
+| `SBTC_SIGURGMASK` | 3 | Signal delivered on out-of-band data (SIGURG) | ✅ | ✅ done | Delivered to every owner base when a new urgent mark arrives (`sb_wake_urg`) — on that event only, never on ordinary readiness changes. `FD_OOB` is raised through the event system on the same edge. |
 | `SBTC_SIGEVENTMASK` | 4 | Signal delivered on `FD_*` socket events | ✅ | ✅ done | |
 | `SBTC_ERRNO` | 6 | Current `errno` value | ✅ | ✅ done | |
 | `SBTC_HERRNO` | 7 | Current `h_errno` value | ✅ | ✅ done | |

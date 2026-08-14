@@ -180,6 +180,7 @@ struct sb_ip_mreq
 #define SB_SO_SNDTIMEO 0x1005
 #define SB_SO_RCVTIMEO 0x1006
 #define SB_SO_ERROR 0x1007
+#define SB_SO_OOBINLINE 0x0100
 #define SB_SO_TYPE 0x1008
 #define SB_TCP_NODELAY 1
 
@@ -203,6 +204,14 @@ struct sb_ip_mreq
 #define SB_FIOASYNC 0x8004667DUL
 #define SB_FIONBIO 0x8004667EUL
 #define SB_FIONREAD 0x4004667FUL
+#define SB_SIOCATMARK 0x40047307UL
+
+/* TCP urgent-data (MSG_OOB) receive state, 4.4BSD semantics. Transitions in
+ * sb_tcp_recv_cb (latch/excise) and sb_tcp_recv (consume/pass the mark). */
+#define SB_OOB_NONE 0   /* no mark; recv(MSG_OOB) = EINVAL */
+#define SB_OOB_MARKED 1 /* mark known, byte not yet delivered; recv(MSG_OOB) waits/EWOULDBLOCK */
+#define SB_OOB_HAVE 2   /* byte latched (excised) or, inline, in-stream at the mark */
+#define SB_OOB_READ 3   /* byte consumed via MSG_OOB; mark clamp active until passed */
 
 /* BSD errno values (netinclude/sys/errno.h) */
 #define SB_EINTR 4
@@ -512,6 +521,19 @@ struct SbSocket
     struct pbuf *rxqTail;
     ULONG rxBytes;
 
+    /* TCP urgent data (MSG_OOB). rxNextSeq tracks the absolute seqno of the
+     * next byte sb_tcp_recv_cb will enqueue (origin set at connect/accept),
+     * mapping the pcb's rcv_up mark onto the byte queue. oobMarkDist counts
+     * readable bytes from the app's read point to the mark and is what the
+     * drain clamp and SIOCATMARK run on; the excised byte itself is never in
+     * rxq/rxBytes unless oobInline. */
+    ULONG rxNextSeq;
+    ULONG oobMarkDist;
+    UBYTE oobState; /* SB_OOB_* */
+    UBYTE oobByte;  /* latched urgent byte (non-inline HAVE/READ) */
+    UBYTE oobInline; /* SO_OOBINLINE: byte stays in-stream, no excision */
+    UBYTE oobPad;
+
     /* UDP/RAW receive: queued datagrams */
     struct MinList dgrams;
     ULONG ndgrams;
@@ -562,7 +584,7 @@ struct SocketBase
     UBYTE pad0[3];
     ULONG breakMask;    /* SBTC_BREAKMASK; aborts a blocking call with SB_EINTR (default SIGBREAKF_CTRL_C) */
     ULONG sigIoMask;    /* SBTC_SIGIOMASK; async SIGIO, delivered on every readiness change (see sb_wake) */
-    ULONG sigUrgMask;   /* SBTC_SIGURGMASK; stored and reported back, never delivered — no OOB support */
+    ULONG sigUrgMask;   /* SBTC_SIGURGMASK; SIGURG, delivered when an urgent mark arrives (sb_wake_urg) */
     ULONG sigEventMask; /* SBTC_SIGEVENTMASK; stored, delivered with SIGIO */
 
     LONG internalErrno; /* the errno cell itself, used until SetErrnoPtr redirects errnoPtr */
@@ -638,6 +660,7 @@ BOOL sb_owner_incref(struct SbSocket *s, struct SocketBase *b);
 void sb_owner_decref(struct SbSocket *s, struct SocketBase *b);
 struct SocketBase *sb_owner_first(struct SbSocket *s);
 void sb_wake(struct SbSocket *s);
+void sb_wake_urg(struct SbSocket *s); /* SIGURG only — on urgent arrival, not every readiness change */
 void sb_event(struct SbSocket *s, ULONG ev); /* under lock; signals sigEventMask */
 LONG sb_wait(struct SocketBase *base); /* 0 or SB_EINTR; drops+retakes the lock */
 
@@ -658,6 +681,7 @@ void sb_udp_wire(struct SbSocket *s);
 void sb_raw_wire(struct SbSocket *s);
 BOOL sb_sock_readable(const struct SbSocket *s);
 BOOL sb_sock_writable(struct SbSocket *s);
+BOOL sb_sock_exceptable(const struct SbSocket *s); /* pending unconsumed OOB */
 LONG sb_map_err(signed char lwip_err);
 /* TCP peer address readout (sb_socket.c); core lock held, 0/0 without a pcb */
 void sb_peer_ip(struct SbSocket *s, ULONG *addr, UWORD *port);

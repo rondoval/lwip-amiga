@@ -124,6 +124,20 @@ void sb_wake(struct SbSocket *s)
     }
 }
 
+/* SIGURG fan-out (SBTC_SIGURGMASK / SetSocketSignals). Called only when a
+ * new urgent mark is latched — unlike sigIoMask this must not fire on every
+ * readiness change. */
+void sb_wake_urg(struct SbSocket *s)
+{
+    KprintfT("[bsdsocket] %s: s=0x%08lx\n", __func__, (ULONG)s);
+    for (ULONG i = 0; i < SB_SOCK_OWNERS; i++)
+    {
+        struct SocketBase *b = s->owners[i].base;
+        if (b != NULL && b->task != NULL && b->sigUrgMask != 0)
+            Signal(b->task, b->sigUrgMask);
+    }
+}
+
 /* Record FD_* events for GetSocketEvents and signal the owner's event
  * mask (SBTC_SIGEVENTMASK). Core lock held — every caller is an lwIP
  * callback or an API path under the lock. Only subscribed bits accumulate,
@@ -220,6 +234,15 @@ BOOL sb_sock_readable(const struct SbSocket *s)
     return s->ndgrams != 0;
 }
 
+/* select/WaitSelect exceptfds: pending, unconsumed out-of-band data. READ no
+ * longer flags (the byte was delivered); the excised byte is not in rxq, so
+ * a lone urgent byte is exceptional without being readable — as in BSD. */
+BOOL sb_sock_exceptable(const struct SbSocket *s)
+{
+    return s->type == SBT_TCP &&
+           (s->oobState == SB_OOB_MARKED || s->oobState == SB_OOB_HAVE);
+}
+
 /* TCP peer address readout; core lock held. 0/0 when there is no pcb. */
 void sb_peer_ip(struct SbSocket *s, ULONG *addr, UWORD *port)
 {
@@ -261,7 +284,6 @@ static err_t sb_tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err
 {
     KprintfT("[bsdsocket] %s: s=0x%08lx p=0x%08lx err=%ld\n", __func__, (ULONG)arg, (ULONG)p, (LONG)err);
     struct SbSocket *s = arg;
-    (void)tpcb;
     (void)err;
 
     if (s == NULL)
@@ -271,26 +293,103 @@ static err_t sb_tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err
         return ERR_OK;
     }
 
+    ULONG ev;
+    BOOL newoob = FALSE;
     if (p == NULL)
     {
         s->rxeof = TRUE;
+        ev = SB_FD_CLOSE;
     }
     else
     {
-        /* tail-linked, own byte count: pbuf_cat would walk the whole chain
-         * per segment AND its u16 tot_len bookkeeping overflows at 64 KB */
-        if (s->rxq == NULL)
-            s->rxq = p;
+        ULONG wire = p->tot_len; /* seq-space length; dlen shrinks on excision */
+        ULONG dlen = wire;
+
+        /* Map a fork-latched urgent mark (LWIP_TCP_URG) onto the byte
+         * queue. rcv_up is an absolute seqno; against rxNextSeq it becomes
+         * an offset into this delivery. */
+        if (tpcb != NULL && (tpcb->urgflags & TF_URG_RCV))
+        {
+            LONG d = (LONG)(tpcb->rcv_up - s->rxNextSeq);
+            if (d < 0)
+            {
+                /* stale: a retransmit re-latched a mark below data already
+                 * delivered */
+                tpcb->urgflags &= (u8_t)~TF_URG_RCV;
+            }
+            else if ((ULONG)d < dlen)
+            {
+                tpcb->urgflags &= (u8_t)~TF_URG_RCV;
+                /* readable bytes between the app's read point and the mark
+                 * (a newer mark overwrites an unconsumed older one — BSD
+                 * latest-wins) */
+                s->oobMarkDist = s->rxBytes + (ULONG)d;
+                if (!s->oobInline)
+                {
+                    /* excise the urgent byte: it is delivered through
+                     * recv(MSG_OOB), never in-band */
+                    ULONG off = (ULONG)d;
+                    struct pbuf *h = p;
+                    while (off >= h->len)
+                    {
+                        h->tot_len--; /* predecessors count the byte too */
+                        off -= h->len;
+                        h = h->next;
+                    }
+                    UBYTE *pl = h->payload;
+                    s->oobByte = pl[off];
+                    for (ULONG i = off; i + 1 < h->len; i++)
+                        pl[i] = pl[i + 1];
+                    h->len--;
+                    h->tot_len--;
+                    dlen--;
+                    /* the byte never drains through the app: return its
+                     * window credit now or every mark leaks one byte */
+                    tcp_recved(tpcb, 1);
+                }
+                s->oobState = SB_OOB_HAVE;
+                newoob = TRUE;
+            }
+            else if (s->oobState != SB_OOB_MARKED)
+            {
+                /* mark beyond this delivery: the byte is still in flight;
+                 * TF_URG_RCV stays set for the delivery that contains it */
+                s->oobState = SB_OOB_MARKED;
+                newoob = TRUE;
+            }
+        }
+        s->rxNextSeq += wire;
+
+        if (dlen == 0)
+        {
+            /* the whole delivery was the urgent byte */
+            pbuf_free(p);
+            ev = 0;
+        }
         else
-            s->rxqTail->next = p;
-        struct pbuf *t = p;
-        while (t->next != NULL)
-            t = t->next;
-        s->rxqTail = t;
-        s->rxBytes += p->tot_len;
+        {
+            /* tail-linked, own byte count: pbuf_cat would walk the whole
+             * chain per segment AND its u16 tot_len bookkeeping overflows
+             * at 64 KB */
+            if (s->rxq == NULL)
+                s->rxq = p;
+            else
+                s->rxqTail->next = p;
+            struct pbuf *t = p;
+            while (t->next != NULL)
+                t = t->next;
+            s->rxqTail = t;
+            s->rxBytes += dlen;
+            ev = SB_FD_READ;
+        }
     }
 
-    sb_event(s, p == NULL ? SB_FD_CLOSE : SB_FD_READ);
+    if (newoob)
+    {
+        ev |= SB_FD_OOB;
+        sb_wake_urg(s);
+    }
+    sb_event(s, ev);
     sb_wake(s);
     return ERR_OK;
 }
@@ -353,7 +452,6 @@ err_t sb_tcp_connected_cb(void *arg, struct tcp_pcb *tpcb, err_t err)
 {
     KprintfT("[bsdsocket] %s: s=0x%08lx err=%ld\n", __func__, (ULONG)arg, (LONG)err);
     struct SbSocket *s = arg;
-    (void)tpcb;
 
     if (s != NULL)
     {
@@ -361,6 +459,7 @@ err_t sb_tcp_connected_cb(void *arg, struct tcp_pcb *tpcb, err_t err)
         {
             s->connecting = FALSE;
             s->connected = TRUE;
+            s->rxNextSeq = tpcb->rcv_nxt; /* urgent-mark stream origin */
             sb_tcp_nagle_local(s);
             sb_event(s, SB_FD_CONNECT);
         }
@@ -402,6 +501,7 @@ static err_t sb_tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err)
 
     s->pcb.tcp = newpcb;
     s->connected = TRUE;
+    s->rxNextSeq = newpcb->rcv_nxt; /* urgent-mark stream origin */
     sb_tcp_wire(s);
     sb_tcp_nagle_local(s);
 
