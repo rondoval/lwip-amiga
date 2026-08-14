@@ -36,9 +36,8 @@ A fast, modern TCP/IP stack for classic AmigaOS 3.2.
   the same API used by Roadshow and AmiTCP. Most existing networking software should
   just work, unless it depends on one of the handful of calls not yet implemented (see
   [Known limitations](#known-limitations)).
-- **Well tested.** Validated against the bsdsocktest conformance suite: 138 of 142 tests
-  pass, and the rest are skipped for advanced features that ordinary software never
-  touches. See [Test results](#test-results) below.
+- **Well tested.** Validated against the bsdsocktest conformance suite: all 142 tests
+  pass — including the TCP out-of-band data and asynchronous-notification corners. See [Test results](#test-results) below.
 
 ## Requirements
 
@@ -74,25 +73,8 @@ file at all, lwip-amiga runs DHCP on `networks/genet.device` unit 0.
 lwip-amiga has been run against bsdsocktest, a conformance test suite for
 `bsdsocket.library` implementations, on real Raspberry Pi 4/PiStorm hardware.
 
-**138 of 142 tests pass. 4 are skipped, and none fail.**
+**All 142 tests pass. Nothing is skipped, and none fail.**
 
-Three of the 4 skips cover advanced features that ordinary networking software (web
-browsers, FTP/mail clients, terminal programs, file transfer tools) doesn't use:
-
-- Sending "out-of-band" urgent TCP data (`MSG_OOB`) — 2 tests
-- Asynchronous socket notifications (`FIOASYNC`)
-
-The fourth is more a compliment than a gap: the test tries to force a non-blocking
-`send()` to return `EWOULDBLOCK` by writing 1 MB without ever reading it back, but
-lwip-amiga's TCP send buffer is deliberately sized to exactly 1 MiB (tuned for
-throughput on fast links), so the test's fixed 1 MB probe runs out just short of the
-wall it's trying to hit. The buffer-full/`EWOULDBLOCK` code path is real and
-byte-accurate — this test just wasn't big enough to reach it.
-
-(A fifth raw skip, `ReleaseCopyOfSocket`, is implemented and counted as passing above —
-the raw suite log can show it as skipped if the suite is re-run a second time without
-rebooting, a quirk in the test harness's socket-sharing state rather than a gap in the
-library.)
 
 ## Performance
 

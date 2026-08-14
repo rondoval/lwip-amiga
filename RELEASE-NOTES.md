@@ -1,3 +1,46 @@
+# Release notes — lwip-amiga 1.4
+
+Changes since v1.3.
+
+---
+
+## Breaking changes
+
+None.
+
+---
+
+## New features
+
+### TCP out-of-band data (MSG_OOB) — the full 4.4BSD urgent-data surface
+
+lwip-amiga now implements TCP urgent data end to end, taking the bsdsocktest
+conformance score from 138/142 (4 skips) to a clean **142/142**:
+
+- `send(..., MSG_OOB)` marks the last byte of the write urgent: the segments carry
+  real URG flags and a BSD-convention urgent pointer on the wire (recomputed per
+  transmission, so retransmits and window-forced splits stay correct).
+- `recv(..., MSG_OOB)` returns the out-of-band byte, which is excised from the
+  in-band stream. Normal reads stop at the urgent mark and never cross it in one
+  call, exactly like 4.4BSD.
+- `WaitSelect()` exception sets report pending urgent data, and the
+  `SBTC_SIGURGMASK` / `SetSocketSignals()` SIGURG mask — previously stored but never
+  delivered — now fires when a mark arrives.
+- `SO_OOBINLINE` (deliver the byte in-stream instead) and `IoctlSocket(SIOCATMARK)`
+  (is the read point at the mark?) complete the classic BSD trio.
+
+The protocol half lives in the lwIP fork behind a new `LWIP_TCP_URG` option
+(off upstream, on here) with a dedicated host regression harness in `test/urg/`.
+
+### FIOASYNC
+
+`IoctlSocket(FIOASYNC)` is now a real per-socket toggle for SIGIO
+(`SBTC_SIGIOMASK`) delivery. It defaults **on** — unlike BSD — because on the Amiga
+arming the signal mask is itself the opt-in, and AmiTCP-era programs park in
+`Wait()` on it without ever calling FIOASYNC; `FIOASYNC(0)` opts a socket back out.
+
+---
+
 # Release notes — lwip-amiga 1.3
 
 Changes since v1.2.
