@@ -735,7 +735,7 @@ LONG sb_stack_start(struct SocketBase *root); /* under root->openLock */
 void sb_stack_stop(struct SocketBase *root);
 
 /* interface-name resolution (sb_ifquery.c): matches the Roadshow-style
- * identity (NetdevIf ndi_Name, case-insensitive) first, then lwIP's own
+ * identity (NetIfBase nib_Name, case-insensitive) first, then lwIP's own
  * short name ("nd0", "lo0"). Core lock held; NULL when nothing matches. */
 struct netif;
 struct netif *sb_if_find(const char *name);

@@ -9,10 +9,11 @@
  * and fail cleanly with EINVAL.
  *
  * Every field is read from the live lwIP netif plus the interface's own
- * identity (NetdevIf, stamped at add time); netif access is bracketed by the
- * core lock, as in bsd_In_LocalAddr. Interfaces answer to two names: the
- * Roadshow-style identity ("genet", from the config file) and lwIP's short
- * name ("nd0") — sb_if_find resolves both.
+ * identity (the NetIfBase, stamped at add time — backend-agnostic, so this
+ * file never sees which driver ABI is behind the interface); netif access is
+ * bracketed by the core lock, as in bsd_In_LocalAddr. Interfaces answer to
+ * two names: the Roadshow-style identity ("genet", from the config file) and
+ * lwIP's short name ("nd0") — sb_if_find resolves both.
  */
 
 #include "sb_base.h"
@@ -34,7 +35,7 @@
 #include <lwip/netif.h>
 #include <lwip/stats.h>
 
-#include "netdev_if.h"
+#include "netif_base.h"
 #include "netstack.h"
 
 static BOOL sb_if_is_loopback(const struct netif *nif)
@@ -44,10 +45,10 @@ static BOOL sb_if_is_loopback(const struct netif *nif)
 
 struct netif *sb_if_find(const char *name)
 {
-    struct NetdevIf *ndi = netstack.ns_ActiveNetdev;
-    if (ndi != NULL && ndi->ndi_Name[0] != '\0' &&
-        _Stricmp((CONST_STRPTR)name, (CONST_STRPTR)ndi->ndi_Name) == 0)
-        return &ndi->ndi_Netif;
+    struct NetIfBase *nib = netstack.ns_ActiveIf;
+    if (nib != NULL && nib->nib_Name[0] != '\0' &&
+        _Stricmp((CONST_STRPTR)name, (CONST_STRPTR)nib->nib_Name) == 0)
+        return &nib->nib_Netif;
     return netif_find(name);
 }
 
@@ -116,8 +117,8 @@ APTR bsd_ObtainInterfaceList(struct SocketBase *base asm("a6"))
          * pointed to by ln_Name (the documented ObtainInterfaceList shape).
          * The reported name is the Roadshow-style identity when the
          * interface has one, else lwIP's short name. */
-        struct NetdevIf *ndi = netstack.ns_ActiveNetdev;
-        BOOL named = ndi != NULL && nif == &ndi->ndi_Netif && ndi->ndi_Name[0] != '\0';
+        struct NetIfBase *nib = netstack.ns_ActiveIf;
+        BOOL named = nib != NULL && nif == &nib->nib_Netif && nib->nib_Name[0] != '\0';
         ULONG nameMax = named ? NETCTL_IFNAME_MAX : NETIF_NAMESIZE;
         struct Node *n = AllocVec(sizeof(struct Node) + nameMax,
                                   MEMF_PUBLIC | MEMF_CLEAR);
@@ -125,7 +126,7 @@ APTR bsd_ObtainInterfaceList(struct SocketBase *base asm("a6"))
             break;
         n->ln_Name = (char *)(n + 1);
         if (named)
-            strlcpy(n->ln_Name, ndi->ndi_Name, nameMax);
+            strlcpy(n->ln_Name, nib->nib_Name, nameMax);
         else
             netif_index_to_name(netif_get_index(nif), n->ln_Name);
         AddTail(list, n);
@@ -172,12 +173,12 @@ LONG bsd_QueryInterfaceTagList(STRPTR name asm("a0"), struct TagItem *tags asm("
 
     ULONG addr = ip4_addr_get_u32(netif_ip4_addr(nif));
     ULONG mask = ip4_addr_get_u32(netif_ip4_netmask(nif));
-    /* The NIC-stats cache and driver caps describe exactly one netif — the
-     * active netdev's. Counter/link tags are answered only for that interface
-     * (and skipped for e.g. loopback), so a query never gets another NIC's
-     * numbers. */
-    BOOL isNic = netstack.ns_ActiveNetdev != NULL &&
-                 nif == &netstack.ns_ActiveNetdev->ndi_Netif;
+    /* The NIC-stats cache and interface identity describe exactly one netif —
+     * the active hardware interface's. Counter/link tags are answered only
+     * for that interface (and skipped for e.g. loopback), so a query never
+     * gets another NIC's numbers. */
+    struct NetIfBase *nib = netstack.ns_ActiveIf;
+    BOOL isNic = nib != NULL && nif == &nib->nib_Netif;
 
     for (struct TagItem *t = tags; t->ti_Tag != TAG_END;)
     {
@@ -209,11 +210,11 @@ LONG bsd_QueryInterfaceTagList(STRPTR name asm("a0"), struct TagItem *tags asm("
             /* identity lives with the interface; the storage (the static
              * stack ctx) outlives the interface */
             if (isNic)
-                *(STRPTR *)d = (STRPTR)netstack.ns_ActiveNetdev->ndi_Device;
+                *(STRPTR *)d = (STRPTR)nib->nib_Device;
             break;
         case IFQ_DeviceUnit:
             if (isNic)
-                *(LONG *)d = netstack.ns_ActiveNetdev->ndi_Unit;
+                *(LONG *)d = nib->nib_Unit;
             break;
         case IFQ_HardwareAddressSize:
             *(LONG *)d = (LONG)nif->hwaddr_len * 8; /* in bits */
@@ -247,8 +248,7 @@ LONG bsd_QueryInterfaceTagList(STRPTR name asm("a0"), struct TagItem *tags asm("
             break;
         case IFQ_AddressBindType:
             if (isNic)
-                *(LONG *)d = netstack.ns_ActiveNetdev->ndi_Dhcp ? IFABT_Dynamic
-                                                                : IFABT_Static;
+                *(LONG *)d = nib->nib_Dhcp ? IFABT_Dynamic : IFABT_Static;
             break;
         case IFQ_PrimaryDNSAddress:
             sb_if_set_sockaddr(d, ip4_addr_get_u32(ip_2_ip4(dns_getserver(0))));
@@ -313,15 +313,14 @@ LONG bsd_QueryInterfaceTagList(STRPTR name asm("a0"), struct TagItem *tags asm("
             *(LONG *)d = (LONG)root->netLink.ndls_SpeedMbps * 1000000;
             break;
         case IFQ_HardwareMTU:
-            *(LONG *)d = isNic ? netstack.ns_ActiveNetdev->ndi_Caps.ndc_Mtu
-                               : nif->mtu;
+            *(LONG *)d = isNic ? nib->nib_HwMtu : nif->mtu;
             break;
-        /* isNic (checked above) guarantees ns_ActiveNetdev != NULL here */
+        /* isNic (checked above) guarantees nib != NULL here */
         case IFQ_NumReadRequests:
-            *(LONG *)d = netstack.ns_ActiveNetdev->ndi_Caps.ndc_RxRingSlots;
+            *(LONG *)d = nib->nib_NumRead;
             break;
         case IFQ_NumWriteRequests:
-            *(LONG *)d = netstack.ns_ActiveNetdev->ndi_Caps.ndc_TxRingSlots;
+            *(LONG *)d = nib->nib_NumWrite;
             break;
         case IFQ_Metric:
             *(LONG *)d = 0; /* single-homed host, no routing metric */

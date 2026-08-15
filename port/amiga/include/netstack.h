@@ -19,7 +19,9 @@
 #include <perf.h> /* struct lock_prof: core-lock wait/hold profiling */
 
 struct Device;
+struct NetIfBase;
 struct NetdevIf;
+struct Sana2If;
 
 /* Slab front-end size classes over the packet heap (see netstack_mem.c). */
 #define NS_SLAB_CLASSES 3
@@ -36,9 +38,18 @@ struct NetStack
 
     ULONG ns_RandState;
 
-    /* v1: the single attached NIC; routes the lwIP heap to its DMA
-     * allocator (multi-netif TX pools are a design-phase open question) */
-    struct NetdevIf *ns_ActiveNetdev;
+    /* The single attached hardware interface, seen two ways. ns_ActiveIf is
+     * the backend-agnostic view (identity, VLAN, multicast set — what
+     * sb_ifquery and the base hooks read); the typed pointers below are the
+     * backend views, of which EXACTLY ONE is non-NULL and equal to
+     * ns_ActiveIf whenever it is set. Heap routing and the outermost-lock
+     * TX hooks key on the typed pointers (NULL = cheap no-op), so they stay
+     * branch-light and cast-free. */
+    struct NetIfBase *ns_ActiveIf;
+    struct NetdevIf *ns_ActiveNetdev; /* also routes the lwIP heap to the
+                                         driver's DMA allocator; NULL means
+                                         the AllocMem fallback serves it */
+    struct Sana2If *ns_ActiveSana2;
 
     ULONG ns_MemInUse;  /* diagnostic */
 

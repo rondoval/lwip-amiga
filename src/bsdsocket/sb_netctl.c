@@ -95,7 +95,7 @@ ULONG sb_netctl_sigmask(void)
 static void sb_netctl_fill_outputs(struct SbStackCtx *ctx, struct NetCtlMsg *msg)
 {
     netstack_lock();
-    struct netif *nf = &ctx->ndi.ndi_Netif;
+    struct netif *nf = &ctx->ndi.ndi_Base.nib_Netif;
     msg->ncm_AddrOut = ip4_addr_get_u32(netif_ip4_addr(nf));
     msg->ncm_MaskOut = ip4_addr_get_u32(netif_ip4_netmask(nf));
     msg->ncm_GatewayOut = ip4_addr_get_u32(netif_ip4_gw(nf));
@@ -135,8 +135,8 @@ static BOOL sb_netctl_try_complete_add(struct SbStackCtx *ctx)
 
     netstack_lock();
     BOOL ready = (msg->ncm_Config.nif_Flags & NETCTL_IFF_DHCP)
-                     ? dhcp_supplied_address(&ctx->ndi.ndi_Netif) != 0
-                     : netif_is_link_up(&ctx->ndi.ndi_Netif) != 0;
+                     ? dhcp_supplied_address(&ctx->ndi.ndi_Base.nib_Netif) != 0
+                     : netif_is_link_up(&ctx->ndi.ndi_Base.nib_Netif) != 0;
     netstack_unlock();
     if (!ready)
         return FALSE;
@@ -244,7 +244,7 @@ static LONG sb_netctl_rem(struct SbStackCtx *ctx, struct NetCtlMsg *msg)
 
     netstack_lock();
     struct netif *nf = sb_if_find(msg->ncm_Config.nif_Name);
-    BOOL match = ctx->created && nf == &ctx->ndi.ndi_Netif;
+    BOOL match = ctx->created && nf == &ctx->ndi.ndi_Base.nib_Netif;
     ULONG bound = match ? sb_netctl_bound_count(nf) : 0;
     netstack_unlock();
 
@@ -265,7 +265,7 @@ static LONG sb_netctl_rem(struct SbStackCtx *ctx, struct NetCtlMsg *msg)
     }
 
     Kprintf("[bsdsocket] netctl: removing interface '%s'%s\n",
-            ctx->ndi.ndi_Name, msg->ncm_Force != 0 ? " (forced)" : "");
+            ctx->ndi.ndi_Base.nib_Name, msg->ncm_Force != 0 ? " (forced)" : "");
     sb_stats_drain(ctx);
     sb_netdev_down(ctx);
     return NETCTL_OK;

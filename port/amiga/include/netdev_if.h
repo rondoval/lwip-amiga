@@ -27,7 +27,7 @@
 #include <lwip/pbuf.h>
 
 #include <devices/netdev.h>
-#include <netstack_ctl.h> /* NETCTL_* identity field sizes */
+#include "netif_base.h"
 
 struct NdRxWrap;
 struct ip_hdr;  /* lwip/prot/ip4.h */
@@ -50,13 +50,6 @@ struct tcp_hdr; /* lwip/prot/tcp.h */
  * flushed on link change. All access is under the core lock. */
 #define NDIF_HH_ENTRIES    4u  /* direct-mapped by dst-IP low bits */
 #define NDIF_HH_HDR_MAX    18u /* Ethernet 14 + one 802.1Q tag */
-
-/* Exact multicast RX filter: how many distinct multicast MACs the stack
- * tracks and hands the driver in one NETDEV_CMD_SET_RXFILTER. Beyond this the
- * glue falls back to NDFF_ALLMULTI (see ndif_igmp_mac_filter). Generous vs
- * real group counts; the driver imposes its own (smaller) exact-slot bound and
- * falls back to all-multi independently if the list overruns it. */
-#define NDIF_MCAST_MAX     32u
 
 struct NdHhEntry
 {
@@ -135,27 +128,12 @@ struct NdGroCtx
 
 struct NetdevIf
 {
-    struct netif ndi_Netif;
+    struct NetIfBase ndi_Base;          /* must stay first: netif->state points
+                                           at this struct, the base, and the
+                                           netif all at once (netif_base.h) */
     APTR ndi_Drv;                       /* nda_DrvCtx */
     const struct NetDevDrvOps *ndi_Ops; /* nda_DrvOps */
     struct NetDevCaps ndi_Caps;
-    LONG ndi_VlanTci;                   /* in-band 802.1Q: -1 = no VLAN, else
-                                           (pcp<<13)|(vid&0xFFF); read by the
-                                           lwIP VLAN hooks. create() defaults it;
-                                           the opener overrides from prefs before
-                                           the interface is brought up. */
-
-    /* Identity, stamped by the opener (sb_stack.c) right after create():
-     * the Roadshow-style interface name (from the AddNetInterface config
-     * file), the OpenDevice pair it came from, and the address mode. Read
-     * under the core lock by the query LVOs (sb_ifquery.c) and the control
-     * port. lwIP's own short name stays "nd<n>". */
-    char ndi_Name[NETCTL_IFNAME_MAX];   /* "" until stamped */
-    char ndi_Device[NETCTL_DEV_MAX];
-    LONG ndi_Unit;
-    BOOL ndi_Dhcp;
-    char ndi_Hostname[NETCTL_ID_MAX];   /* stable storage: netif_set_hostname
-                                           keeps the pointer */
 
     struct NdRxWrap *ndi_FreeWraps;     /* under the core lock */
     ULONG ndi_WrapsOut;                 /* wraps lent to lwIP (under the core
@@ -179,22 +157,6 @@ struct NetdevIf
     volatile ULONG ndi_TxFreeCons;      /* core-lock holder (consumer) */
     ULONG ndi_TxFreeOverflow;           /* backstop: inline frees on a full ring
                                            (unreachable at correct sizing) */
-
-    /* IGMP -> exact driver RX filter. ndif_igmp_mac_filter (lwIP hook, under
-     * the core lock) keeps the set of joined multicast MACs — 01:00:5e + the
-     * group's low 23 bits, refcounted so the several IPv4 groups that can alias
-     * one MAC share a slot — and raises ndi_RxFilterDirty on any change. The
-     * stack task (sb_rxfilter_sync) snapshots the list and issues
-     * NETDEV_CMD_SET_RXFILTER OFF the lock — that command runs on the driver
-     * unit task, which takes the core lock in its RX path, so issuing it under
-     * the lock would deadlock. Joins past NDIF_MCAST_MAX bump ndi_McastOverflow,
-     * falling back to NDFF_ALLMULTI until they drain. */
-    UBYTE ndi_McastList[NDIF_MCAST_MAX][6]; /* distinct joined multicast MACs */
-    UWORD ndi_McastRefs[NDIF_MCAST_MAX];    /* per-MAC join refcount */
-    UWORD ndi_McastCount;                   /* distinct MACs in the list */
-    UWORD ndi_McastOverflow;                /* joins that didn't fit -> allmulti */
-    UWORD ndi_RxFilterWant;                 /* desired NDFF_* (0 or NDFF_ALLMULTI) */
-    BOOL ndi_RxFilterDirty;                 /* set changed; stack task must push */
 
     struct NdHhEntry ndi_Hh[NDIF_HH_ENTRIES];
     ULONG ndi_HhPrimeDst;               /* dst IP whose header linkoutput should

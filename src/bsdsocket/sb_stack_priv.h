@@ -46,9 +46,11 @@ struct SbStackCtx
     struct NetDevStats statsBuf;
     struct NetDevLinkState linkBuf;
 
-    /* off-lock snapshot of ndi_McastList for NETDEV_CMD_SET_RXFILTER: filled
-     * under the core lock, then handed to the driver with the lock dropped */
-    UBYTE rxFilterMacs[NDIF_MCAST_MAX][6];
+    /* off-lock snapshot of the base's joined-MAC set for
+     * NETDEV_CMD_SET_RXFILTER: filled under the core lock
+     * (netifbase_mcast_snapshot), then handed to the driver with the lock
+     * dropped */
+    UBYTE rxFilterMacs[NIB_MCAST_MAX][6];
 };
 
 /* Bring the netdev interface up per @nif: OpenDevice, ATTACH, lwIP netif,

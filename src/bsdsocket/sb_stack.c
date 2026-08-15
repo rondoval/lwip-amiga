@@ -132,40 +132,24 @@ LONG sb_netdev_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
 
     /* identity: what the query LVOs and the control port know this interface
      * as; lwIP's own name stays "nd<n>" */
-    for (ULONG i = 0; i < NETCTL_IFNAME_MAX; i++)
-        ctx->ndi.ndi_Name[i] = nif->nif_Name[i];
-    for (ULONG i = 0; i < NETCTL_DEV_MAX; i++)
-        ctx->ndi.ndi_Device[i] = nif->nif_Device[i];
-    ctx->ndi.ndi_Unit = nif->nif_Unit;
-    ctx->ndi.ndi_Dhcp = (nif->nif_Flags & NETCTL_IFF_DHCP) != 0;
-
-    /* netif_set_hostname keeps the pointer, so the name needs storage that
-     * lives with the interface — the per-add ID, or the global pref */
-    const char *host = nif->nif_Id[0] != '\0' ? nif->nif_Id
-                                              : ctx->root->netCfg.cfg_Hostname;
-    ULONG h = 0;
-    for (; h < NETCTL_ID_MAX - 1 && host[h] != '\0'; h++)
-        ctx->ndi.ndi_Hostname[h] = host[h];
-    ctx->ndi.ndi_Hostname[h] = '\0';
-
-    /* in-band 802.1Q VID (-1 = untagged); read per-packet by the VLAN hooks */
-    ctx->ndi.ndi_VlanTci = nif->nif_VlanTci;
+    struct netif *nf = &ctx->ndi.ndi_Base.nib_Netif;
+    netifbase_stamp(&ctx->ndi.ndi_Base, nif, ctx->root->netCfg.cfg_Hostname);
     if (nif->nif_VlanTci >= 0)
         Kprintf("[bsdsocket] VLAN enabled: vid %ld pcp %ld\n",
                 (LONG)(nif->nif_VlanTci & 0xFFF), (LONG)((nif->nif_VlanTci >> 13) & 7));
 
     netstack_lock();
-    netif_set_default(&ctx->ndi.ndi_Netif);
-    netif_set_hostname(&ctx->ndi.ndi_Netif, ctx->ndi.ndi_Hostname);
+    netif_set_default(nf);
+    netif_set_hostname(nf, ctx->ndi.ndi_Base.nib_Hostname);
     if (!(nif->nif_Flags & NETCTL_IFF_DHCP))
     {
         ip4_addr_t addr, mask, gw;
         addr.addr = nif->nif_Addr;
         mask.addr = nif->nif_Mask;
         gw.addr = nif->nif_Gateway;
-        netif_set_addr(&ctx->ndi.ndi_Netif, &addr, &mask, &gw);
+        netif_set_addr(nf, &addr, &mask, &gw);
     }
-    netif_set_up(&ctx->ndi.ndi_Netif);
+    netif_set_up(nf);
     netstack_unlock();
 
     err = sb_netdev_cmd(ctx->devIO, NETDEV_CMD_START, NULL, 0);
@@ -181,7 +165,7 @@ LONG sb_netdev_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
     if (nif->nif_Flags & NETCTL_IFF_DHCP)
     {
         netstack_lock();
-        dhcp_start(&ctx->ndi.ndi_Netif);
+        dhcp_start(nf);
         netstack_unlock();
     }
     if (nif->nif_Flags & NETCTL_IFF_DHCP)
@@ -194,7 +178,7 @@ LONG sb_netdev_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
     /* mDNS last: the responder probes as soon as it is added, and it wants an
      * interface that is already up (an address is not required — it re-probes
      * itself when DHCP supplies one). */
-    sb_mdns_start(&ctx->ndi.ndi_Netif, &ctx->root->netCfg);
+    sb_mdns_start(nf, &ctx->root->netCfg);
     return NETCTL_OK;
 }
 
@@ -205,8 +189,8 @@ void sb_netdev_down(struct SbStackCtx *ctx)
     if (ctx->started)
     {
         netstack_lock();
-        dhcp_release_and_stop(&ctx->ndi.ndi_Netif);
-        netif_set_down(&ctx->ndi.ndi_Netif);
+        dhcp_release_and_stop(&ctx->ndi.ndi_Base.nib_Netif);
+        netif_set_down(&ctx->ndi.ndi_Base.nib_Netif);
         netstack_unlock();
         sb_netdev_cmd(ctx->devIO, NETDEV_CMD_STOP, NULL, 0);
         ctx->started = FALSE;
@@ -304,18 +288,13 @@ void sb_stats_drain(struct SbStackCtx *ctx)
  * when the async stats cycle is idle; a set left dirty is retried next tick. */
 static void sb_rxfilter_sync(struct SbStackCtx *ctx)
 {
-    struct NetdevIf *ndi = &ctx->ndi;
-    if (!ctx->started || ctx->statsPhase != 0 || !ndi->ndi_RxFilterDirty)
+    if (!ctx->started || ctx->statsPhase != 0 || !ctx->ndi.ndi_Base.nib_RxFilterDirty)
         return;
 
-    netstack_lock();
-    UWORD flags = ndi->ndi_RxFilterWant;
-    UWORD count = ndi->ndi_McastCount;
-    for (UWORD i = 0; i < count; i++)
-        for (int b = 0; b < 6; b++)
-            ctx->rxFilterMacs[i][b] = ndi->ndi_McastList[i][b];
-    ndi->ndi_RxFilterDirty = FALSE;
-    netstack_unlock();
+    UWORD overflow;
+    UWORD count = netifbase_mcast_snapshot(&ctx->ndi.ndi_Base,
+                                           ctx->rxFilterMacs, &overflow);
+    UWORD flags = overflow > 0 ? NDFF_ALLMULTI : 0;
 
     struct NetDevRxFilter filter;
     filter.ndrx_Flags = flags;

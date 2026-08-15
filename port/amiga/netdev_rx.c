@@ -105,7 +105,8 @@ static BOOL ndif_rx_csum_ok(const struct NetDevRxDesc *d, ULONG raw)
 static void ndif_deliver(struct NetdevIf *ndi, struct pbuf *p)
 {
     PERF_T0(t_in);
-    if (ndi->ndi_Netif.input(p, &ndi->ndi_Netif) != ERR_OK)
+    struct netif *nif = &ndi->ndi_Base.nib_Netif;
+    if (nif->input(p, nif) != ERR_OK)
         pbuf_free(p);
     PERF_ADD(&ns_perf, NSP_RX_INPUT, t_in);
 }
