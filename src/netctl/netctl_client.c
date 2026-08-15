@@ -109,6 +109,8 @@ const char *netctl_strerror(LONG result)
         return "not operational yet (no link or no DHCP lease)";
     case NETCTL_ERR_ABORTED:
         return "aborted";
+    case NETCTL_ERR_HWTYPE:
+        return "not a 48-bit Ethernet SANA-II device";
     default:
         return "unknown error";
     }

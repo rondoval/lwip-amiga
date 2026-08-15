@@ -95,7 +95,7 @@ ULONG sb_netctl_sigmask(void)
 static void sb_netctl_fill_outputs(struct SbStackCtx *ctx, struct NetCtlMsg *msg)
 {
     netstack_lock();
-    struct netif *nf = &ctx->ndi.ndi_Base.nib_Netif;
+    struct netif *nf = &sb_ctx_base(ctx)->nib_Netif;
     msg->ncm_AddrOut = ip4_addr_get_u32(netif_ip4_addr(nf));
     msg->ncm_MaskOut = ip4_addr_get_u32(netif_ip4_netmask(nf));
     msg->ncm_GatewayOut = ip4_addr_get_u32(netif_ip4_gw(nf));
@@ -133,10 +133,11 @@ static BOOL sb_netctl_try_complete_add(struct SbStackCtx *ctx)
     if (msg == NULL)
         return FALSE;
 
+    struct netif *nf = &sb_ctx_base(ctx)->nib_Netif;
     netstack_lock();
     BOOL ready = (msg->ncm_Config.nif_Flags & NETCTL_IFF_DHCP)
-                     ? dhcp_supplied_address(&ctx->ndi.ndi_Base.nib_Netif) != 0
-                     : netif_is_link_up(&ctx->ndi.ndi_Base.nib_Netif) != 0;
+                     ? dhcp_supplied_address(nf) != 0
+                     : netif_is_link_up(nf) != 0;
     netstack_unlock();
     if (!ready)
         return FALSE;
@@ -162,6 +163,8 @@ static LONG sb_netctl_add(struct SbStackCtx *ctx, struct NetCtlMsg *msg)
     nif->nif_Id[NETCTL_ID_MAX - 1] = '\0';
     if (nif->nif_Name[0] == '\0' || nif->nif_Device[0] == '\0')
         return NETCTL_ERR_PARAM;
+    if (nif->nif_Type < NETCTL_TYPE_AUTO || nif->nif_Type > NETCTL_TYPE_SANA2)
+        return NETCTL_ERR_PARAM;
     if ((nif->nif_Flags & NETCTL_IFF_HAS_MTU) && nif->nif_Mtu <= 0)
         return NETCTL_ERR_PARAM;
     if (!(nif->nif_Flags & NETCTL_IFF_DHCP) &&
@@ -169,7 +172,7 @@ static LONG sb_netctl_add(struct SbStackCtx *ctx, struct NetCtlMsg *msg)
         return NETCTL_ERR_PARAM; /* static needs at least ADDRESS + NETMASK */
 
     LONG aux = 0;
-    LONG res = sb_netdev_up(ctx, nif, &aux);
+    LONG res = sb_if_up(ctx, nif, &aux);
     msg->ncm_Aux = aux;
     if (res != NETCTL_OK)
         return res;
@@ -244,7 +247,7 @@ static LONG sb_netctl_rem(struct SbStackCtx *ctx, struct NetCtlMsg *msg)
 
     netstack_lock();
     struct netif *nf = sb_if_find(msg->ncm_Config.nif_Name);
-    BOOL match = ctx->created && nf == &ctx->ndi.ndi_Base.nib_Netif;
+    BOOL match = ctx->created && nf == &sb_ctx_base(ctx)->nib_Netif;
     ULONG bound = match ? sb_netctl_bound_count(nf) : 0;
     netstack_unlock();
 
@@ -265,9 +268,9 @@ static LONG sb_netctl_rem(struct SbStackCtx *ctx, struct NetCtlMsg *msg)
     }
 
     Kprintf("[bsdsocket] netctl: removing interface '%s'%s\n",
-            ctx->ndi.ndi_Base.nib_Name, msg->ncm_Force != 0 ? " (forced)" : "");
+            sb_ctx_base(ctx)->nib_Name, msg->ncm_Force != 0 ? " (forced)" : "");
     sb_stats_drain(ctx);
-    sb_netdev_down(ctx);
+    sb_if_down(ctx);
     return NETCTL_OK;
 }
 

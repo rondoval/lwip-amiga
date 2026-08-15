@@ -25,8 +25,11 @@ struct SbStackCtx
     struct Task *parent;
     volatile LONG startResult; /* 0 ok, else failed */
     struct NetdevIf ndi;
+    UWORD ifKind; /* NIF_KIND_* of the open interface (set by sb_if_up) */
     struct MsgPort *devPort;
-    struct IOStdReq *devIO;
+    struct IOStdReq *devIO; /* IOSana2Req-sized superset; netdev commands and
+                               the NSD probe use this IOStdReq view, the
+                               SANA-II backend casts to struct IOSana2Req */
     BOOL devOpen;
     BOOL attached;
     BOOL created; /* netdevif_create succeeded (netif added, glue live) */
@@ -53,16 +56,49 @@ struct SbStackCtx
     UBYTE rxFilterMacs[NIB_MCAST_MAX][6];
 };
 
-/* Bring the netdev interface up per @nif: OpenDevice, ATTACH, lwIP netif,
- * START, DHCP or static config, mDNS. Returns a NETCTL_* result; on
- * NETCTL_ERR_DEVICE the device error lands in @aux. Any partial bring-up is
- * unwound before returning, so a failed call leaves no state behind. */
+/* The interface base of whichever backend owns (or is bringing up) the
+ * interface — what backend-agnostic code dereferences instead of ctx->ndi. */
+static inline struct NetIfBase *sb_ctx_base(struct SbStackCtx *ctx)
+{
+    return &ctx->ndi.ndi_Base; /* the SANA-II arm arrives with its backend */
+}
+
+/* Bring an interface up per @nif: open the device, resolve the driver ABI
+ * (explicit TYPE, or the NSCMD_DEVICEQUERY probe for AUTO) and hand off to
+ * the backend bring-up. Returns a NETCTL_* result; on NETCTL_ERR_DEVICE the
+ * device error lands in @aux. Any partial bring-up is unwound before
+ * returning, so a failed call leaves no state behind. */
+LONG sb_if_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
+              LONG *aux);
+
+/* Full reverse of sb_if_up (backend teardown by ctx->ifKind, then the
+ * common device close); safe on any partial state (flag-guarded). The
+ * caller must run sb_stats_drain first if the stats cycle may be live. */
+void sb_if_down(struct SbStackCtx *ctx);
+
+/* Shared bring-up halves for the backends (sb_stack.c): configure = identity
+ * stamp + netif default/hostname/address/up (call once the datapath can carry
+ * the frames set_up emits); services = DHCP + mDNS (call once the driver is
+ * started). */
+void sb_if_configure(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif);
+void sb_if_services(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif);
+
+/* Backend halves, dispatched by sb_if_up/sb_if_down. Contract: the device
+ * is already open on ctx->devIO when *_up runs, and a failed *_up unwinds
+ * everything (through sb_if_down) before returning; *_down handles only the
+ * backend's own stages — the device close belongs to sb_if_down. */
 LONG sb_netdev_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
                   LONG *aux);
-
-/* Full reverse of sb_netdev_up; safe on any partial state (flag-guarded).
- * The caller must run sb_stats_drain first if the stats cycle may be live. */
 void sb_netdev_down(struct SbStackCtx *ctx);
+LONG sb_sana_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
+                LONG *aux);
+void sb_sana_down(struct SbStackCtx *ctx);
+
+/* Tick-driven netdev services (sb_netdev.c), called through the kind
+ * dispatchers in the stack task's loop. */
+void sb_netdev_stats_kick(struct SbStackCtx *ctx);
+void sb_netdev_stats_reply(struct SbStackCtx *ctx);
+void sb_netdev_rxfilter_sync(struct SbStackCtx *ctx);
 
 /* Reclaim a stats request still in flight before devIO is reused (STOP/DETACH) */
 void sb_stats_drain(struct SbStackCtx *ctx);

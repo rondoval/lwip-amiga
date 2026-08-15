@@ -30,7 +30,7 @@
 #include <exec/types.h>
 
 #define NETCTL_PORT_NAME "bsdsocket.netctl"
-#define NETCTL_VERSION   1
+#define NETCTL_VERSION   2
 
 #define NETCTL_IFNAME_MAX 16 /* Roadshow-compatible: 15 chars + NUL */
 #define NETCTL_DEV_MAX    64 /* OpenDevice name, path form included */
@@ -72,12 +72,23 @@
                                          background */
 #define NETCTL_ERR_ABORTED      (-11) /* SHUTDOWN reply after CANCEL_SHUTDOWN;
                                          remaining client count in ncm_Count */
+#define NETCTL_ERR_HWTYPE       (-12) /* ADD_IF: the SANA-II device is not
+                                         48-bit Ethernet (wrong wire type) */
 
 /* nif_Flags */
 #define NETCTL_IFF_DHCP     (1UL << 0) /* configure via DHCP (no static address) */
 #define NETCTL_IFF_HAS_MASK (1UL << 1)
 #define NETCTL_IFF_HAS_GW   (1UL << 2)
 #define NETCTL_IFF_HAS_MTU  (1UL << 3)
+
+/* nif_Type — which driver ABI the device speaks. AUTO (the default, and 0 so
+ * an old-style config parses to it) probes with NSCMD_DEVICEQUERY:
+ * NSDEVTYPE_SANA2 -> SANA2, NETDEV_CMD_ATTACH in the command list -> NETDEV,
+ * and a device without NSD support is assumed SANA-II (legacy drivers
+ * predate NSD; every netdev driver implements it). */
+#define NETCTL_TYPE_AUTO   0
+#define NETCTL_TYPE_NETDEV 1
+#define NETCTL_TYPE_SANA2  2
 
 /* Parsed by the command (from a DEVS:NetInterfaces/<name> file), executed by
  * the stack task. IPv4 addresses are raw network-byte-order words so the
@@ -88,6 +99,7 @@ struct NetCtlIfConfig
     char  nif_Device[NETCTL_DEV_MAX];  /* as written; the stack retries the
                                           bare basename for resident modules */
     LONG  nif_Unit;
+    LONG  nif_Type;                    /* NETCTL_TYPE_* driver-ABI selection */
     ULONG nif_Flags;                   /* NETCTL_IFF_* */
     ULONG nif_Addr;                    /* network byte order; 0 = unset */
     ULONG nif_Mask;

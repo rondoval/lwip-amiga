@@ -22,8 +22,9 @@
  * "warn").
  *
  * The config file format is lwip-amiga's own — one option per line, '#'/';'
- * comment lines, no SANA-II keys, and an unknown option is an error:
- *   DEVICE/K (required), UNIT/K/N, ADDRESS/K (dotted quad | DHCP; omitted =
+ * comment lines, and an unknown option is an error:
+ *   DEVICE/K (required), UNIT/K/N, TYPE/K (AUTO | NETDEV | SANA2; omitted =
+ *   AUTO, which probes the device), ADDRESS/K (dotted quad | DHCP; omitted =
  *   DHCP), NETMASK/K + GATEWAY/K (static), MTU/K/N, VLAN/K (vid[,pcp]),
  *   ID/K (per-interface DHCP hostname). DNS is stack-wide: netstack.prefs.
  *
@@ -68,11 +69,13 @@ enum
     ARG_COUNT
 };
 
-#define FILE_TEMPLATE "DEVICE/K,UNIT/K/N,ADDRESS/K,NETMASK/K,GATEWAY/K,MTU/K/N,VLAN/K,ID/K"
+#define FILE_TEMPLATE \
+    "DEVICE/K,UNIT/K/N,TYPE/K,ADDRESS/K,NETMASK/K,GATEWAY/K,MTU/K/N,VLAN/K,ID/K"
 enum
 {
     FA_DEVICE,
     FA_UNIT,
+    FA_TYPE,
     FA_ADDRESS,
     FA_NETMASK,
     FA_GATEWAY,
@@ -254,7 +257,23 @@ static BOOL parse_file(const char *path, struct NetCtlIfConfig *cfg)
             strncpy(cfg->nif_Device, (char *)vals[FA_DEVICE], NETCTL_DEV_MAX - 1);
         if (vals[FA_UNIT] != 0)
             cfg->nif_Unit = *(LONG *)vals[FA_UNIT];
-        if (vals[FA_ADDRESS] != 0)
+        if (vals[FA_TYPE] != 0)
+        {
+            const char *v = (char *)vals[FA_TYPE];
+            if (stricmp(v, "AUTO") == 0)
+                cfg->nif_Type = NETCTL_TYPE_AUTO;
+            else if (stricmp(v, "NETDEV") == 0)
+                cfg->nif_Type = NETCTL_TYPE_NETDEV;
+            else if (stricmp(v, "SANA2") == 0)
+                cfg->nif_Type = NETCTL_TYPE_SANA2;
+            else
+            {
+                report(TRUE, "'%s' line %ld: bad TYPE '%s' (AUTO | NETDEV | SANA2)",
+                       path, lineNo, v);
+                ok = FALSE;
+            }
+        }
+        if (ok && vals[FA_ADDRESS] != 0)
         {
             const char *v = (char *)vals[FA_ADDRESS];
             if (stricmp(v, "DHCP") == 0)

@@ -89,6 +89,8 @@ add_executable(bsdsocket_library
     bsdsocket/vectors.c
     bsdsocket/sb_config.c
     bsdsocket/sb_stack.c
+    bsdsocket/sb_netdev.c
+    bsdsocket/sb_sana.c
     bsdsocket/sb_netctl.c
     bsdsocket/sb_mdns.c
     bsdsocket/sb_socket.c
