@@ -156,6 +156,7 @@ struct sb_timeval
 #define SB_IPPROTO_UDP 17
 
 /* IP-level socket options (level SB_IPPROTO_IP), BSD/AmiTCP numbering */
+#define SB_IP_HDRINCL 2
 #define SB_IP_MULTICAST_IF 9
 #define SB_IP_MULTICAST_TTL 10
 #define SB_IP_MULTICAST_LOOP 11

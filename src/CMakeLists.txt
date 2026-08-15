@@ -323,7 +323,40 @@ target_include_directories(arp PRIVATE ${CMAKE_SOURCE_DIR}/include)
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/arp
     DESTINATION C
-    RENAME arp
+)
+
+# --- ping / traceroute: 4.4BSD network diagnostics ---------------------------
+# Mike Muuss's ping and Van Jacobson's traceroute (4.4BSD-Lite2, via Olaf
+# Barthel's Roadshow port from the AmigaOS 3.2 NDK; Amiga-side changes are
+# public domain). Roadshow-compatible templates and output. traceroute sends
+# through the raw-socket IP_HDRINCL path (sb_sockopt.c). The $VER cookie
+# carries the component release version, stamped here like the library's.
+set(TOOL_VERSION "${lwip-amiga_VERSION_MAJOR}.${lwip-amiga_VERSION_MINOR}")
+
+add_executable(ping
+    ping/ping.c
+)
+target_compile_options(ping PRIVATE -Os ${LWIP_WARN})
+target_compile_definitions(ping PRIVATE
+    TOOL_VERSION="${TOOL_VERSION}"
+    TOOL_DATE="${CURRENT_DATE}"
+)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/ping
+    DESTINATION C
+)
+
+add_executable(traceroute
+    traceroute/traceroute.c
+)
+target_compile_options(traceroute PRIVATE -Os ${LWIP_WARN})
+target_compile_definitions(traceroute PRIVATE
+    TOOL_VERSION="${TOOL_VERSION}"
+    TOOL_DATE="${CURRENT_DATE}"
+)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/traceroute
+    DESTINATION C
 )
 
 # Sample interface config. Staged under Storage/NetInterfaces (the inactive

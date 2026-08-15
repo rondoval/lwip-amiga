@@ -142,7 +142,7 @@ See [RELEASE-NOTES.md](RELEASE-NOTES.md) for more on what's behind these numbers
   timeout or Ctrl-C it is recalled and the network keeps running. Opening
   `bsdsocket.library` afterwards starts a fresh stack. Note that `LibOpen` returns
   failure while a shutdown is pending, so programs cannot sneak in mid-teardown.
-- **`Arp`** — displays, sets and deletes ARP table entries, ported from 4.3BSD arp(8)
+- **`arp`** — displays, sets and deletes ARP table entries, ported from 4.3BSD arp(8)
   (template `-a=ALL/S,-d=DELETE/S,-s=SET/S,HOSTNAME,ADDRESS,TEMP/S,-f=FILE/K,
   -n=NONAMES/S=NUMBERS/S`). `Arp ALL` lists the table (`NONAMES` skips the reverse-DNS
   lookups, useful without a reachable resolver), `Arp SET <host> <mac>` pins an entry
@@ -153,6 +153,19 @@ See [RELEASE-NOTES.md](RELEASE-NOTES.md) for more on what's behind these numbers
   the template and a `pub` token in a batch file is rejected. Third-party software can
   drive the same machinery through the classic `SIOCSARP`/`SIOCGARP`/`SIOCDARP` (plus
   whole-table `SIOCGARPT`) `IoctlSocket()` requests — see `include/net/if_arp_ioctl.h`.
+- **`ping`** — the classic 4.4BSD ping with the Roadshow template (`-c=COUNT/K/N,
+  -d=DEBUG/S,-i=INTERVAL/K/N,-l=LOAD/K/N,-n=NUMERICONLY/S=NUMERIC/S,-o=ONEREPLY/S,
+  -q=QUIET/S,-R=RECORDROUTE/S,DONTROUTE/S,-s=SIZE/K/N,-t=TIMEOUT/K/N,-v=VERBOSE/S,
+  BELL/S,HOST/A`): ICMP echo with per-reply round-trip times and a
+  min/avg/max/loss summary on Ctrl-C or `COUNT` completion. `RECORDROUTE` is
+  refused (lwIP cannot send IP options); `DEBUG` and `DONTROUTE` are accepted but
+  inert.
+- **`traceroute`** — Van Jacobson's traceroute with the Roadshow template
+  (`-d=DEBUG/S,-m=MAXTTL/K/N,-n=NUMERIC/S,-p=PORT/K/N,-q=QUERIES/K/N,-r=DONTROUTE/S,
+  -s=SOURCE/K,-t=TOS/K/N,-v=VERBOSE/S,-w=WAIT/K/N,HOST/A,PACKETSIZE/N`): maps the
+  gateways toward a host with TTL-stepped UDP probes over the raw-socket
+  `IP_HDRINCL` path, `*` for hops that stay quiet and `!H`/`!N`/`!P` annotations
+  for unreachables.
 - **`netinfo`** — shows your current network status at a glance: address, netmask,
   broadcast, MTU, MAC address, link state, DHCP/static, and DNS servers.
 - **`netdev-stats`** — shows live driver statistics (packet/error counters, link state)

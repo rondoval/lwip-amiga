@@ -6,57 +6,84 @@ Changes since v1.3.
 
 ## Breaking changes
 
-None.
+### Network interfaces are now started explicitly
+
+Opening `bsdsocket.library` now brings the stack up with only the loopback
+interface. Real interfaces are added by the new `AddNetInterface` command,
+normally from `S:Network-Startup` at boot — the installer sets this up for
+you. If you update by copying files instead of running the installer, add
+this line to `S:Network-Startup` (or run it once after boot):
+
+    AddNetInterface DEVS:NetInterfaces/~(#?.info) QUIET
+
+Interface settings moved with it: each interface is now described by its own
+file in `DEVS:NetInterfaces/` (see the README for the format), and
+`ENV:netstack.prefs` keeps only the stack-wide settings such as hostname,
+DNS servers and mDNS.
 
 ---
 
 ## New features
 
-### TCP out-of-band data (MSG_OOB) — the full 4.4BSD urgent-data surface
+### Interface management commands
 
-lwip-amiga now implements TCP urgent data end to end, taking the bsdsocktest
-conformance score from 138/142 (4 skips) to a clean **142/142**:
+Roadshow-style control over the running stack: `AddNetInterface` brings up
+interfaces from `DEVS:NetInterfaces/` files and waits until they are usable
+(link up, DHCP lease bound); `RemoveNetInterface` takes one down again; and
+`NetShutdown` stops the whole stack, waiting for network programs to quit
+and then unloading the library from memory. Interface files can also be
+started from Workbench by double-clicking them.
 
-- `send(..., MSG_OOB)` marks the last byte of the write urgent: the segments carry
-  real URG flags and a BSD-convention urgent pointer on the wire (recomputed per
-  transmission, so retransmits and window-forced splits stay correct).
-- `recv(..., MSG_OOB)` returns the out-of-band byte, which is excised from the
-  in-band stream. Normal reads stop at the urgent mark and never cross it in one
-  call, exactly like 4.4BSD.
-- `WaitSelect()` exception sets report pending urgent data, and the
-  `SBTC_SIGURGMASK` / `SetSocketSignals()` SIGURG mask — previously stored but never
-  delivered — now fires when a mark arrives.
-- `SO_OOBINLINE` (deliver the byte in-stream instead) and `IoctlSocket(SIOCATMARK)`
-  (is the read point at the mark?) complete the classic BSD trio.
+### `ping` and `traceroute` commands
 
-The protocol half lives in the lwIP fork behind a new `LWIP_TCP_URG` option
-(off upstream, on here) with a dedicated host regression harness in `test/urg/`.
+The classic network diagnostics, with Roadshow-compatible templates and
+output. `ping` reports round-trip times, packet loss and duplicates;
+`traceroute` shows the gateways a packet crosses on its way to a host.
+`ping RECORDROUTE` is not supported by this stack and says so; `DEBUG` and
+`DONTROUTE` are accepted but have no effect.
 
-### `Arp` command + SIOC*ARP ioctls
+For raw-socket programs, `setsockopt(IP_HDRINCL)` now works: the library
+completes the IP header the same way a BSD kernel would (checksum and
+length always; source address and packet id when left zero).
 
-A port of 4.3BSD arp(8) with a Roadshow-compatible template: `Arp ALL` lists the
-ARP table (pending entries show as `(incomplete)`; `NONAMES` skips reverse DNS),
-`Arp <host>` shows one entry, `Arp SET <host> <mac>` pins one (permanent unless
-`TEMP`), `Arp DELETE <host>` removes one of any state, and `FILE` loads a batch.
-Published/proxy ARP is not supported by this stack: Roadshow's `PUBLISH`/`PROXY`
-switches are omitted from the template, a `pub` token in a batch file is rejected
-with a per-line error, and the library refuses `ATF_PUBL` with `EINVAL`.
+### `arp` command
 
-Underneath, `IoctlSocket()` gains the classic `SIOCSARP`/`SIOCDARP`/`SIOCGARP`
-requests plus the whole-table `SIOCGARPT` (AmiTCP-style) — published in the new
-`include/net/if_arp_ioctl.h` for third-party use, since Roadshow's netinclude
-ships `struct arpreq` but no request codes. The ARP table grew from 10 to 32
-entries with static-entry support (lwIP fork additions: pending-aware
-`etharp_get_entry_info()`, any-state `etharp_remove_entry()`, dynamic-or-static
-`etharp_add_entry()`), and manual ARP changes now flush the TX fast path's L2
-header cache immediately instead of riding out the 64-frame revalidation window.
+Displays, sets and deletes entries in the stack's ARP table, with a
+Roadshow-compatible template: `arp ALL` lists the table, `arp SET <host>
+<mac>` pins an entry, `arp DELETE <host>` removes one, and `FILE` loads a
+batch of entries from a file. Published/proxy ARP entries are not supported
+by this stack. Programs can drive the same machinery through the classic
+`SIOCSARP`/`SIOCGARP`/`SIOCDARP` `IoctlSocket()` requests, which are now
+implemented.
+
+### TCP out-of-band data (MSG_OOB)
+
+TCP urgent data now works end to end: `MSG_OOB` on send and receive,
+`SO_OOBINLINE`, `SIOCATMARK`, exception reporting in `WaitSelect()` and the
+`SetSocketSignals()` urgent-data signal all behave as on 4.4BSD. Programs
+that use urgent data — telnet clients sending interrupts, mainly — now work
+as intended. This takes the bsdsocktest conformance score from 138/142 to a
+clean **142/142**.
 
 ### FIOASYNC
 
-`IoctlSocket(FIOASYNC)` is now a real per-socket toggle for SIGIO
-(`SBTC_SIGIOMASK`) delivery. It defaults **on** — unlike BSD — because on the Amiga
-arming the signal mask is itself the opt-in, and AmiTCP-era programs park in
-`Wait()` on it without ever calling FIOASYNC; `FIOASYNC(0)` opts a socket back out.
+`IoctlSocket(FIOASYNC)` is now a real per-socket toggle for SIGIO delivery.
+It defaults on — on the Amiga, arming the signal mask with
+`SetSocketSignals()` is itself the opt-in, and AmiTCP-era programs rely on
+that; `FIOASYNC(0)` opts a socket back out.
+
+---
+
+## Bug fixes / Improvements
+
+### UDP connect now commits the local address
+
+Connecting a UDP socket now fixes the local address the same way BSD does,
+so `getsockname()` afterwards reports the address the sends will actually
+use instead of `0.0.0.0` — the classic way for a program to find out which
+of its addresses routes to a given destination. Connecting toward a
+destination with no route now fails with `ENETUNREACH` instead of appearing
+to succeed.
 
 ---
 

@@ -11,6 +11,7 @@
 #include <lwip/tcp.h>
 #include <lwip/igmp.h>
 #include <lwip/ip_addr.h>
+#include <lwip/raw.h>
 
 #include <debug.h>
 
@@ -227,6 +228,19 @@ LONG bsd_setsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
                 e = sb_mcast_leave(s, mreq->imr_multiaddr, mreq->imr_interface);
             break;
         }
+        case SB_IP_HDRINCL:
+            /* Raw sockets only: the caller supplies the complete IP header
+             * and lwIP transmits it verbatim. */
+            if (s->type != SBT_RAW || s->pcb.raw == NULL)
+            {
+                e = SB_EINVAL;
+                break;
+            }
+            if (val)
+                raw_set_flags(s->pcb.raw, RAW_FLAGS_HDRINCL);
+            else
+                raw_clear_flags(s->pcb.raw, RAW_FLAGS_HDRINCL);
+            break;
         case SB_IP_MULTICAST_TTL:
         case SB_IP_MULTICAST_LOOP:
         case SB_IP_MULTICAST_IF:

@@ -13,6 +13,9 @@
 #include <lwip/raw.h>
 #include <lwip/tcp.h>
 #include <lwip/udp.h>
+#include <lwip/ip.h>
+#include <lwip/prot/ip4.h>
+#include <lwip/inet_chksum.h>
 
 #include <debug.h>
 
@@ -183,6 +186,49 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
     return sent;
 }
 
+/* Complete an IP_HDRINCL header the way the BSD/Linux kernels do — lwIP
+ * itself transmits it verbatim. Per Linux raw(7): total length and header
+ * checksum are ALWAYS set by the stack; source address and id are filled
+ * only when the app left them zero. Core lock held (the id counter and the
+ * route query rely on it). Returns 0 or an SB_* errno. */
+static LONG sb_hdrincl_complete(struct SbSocket *s, struct pbuf *p,
+                                const ip_addr_t *dst)
+{
+    static u16_t sb_hdrincl_id;
+
+    /* the IPv4-only ip_route() macro discards its source argument */
+    LWIP_UNUSED_ARG(s);
+
+    if (p->len < IP_HLEN)
+        return SB_EINVAL;
+
+    struct ip_hdr *iphdr = (struct ip_hdr *)p->payload;
+    u16_t hlen = IPH_HL_BYTES(iphdr);
+    if (IPH_V(iphdr) != 4 || hlen < IP_HLEN || hlen > p->tot_len)
+        return SB_EINVAL;
+
+    IPH_LEN_SET(iphdr, lwip_htons(p->tot_len));
+
+    if (IPH_ID(iphdr) == 0)
+        IPH_ID_SET(iphdr, lwip_htons(++sb_hdrincl_id));
+
+    if (ip4_addr_get_u32(&iphdr->src) == 0)
+    {
+        struct netif *nif = ip_route(&s->pcb.raw->local_ip, dst);
+        if (nif == NULL)
+            return SB_ENETUNREACH;
+        const ip_addr_t *src = ip_netif_get_local_ip(nif, dst);
+        if (src == NULL)
+            return SB_ENETUNREACH;
+        ip4_addr_copy(iphdr->src, *ip_2_ip4(src));
+    }
+
+    IPH_CHKSUM_SET(iphdr, 0);
+    IPH_CHKSUM_SET(iphdr, inet_chksum(iphdr, hlen));
+
+    return 0;
+}
+
 static LONG sb_dgram_send(struct SocketBase *base, struct SbSocket *s,
                           const UBYTE *buf, LONG len,
                           BOOL have_dst, ip_addr_t *dst, u16_t port)
@@ -208,8 +254,20 @@ static LONG sb_dgram_send(struct SocketBase *base, struct SbSocket *s,
         r = have_dst ? udp_sendto(s->pcb.udp, p, dst, port)
                      : udp_send(s->pcb.udp, p);
     else if (s->type == SBT_RAW && s->pcb.raw != NULL)
+    {
+        if (raw_flags(s->pcb.raw) & RAW_FLAGS_HDRINCL)
+        {
+            LONG e = sb_hdrincl_complete(s, p, have_dst ? dst : &s->pcb.raw->remote_ip);
+            if (e != 0)
+            {
+                pbuf_free(p);
+                netstack_unlock();
+                return sb_fail(base, e);
+            }
+        }
         r = have_dst ? raw_sendto(s->pcb.raw, p, dst)
                      : raw_send(s->pcb.raw, p);
+    }
 
     pbuf_free(p);
     PERF_ADD(&ns_perf, NSP_UDP_SEND, t_send);
@@ -361,7 +419,20 @@ LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
         if (s->type == SBT_UDP && s->pcb.udp != NULL)
             r = udp_sendto(s->pcb.udp, p, &ip, port);
         else if (s->type == SBT_RAW && s->pcb.raw != NULL)
+        {
+            if (raw_flags(s->pcb.raw) & RAW_FLAGS_HDRINCL)
+            {
+                e = sb_hdrincl_complete(s, p, &ip);
+                if (e != 0)
+                {
+                    pbuf_free(p);
+                    netstack_unlock();
+                    sb_set_errno(base, e);
+                    return -1;
+                }
+            }
             r = raw_sendto(s->pcb.raw, p, &ip);
+        }
     }
     else
     {
@@ -378,7 +449,20 @@ LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
             r = udp_send(s->pcb.udp, p);
         }
         else if (s->type == SBT_RAW && s->pcb.raw != NULL)
+        {
+            if (raw_flags(s->pcb.raw) & RAW_FLAGS_HDRINCL)
+            {
+                LONG e = sb_hdrincl_complete(s, p, &s->pcb.raw->remote_ip);
+                if (e != 0)
+                {
+                    pbuf_free(p);
+                    netstack_unlock();
+                    sb_set_errno(base, e);
+                    return -1;
+                }
+            }
             r = raw_send(s->pcb.raw, p);
+        }
     }
     pbuf_free(p);
     netstack_unlock();

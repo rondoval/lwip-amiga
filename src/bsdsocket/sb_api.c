@@ -337,7 +337,34 @@ LONG bsd_connect(LONG sock asm("d0"), APTR name asm("a0"), LONG namelen asm("d1"
 
     case SBT_UDP:
         if (s->pcb.udp != NULL)
-            r = udp_connect(s->pcb.udp, &ip, port);
+        {
+            /* BSD in_pcbconnect semantics: connecting a UDP socket also
+             * commits the local address, so getsockname() afterwards reports
+             * the source the sends will use — the classic "which address
+             * routes there" discovery (traceroute does this). lwIP's
+             * udp_connect only records the remote, so route and pin here;
+             * no route is ENETUNREACH, as on BSD. */
+            if (ip_addr_isany(&s->pcb.udp->local_ip))
+            {
+                struct netif *nif = ip_route(&s->pcb.udp->local_ip, &ip);
+                if (nif == NULL)
+                {
+                    netstack_unlock();
+                    return sb_fail(base, SB_ENETUNREACH);
+                }
+                r = udp_connect(s->pcb.udp, &ip, port);
+                if (r == ERR_OK)
+                {
+                    const ip_addr_t *src = ip_netif_get_local_ip(nif, &ip);
+                    if (src != NULL)
+                        ip_addr_copy(s->pcb.udp->local_ip, *src);
+                }
+            }
+            else
+            {
+                r = udp_connect(s->pcb.udp, &ip, port);
+            }
+        }
         break;
     case SBT_RAW:
         if (s->pcb.raw != NULL)
