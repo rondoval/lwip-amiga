@@ -26,6 +26,7 @@
 
 #include "netstack.h"
 #include "netdev_if.h" /* netdevif_tx_kick / netdevif_tx_reclaim at outermost lock */
+#include "sana2_if.h"  /* sana2if_tx_flush at outermost unlock */
 #include "nsprof.h"
 
 struct NetStack netstack;
@@ -42,6 +43,7 @@ static const char *const ns_perf_names[NSP_SLOT_COUNT] = {
     "recv_lockwait", "recv_copy", "recv_ackflush", "recv_sleep",
     "send_lockwait", "send_write", "send_output", "send_sleep",
     "udp_send",
+    "s2_requeue",
 };
 struct perf ns_perf = { "nsprof", ns_perf_names, ns_perf_slots, NSP_SLOT_COUNT };
 
@@ -147,10 +149,13 @@ void netstack_unlock(void)
             netif_poll_all();
         }
 
-        /* Publish any TX batch staged during this hold with a single doorbell.
-         * After the loopback drain so loopback-generated TX is included; still
-         * under the lock, so it cannot race the driver's own datapath. */
+        /* Publish any TX batch staged during this hold with a single doorbell
+         * (netdev) or one SendIO burst (SANA-II) — at most one of the typed
+         * pointers is non-NULL, and both calls are NULL-tolerant. After the
+         * loopback drain so loopback-generated TX is included; still under
+         * the lock, so it cannot race the driver's own datapath. */
         netdevif_tx_kick(netstack.ns_ActiveNetdev);
+        sana2if_tx_flush(netstack.ns_ActiveSana2);
     }
     lock_prof_release(&netstack.ns_LockProf, &netstack.ns_Core);
 }

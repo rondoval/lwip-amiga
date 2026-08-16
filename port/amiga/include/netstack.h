@@ -53,12 +53,21 @@ struct NetStack
 
     ULONG ns_MemInUse;  /* diagnostic */
 
-    /* packet-heap slab front-end (netstack_mem.c): O(1) per-class freelists
-     * over arenas from the attached driver's DMA pool; all access under
-     * ns_Core. Freelist links live inside the free slots. */
-    void *ns_SlabFree[NS_SLAB_CLASSES];   /* intrusive freelist heads */
-    void *ns_SlabArenas[NS_SLAB_CLASSES]; /* NsSlabArena chains */
-    ULONG ns_SlabGrows[NS_SLAB_CLASSES];  /* diagnostic */
+    /* packet-heap slab front-end (netstack_mem.c): O(1) per-class freelists,
+     * all access under ns_Core, freelist links live inside the free slots.
+     * TWO disjoint worlds that never share a freelist or an arena: the DMA
+     * world (arenas from the attached netdev's allocator, returned at
+     * detach) and the exec world (AllocMem arenas serving the no-netdev
+     * case — SANA-II interfaces and the pre-attach window — persisting
+     * until the stack task's final teardown). Which world serves an
+     * allocation follows ns_ActiveNetdev; a block's origin word routes its
+     * free back to the right world whenever it dies. */
+    void *ns_SlabFree[NS_SLAB_CLASSES];    /* DMA-world freelist heads */
+    void *ns_SlabArenas[NS_SLAB_CLASSES];  /* DMA-world NsSlabArena chains */
+    ULONG ns_SlabGrows[NS_SLAB_CLASSES];   /* diagnostic */
+    void *ns_SlabFreeX[NS_SLAB_CLASSES];   /* exec-world freelist heads */
+    void *ns_SlabArenasX[NS_SLAB_CLASSES]; /* exec-world arena chains */
+    ULONG ns_SlabGrowsX[NS_SLAB_CLASSES];  /* diagnostic */
 
     /* Core-lock profiling (emu68-common lock_prof): wait/hold timing of
      * ns_Core, outermost holds only. Written under PROFILE; the field is
@@ -91,9 +100,16 @@ void netstack_tick(void);
 /* Monotonic milliseconds (also lwIP's sys_now). Call under the lock. */
 ULONG netstack_now_ms(void);
 
-/* Return the slab arenas to @nd's DMA pool and reset the freelists.
- * netdevif_destroy calls this under the core lock, before it clears
- * ns_ActiveNetdev. */
+/* Return the DMA-world slab arenas to @nd's DMA pool and reset that
+ * world's freelists. netdevif_destroy calls this under the core lock,
+ * before it clears ns_ActiveNetdev. The exec world is untouched. */
 void netstack_slab_detach(struct NetdevIf *nd);
+
+/* Free the exec-world arenas and forget their freelists. Only for the
+ * stack task's final teardown — every interface down, every client gone,
+ * nothing left that could hold a live slab block. A restarted stack task
+ * regrows on demand; without this call the arenas would outlive the
+ * library at expunge. */
+void netstack_slab_exec_release(void);
 
 #endif /* LWIPAMIGA_NETSTACK_H */

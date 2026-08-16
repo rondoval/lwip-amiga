@@ -13,9 +13,11 @@
 #include <exec/types.h>
 
 #include <devices/netdev.h>
+#include <devices/sana2.h>
 #include <netstack_ctl.h>
 
 #include "netdev_if.h"
+#include "sana2_if.h"
 
 struct SocketBase;
 
@@ -25,6 +27,7 @@ struct SbStackCtx
     struct Task *parent;
     volatile LONG startResult; /* 0 ok, else failed */
     struct NetdevIf ndi;
+    struct Sana2If s2i;
     UWORD ifKind; /* NIF_KIND_* of the open interface (set by sb_if_up) */
     struct MsgPort *devPort;
     struct IOStdReq *devIO; /* IOSana2Req-sized superset; netdev commands and
@@ -42,25 +45,34 @@ struct SbStackCtx
     struct NetCtlMsg *pendingAdd;
     struct NetCtlMsg *pendingShutdown;
 
-    /* async NIC-stats poll: devIO cycles GET_STATS -> GET_LINK via SendIO so
-     * the 100 ms tick never blocks on the driver unit task; results publish
-     * into the root cache when the GET_LINK reply lands */
-    UBYTE statsPhase; /* 0 idle, 1 GET_STATS out, 2 GET_LINK out */
+    /* async NIC-stats poll: devIO cycles via SendIO so the 100 ms tick
+     * never blocks on the driver; results publish into the root cache
+     * (NetDevStats/NetDevLinkState — the neutral shape BOTH backends fill).
+     * netdev: GET_STATS -> GET_LINK, two phases; SANA-II: one
+     * S2_GETGLOBALSTATS phase into s2StatsBuf, mapped + merged with the
+     * glue's byte counters at reply. */
+    UBYTE statsPhase; /* 0 idle, 1 first request out, 2 GET_LINK out (netdev) */
     struct NetDevStats statsBuf;
     struct NetDevLinkState linkBuf;
+    struct Sana2DeviceStats s2StatsBuf;
 
-    /* off-lock snapshot of the base's joined-MAC set for
-     * NETDEV_CMD_SET_RXFILTER: filled under the core lock
-     * (netifbase_mcast_snapshot), then handed to the driver with the lock
-     * dropped */
+    /* off-lock snapshot of the base's joined-MAC set: filled under the core
+     * lock (netifbase_mcast_snapshot), then handed to the driver with the
+     * lock dropped — netdev as one declarative NETDEV_CMD_SET_RXFILTER,
+     * SANA-II as S2_ADD/DELMULTICASTADDRESS deltas against sanaShadow (the
+     * last set actually programmed). */
     UBYTE rxFilterMacs[NIB_MCAST_MAX][6];
+    UBYTE sanaShadow[NIB_MCAST_MAX][6];
+    UWORD sanaShadowCount;
+    BOOL sanaMcastUnsupported; /* driver said IOERR_NOCMD: stop trying */
 };
 
 /* The interface base of whichever backend owns (or is bringing up) the
  * interface — what backend-agnostic code dereferences instead of ctx->ndi. */
 static inline struct NetIfBase *sb_ctx_base(struct SbStackCtx *ctx)
 {
-    return &ctx->ndi.ndi_Base; /* the SANA-II arm arrives with its backend */
+    return ctx->ifKind == NIF_KIND_SANA2 ? &ctx->s2i.s2i_Base
+                                         : &ctx->ndi.ndi_Base;
 }
 
 /* Bring an interface up per @nif: open the device, resolve the driver ABI
@@ -94,11 +106,14 @@ LONG sb_sana_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
                 LONG *aux);
 void sb_sana_down(struct SbStackCtx *ctx);
 
-/* Tick-driven netdev services (sb_netdev.c), called through the kind
- * dispatchers in the stack task's loop. */
+/* Tick-driven backend services (sb_netdev.c / sb_sana.c), called through
+ * the kind dispatchers in the stack task's loop. */
 void sb_netdev_stats_kick(struct SbStackCtx *ctx);
 void sb_netdev_stats_reply(struct SbStackCtx *ctx);
 void sb_netdev_rxfilter_sync(struct SbStackCtx *ctx);
+void sb_sana_stats_kick(struct SbStackCtx *ctx);
+void sb_sana_stats_reply(struct SbStackCtx *ctx);
+void sb_sana_mcast_sync(struct SbStackCtx *ctx);
 
 /* Reclaim a stats request still in flight before devIO is reused (STOP/DETACH) */
 void sb_stats_drain(struct SbStackCtx *ctx);

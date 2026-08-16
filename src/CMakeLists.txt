@@ -50,9 +50,13 @@ add_library(netstack STATIC
     ${CMAKE_SOURCE_DIR}/port/amiga/netstack_mem.c
     ${CMAKE_SOURCE_DIR}/port/amiga/netstack_diag.c
     ${CMAKE_SOURCE_DIR}/port/amiga/netif_base.c
+    ${CMAKE_SOURCE_DIR}/port/amiga/rx_gro.c
     ${CMAKE_SOURCE_DIR}/port/amiga/netdev_if.c
     ${CMAKE_SOURCE_DIR}/port/amiga/netdev_rx.c
     ${CMAKE_SOURCE_DIR}/port/amiga/netdev_tx.c
+    ${CMAKE_SOURCE_DIR}/port/amiga/sana2_if.c
+    ${CMAKE_SOURCE_DIR}/port/amiga/sana2_tx.c
+    ${CMAKE_SOURCE_DIR}/port/amiga/sana2_pump.c
 )
 
 target_compile_options(netstack PRIVATE -O3 ${LWIP_WARN})

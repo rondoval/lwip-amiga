@@ -42,6 +42,7 @@
 #include <devices/sana2.h>
 #include "netdev_if.h"
 #include "netstack.h"
+#include "sana2_if.h"
 #include "sb_mdns.h"
 #include "sb_netctl.h"
 #include "sb_stack_priv.h"
@@ -67,9 +68,10 @@ static const char *sb_dev_basename(const char *name)
 /* Common exec-side open: the reply port, one IOSana2Req-sized request (the
  * superset — netdev commands and the NSD probe use its IOStdReq view, the
  * SANA-II backend the full struct), and the device itself. A SANA-II driver
- * reads ios2_BufferManagement (a buffer-management tag list) during
- * OpenDevice; opening without tags is legal and enough for everything the
- * stack does before CMD_READ/CMD_WRITE — netdev drivers never look. */
+ * consumes ios2_BufferManagement (the buffer-management tag list) during
+ * OpenDevice and replaces the field with its per-opener cookie, so the tags
+ * are wired before every attempt — even under AUTO, where the driver kind
+ * is not known yet; netdev drivers never look at the field. */
 static LONG sb_if_open(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
                        LONG *aux)
 {
@@ -78,14 +80,17 @@ static LONG sb_if_open(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
         (struct IOStdReq *)CreateIORequest(ctx->devPort, sizeof(struct IOSana2Req));
     if (ctx->devIO == NULL)
         return NETCTL_ERR_NOMEM;
+    struct IOSana2Req *s2io = (struct IOSana2Req *)ctx->devIO;
 
     /* the path form loads from DEVS: by convention (DEVS:Networks/...);
      * a resident/expansion module registers under the bare node name, so
      * retry with the basename before giving up */
+    s2io->ios2_BufferManagement = (APTR)sana2if_buffer_tags();
     if (OpenDevice((CONST_STRPTR)nif->nif_Device, nif->nif_Unit,
                    (struct IORequest *)ctx->devIO, 0) != 0)
     {
         const char *base = sb_dev_basename(nif->nif_Device);
+        s2io->ios2_BufferManagement = (APTR)sana2if_buffer_tags();
         if (base == nif->nif_Device ||
             OpenDevice((CONST_STRPTR)base, nif->nif_Unit,
                        (struct IORequest *)ctx->devIO, 0) != 0)
@@ -255,18 +260,24 @@ static void sb_stats_kick(struct SbStackCtx *ctx)
 {
     if (ctx->ifKind == NIF_KIND_NETDEV)
         sb_netdev_stats_kick(ctx);
+    else
+        sb_sana_stats_kick(ctx);
 }
 
 static void sb_stats_reply(struct SbStackCtx *ctx)
 {
     if (ctx->ifKind == NIF_KIND_NETDEV)
         sb_netdev_stats_reply(ctx);
+    else
+        sb_sana_stats_reply(ctx);
 }
 
 static void sb_rxfilter_sync(struct SbStackCtx *ctx)
 {
     if (ctx->ifKind == NIF_KIND_NETDEV)
         sb_netdev_rxfilter_sync(ctx);
+    else
+        sb_sana_mcast_sync(ctx);
 }
 
 static void SbStackTask(void)
@@ -397,6 +408,11 @@ static void SbStackTask(void)
                             (except a parked SHUTDOWN — see below) */
     sb_stats_drain(ctx); /* devIO must be idle before STOP/DETACH reuse it */
     sb_if_down(ctx);
+    /* every client is gone and every interface is down: nothing holds a
+     * live exec-slab block, and past this point nobody could free one */
+    netstack_lock();
+    netstack_slab_exec_release();
+    netstack_unlock();
     CloseDevice(&tick->tr_node);
 
 out:

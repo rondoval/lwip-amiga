@@ -25,6 +25,20 @@ DNS servers and mDNS.
 
 ## New features
 
+### SANA-II driver support
+
+The stack now drives classic SANA-II network drivers — Poseidon USB Ethernet
+adapters, network cards, and other Ethernet-type SANA-II drivers — beside its
+native `netdev` interface (non-Ethernet SANA-II, such as Token Ring, ArcNet or
+serial-line drivers, isn't supported). `AddNetInterface` detects the driver
+type automatically (the new optional `TYPE` interface-file option forces
+`NETDEV` or `SANA2` when needed), and everything works the same either way:
+DHCP, mDNS, multicast, VLAN, the interface query functions.
+
+SANA-II is a copy-based driver interface without checksum offload, so
+throughput is a fraction of the netdev path — measured at ~290 Mb/s in and
+~300 Mb/s out on a gigabit LAN against the SANA-II build of `genet.device`.
+
 ### Interface management commands
 
 Roadshow-style control over the running stack: `AddNetInterface` brings up

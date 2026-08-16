@@ -16,6 +16,11 @@ DEVICE=networks/genet.device
 UNIT=0
 ADDRESS=DHCP
 
+; Driver interface. AUTO (the default) probes the device — both netdev and
+; classic SANA-II drivers are supported. Force NETDEV or SANA2 to skip the
+; probe.
+;TYPE=AUTO
+
 ; Static configuration instead of DHCP: a dotted-quad ADDRESS needs
 ; NETMASK; GATEWAY is optional.
 ;ADDRESS=192.168.1.50

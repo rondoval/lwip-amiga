@@ -7,14 +7,26 @@
  * is handed to hardware. An 8-byte header remembers size + origin so
  * netstack_free can route correctly even across an attach/detach.
  *
- * Slab front-end: while a NIC is attached, three size classes serve all
- * packet-shaped allocations from O(1) intrusive freelists, replacing the
- * Exec Allocate()/Deallocate() first-fit walks the dma_mem pool pays per
- * call. All heap traffic runs under ns_Core, so the freelists need no
- * locking of their own. Slot sizes are cache-line multiples and arenas are
- * 64-byte aligned, so every slot owns whole cache lines — the driver's
- * pre-DMA clean never touches a neighbor's data. Only oversize requests
- * (> the class-2 slot) and the pre-attach window take the fallback paths.
+ * Slab front-end: three size classes serve all packet-shaped allocations
+ * from O(1) intrusive freelists, in one of two disjoint worlds selected by
+ * ns_ActiveNetdev.
+ *
+ * - DMA world (netdev attached): slabs replace the per-call cost of the
+ *   dma_mem pool's first-fit Allocate()/Deallocate() walk. Slot sizes are
+ *   cache-line multiples and arenas are 64-byte aligned, so every slot
+ *   owns whole cache lines — the driver's pre-DMA clean never touches a
+ *   neighbor's data.
+ *
+ * - Exec world (no netdev: SANA-II interfaces, the pre-attach window):
+ *   the same classes served from AllocMem arenas instead. SANA-II
+ *   datapaths are copy-based, so nothing from this world is ever handed
+ *   to hardware, and cache-line ownership does not apply. Its arenas
+ *   persist until the stack task's final teardown
+ *   (netstack_slab_exec_release).
+ *
+ * All heap traffic runs under ns_Core, so the freelists need no locking
+ * of their own. Only oversize requests (> the class-2 slot) take the
+ * one-off fallback paths.
  */
 
 #include "netstack_sys.h"
@@ -28,9 +40,12 @@
 
 #define NSMEM_ORIGIN_EXEC 0x45584543UL /* 'EXEC' */
 #define NSMEM_ORIGIN_DMA  0x444d4120UL /* 'DMA ' */
-#define NSMEM_ORIGIN_SLB0 0x534C4230UL /* 'SLB0' — slab class 0 */
+#define NSMEM_ORIGIN_SLB0 0x534C4230UL /* 'SLB0' — DMA-world slab class 0 */
 #define NSMEM_ORIGIN_SLB1 0x534C4231UL /* 'SLB1' */
 #define NSMEM_ORIGIN_SLB2 0x534C4232UL /* 'SLB2' */
+#define NSMEM_ORIGIN_XSL0 0x58534C30UL /* 'XSL0' — exec-world slab class 0 */
+#define NSMEM_ORIGIN_XSL1 0x58534C31UL /* 'XSL1' */
+#define NSMEM_ORIGIN_XSL2 0x58534C32UL /* 'XSL2' */
 #define NSMEM_ORIGIN_FREE 0x46524545UL /* 'FREE' — on a slab freelist */
 
 struct NsMemHeader
@@ -60,19 +75,44 @@ static const ULONG nslab_slot[NS_SLAB_CLASSES] = {128, 1600, 65600};
 static const ULONG nslab_arena_slots[NS_SLAB_CLASSES] = {64, 64, 2};
 static const ULONG nslab_origin[NS_SLAB_CLASSES] = {
     NSMEM_ORIGIN_SLB0, NSMEM_ORIGIN_SLB1, NSMEM_ORIGIN_SLB2};
+static const ULONG nslab_origin_exec[NS_SLAB_CLASSES] = {
+    NSMEM_ORIGIN_XSL0, NSMEM_ORIGIN_XSL1, NSMEM_ORIGIN_XSL2};
 
+/* Grow one class of @nd's world: the driver's DMA pool when a netdev is
+ * attached, an AllocMem arena for the exec world otherwise — the same
+ * nd-selects-the-world rule as netstack_malloc. */
 static BOOL nslab_grow(struct NetdevIf *nd, ULONG cls)
 {
     ULONG slot = nslab_slot[cls];
     ULONG size = NSLAB_ARENA_HDR + nslab_arena_slots[cls] * slot;
-    struct NsSlabArena *a = netdevif_dma_alloc(nd, size, 64);
+    void **freeHead;
+    struct NsSlabArena *a;
+    if (nd != NULL)
+    {
+        a = netdevif_dma_alloc(nd, size, 64);
+        freeHead = &netstack.ns_SlabFree[cls];
+    }
+    else
+    {
+        a = AllocMem(size, MEMF_PUBLIC);
+        freeHead = &netstack.ns_SlabFreeX[cls];
+    }
     if (a == NULL)
-        return FALSE; /* caller falls through to the one-off DMA path */
+        return FALSE; /* caller falls through to the one-off path */
 
-    a->nsa_Next = netstack.ns_SlabArenas[cls];
+    if (nd != NULL)
+    {
+        a->nsa_Next = netstack.ns_SlabArenas[cls];
+        netstack.ns_SlabArenas[cls] = a;
+        netstack.ns_SlabGrows[cls]++;
+    }
+    else
+    {
+        a->nsa_Next = netstack.ns_SlabArenasX[cls];
+        netstack.ns_SlabArenasX[cls] = a;
+        netstack.ns_SlabGrowsX[cls]++;
+    }
     a->nsa_Size = size;
-    netstack.ns_SlabArenas[cls] = a;
-    netstack.ns_SlabGrows[cls]++;
 
     /* Link at offset 0 (over nsm_Size), 'FREE' stamp at offset 4 — different
      * longwords, so the two writes cannot clobber each other. The stamp must
@@ -82,12 +122,13 @@ static BOOL nslab_grow(struct NetdevIf *nd, ULONG cls)
     UBYTE *s = (UBYTE *)a + NSLAB_ARENA_HDR;
     for (ULONG i = 0; i < nslab_arena_slots[cls]; i++, s += slot)
     {
-        *(void **)s = netstack.ns_SlabFree[cls];
+        *(void **)s = *freeHead;
         ((struct NsMemHeader *)s)->nsm_Origin = NSMEM_ORIGIN_FREE;
-        netstack.ns_SlabFree[cls] = s;
+        *freeHead = s;
     }
-    Kprintf("[netstack] slab class %lu grew: %lu arena(s)\n",
-            cls, netstack.ns_SlabGrows[cls]);
+    Kprintf("[netstack] %s slab class %lu grew: %lu arena(s)\n",
+            nd != NULL ? "dma" : "exec", cls,
+            nd != NULL ? netstack.ns_SlabGrows[cls] : netstack.ns_SlabGrowsX[cls]);
     return TRUE;
 }
 
@@ -115,6 +156,25 @@ void netstack_slab_detach(struct NetdevIf *nd)
     }
 }
 
+/* The exec world's counterpart, for the stack task's final teardown only:
+ * with every interface down and every client gone, no live block can point
+ * into these arenas. A restarted stack task regrows on demand. */
+void netstack_slab_exec_release(void)
+{
+    for (ULONG cls = 0; cls < NS_SLAB_CLASSES; cls++)
+    {
+        struct NsSlabArena *a = netstack.ns_SlabArenasX[cls];
+        while (a != NULL)
+        {
+            struct NsSlabArena *next = a->nsa_Next;
+            FreeMem(a, a->nsa_Size);
+            a = next;
+        }
+        netstack.ns_SlabArenasX[cls] = NULL;
+        netstack.ns_SlabFreeX[cls] = NULL;
+    }
+}
+
 void *netstack_malloc(unsigned int size)
 {
     ULONG asize = ((ULONG)size + 3) & ~3UL;
@@ -122,14 +182,16 @@ void *netstack_malloc(unsigned int size)
     struct NetdevIf *nd = netstack.ns_ActiveNetdev;
     struct NsMemHeader *h;
 
-    if (nd != NULL && total <= nslab_slot[NS_SLAB_CLASSES - 1])
+    if (total <= nslab_slot[NS_SLAB_CLASSES - 1])
     {
         ULONG cls = (total <= nslab_slot[0]) ? 0UL
                   : (total <= nslab_slot[1]) ? 1UL
                                              : 2UL;
-        void *slot = netstack.ns_SlabFree[cls];
+        void **freeHead =
+            nd != NULL ? &netstack.ns_SlabFree[cls] : &netstack.ns_SlabFreeX[cls];
+        void *slot = *freeHead;
         if (slot == NULL && nslab_grow(nd, cls))
-            slot = netstack.ns_SlabFree[cls];
+            slot = *freeHead;
         /* A slot on the freelist must still carry the FREE stamp. Anything else
          * means the link we followed was not a slot at all — the previous
          * owner wrote to it after freeing. Drop the rest of the list rather
@@ -145,15 +207,15 @@ void *netstack_malloc(unsigned int size)
             Kprintf("[netstack] SLAB-CORRUPT: class %lu freelist head 0x%08lx origin 0x%08lx "
                     "(expected FREE) — dropping freelist\n",
                     cls, (ULONG)slot, ((struct NsMemHeader *)slot)->nsm_Origin);
-            netstack.ns_SlabFree[cls] = NULL;
-            slot = nslab_grow(nd, cls) ? netstack.ns_SlabFree[cls] : NULL;
+            *freeHead = NULL;
+            slot = nslab_grow(nd, cls) ? *freeHead : NULL;
         }
         if (slot != NULL)
         {
-            netstack.ns_SlabFree[cls] = *(void **)slot;
+            *freeHead = *(void **)slot;
             h = slot;
             h->nsm_Size = nslab_slot[cls];
-            h->nsm_Origin = nslab_origin[cls];
+            h->nsm_Origin = nd != NULL ? nslab_origin[cls] : nslab_origin_exec[cls];
             netstack.ns_MemInUse += h->nsm_Size;
             return h + 1;
         }
@@ -238,6 +300,27 @@ void netstack_free(void *ptr)
         ((ULONG *)h)[2] = (ULONG)__builtin_return_address(0);
 #endif
         netstack.ns_SlabFree[cls] = h;
+        return;
+    }
+
+    case NSMEM_ORIGIN_XSL0:
+    case NSMEM_ORIGIN_XSL1:
+    case NSMEM_ORIGIN_XSL2:
+    {
+        ULONG cls = origin - NSMEM_ORIGIN_XSL0;
+        /* the slot size, not nsm_Size — that is about to become the link */
+        size = nslab_slot[cls];
+        netstack.ns_MemInUse -= size;
+
+        /* exec arenas persist whatever interface is active (they die only
+         * with the stack task), so unlike the DMA arm there is no
+         * freed-after-detach window to guard */
+        *(void **)h = netstack.ns_SlabFreeX[cls]; /* offset 0, over nsm_Size */
+        h->nsm_Origin = NSMEM_ORIGIN_FREE;        /* offset 4, every tier */
+#ifdef DEBUG
+        ((ULONG *)h)[2] = (ULONG)__builtin_return_address(0);
+#endif
+        netstack.ns_SlabFreeX[cls] = h;
         return;
     }
 

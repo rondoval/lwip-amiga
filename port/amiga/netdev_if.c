@@ -148,8 +148,7 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
     ndi->ndi_RxCsumBad = 0;
     ndi->ndi_TxKickPending = FALSE;
     netdevif_hh_invalidate(ndi);
-    for (ULONG i = 0; i < NDIF_GRO_FLOWS; i++)
-        ndi->ndi_Gro[i].ngc_Head = NULL; /* contexts idle outside lock holds */
+    rxgro_init(&ndi->ndi_Gro, &ndi->ndi_Base.nib_Netif);
 
     /* RX wrappers: one per buffer the stack can possibly hold. The driver
      * advertises its pool size; a wrap count below it silently re-imposes

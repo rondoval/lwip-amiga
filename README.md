@@ -7,15 +7,18 @@
 
 A fast, modern TCP/IP stack for classic AmigaOS 3.2.
 
-> **This is not a SANA-II stack.** Almost every Amiga network stack and driver —
-> Roadshow, AmiTCP, Miami, and virtually every network card driver ever written for
-> AmigaOS — speaks SANA-II. lwip-amiga does not. It's built on a new, purpose-built
-> driver interface called `netdev`, designed for speed rather than backward
-> compatibility. Today the only driver that supports it is
+> **Two driver interfaces: `netdev` for speed, SANA-II for everything else.**
+> lwip-amiga is built on a new, purpose-built driver interface called `netdev` —
+> zero-copy, batched, checksum-offloading — and that is where the headline numbers
+> come from. Today the only netdev driver is
 > [`genet.device`](https://github.com/rondoval/emu68-driver-stack), **version 4.x or
 > later** — the onboard Ethernet driver for a Raspberry Pi 4 or CM4 running under
-> PiStorm/Emu68. If your network card only has a SANA-II driver, lwip-amiga will not
-> work with it.
+> PiStorm/Emu68. Everything else — Poseidon USB Ethernet adapters, network cards, and
+> other Ethernet drivers written for AmigaOS — speaks classic SANA-II, and those work
+> too: the stack detects the driver type when an interface is added and drives SANA-II
+> hardware through a compatibility backend (Ethernet-type SANA-II only — no Token Ring,
+> ArcNet, or serial-line drivers). SANA-II is copy-based and offload-blind by design, so
+> expect a fraction of netdev throughput.
 
 > **Who this is for.** lwip-amiga is built for classic Amigas with an accelerator,
 > plenty of RAM, and a fast network connection — machines that can actually put a
@@ -65,6 +68,7 @@ comments; an unknown option is an error:
 |---|---|---|
 | `DEVICE` | *(required)* | which network driver to open (path form loads from `DEVS:`) |
 | `UNIT` | `0` | which unit/port on that driver |
+| `TYPE` | `AUTO` | driver interface: `AUTO` (probe the device), `NETDEV` or `SANA2` |
 | `ADDRESS` | `DHCP` | `DHCP`, or a fixed dotted-quad address |
 | `NETMASK` | — | subnet mask (required with a fixed `ADDRESS`) |
 | `GATEWAY` | — | your router's address (fixed address only, optional) |
@@ -221,6 +225,10 @@ layers, built bottom-up:
   contract — any driver or stack may implement it. First implementation:
   `genet.device` (BCM GENET on Pi4/CM4 under PiStorm/Emu68, in
   [emu68-driver-stack](https://github.com/rondoval/emu68-driver-stack)).
+- **A SANA-II compatibility backend** (`port/amiga/sana2_*.c`) drives classic drivers
+  through the same lwIP glue — cooked-mode translation and a client-side RX pump task —
+  with the driver type resolved per interface (`TYPE=AUTO|NETDEV|SANA2`); netdev remains
+  the performance path.
 - **A TCP/IP core** — lwIP (git submodule) plus an AmigaOS port layer, running in
   **core-locking direct-path** mode: application tasks execute stack code in their own
   context under a single core semaphore, with Exec signals as the blocking primitive.

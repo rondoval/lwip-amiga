@@ -40,6 +40,12 @@ enum NsProfSlot
     NSP_SEND_OUTPUT,   /* tcp_output per call: segmentation -> linkoutput */
     NSP_SEND_SLEEP,    /* blocked on a full send buffer */
     NSP_UDP_SEND,      /* dgram send under the lock: alloc+copy+udp/raw out */
+    /* SANA-II pump (sana2_pump.c); the pump reuses NSP_RX_LOCKWAIT,
+     * NSP_RX_INPUT, NSP_RX_CSUM (pre-lock TCP verify + GRO classify) and
+     * NSP_RX_GRO with netdev-identical semantics — the backends are
+     * mutually exclusive per active interface */
+    NSP_S2_REQUEUE,    /* hold per chunk: detach frames, alloc+arm
+                          replacement pbufs, build the repost chain */
 
     NSP_SLOT_COUNT
 };

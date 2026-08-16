@@ -28,10 +28,9 @@
 
 #include <devices/netdev.h>
 #include "netif_base.h"
+#include "rx_gro.h"
 
 struct NdRxWrap;
-struct ip_hdr;  /* lwip/prot/ip4.h */
-struct tcp_hdr; /* lwip/prot/tcp.h */
 
 /* Upper bound on frames processed per netstack_lock() hold in ndif_rx_input,
  * and the size of the per-chunk verdict arrays (drop[], ndi_GroMeta). This is
@@ -57,62 +56,6 @@ struct NdHhEntry
     UWORD nhh_Len;     /* 14, or 18 when the frame carries a VLAN tag */
     UWORD nhh_Left;    /* fast hits left before a slow-path revalidation */
     UBYTE nhh_Hdr[NDIF_HH_HDR_MAX];
-};
-
-/* GRO-lite: merge N consecutive in-order same-flow TCP data frames from one
- * driver RX batch into a single pbuf chain and feed lwIP once. Candidates are
- * classified in the pre-lock pass; merge contexts live only WITHIN one core
- * lock hold (flushed before every unlock), so nothing survives across
- * holds, link changes or teardown. Gated on ndi_RxOffload: with lwIP's own
- * TCP checksum check active, a rewritten merged header would fail it. */
-#define NDIF_GRO_FLOWS      4u  /* direct-mapped merge contexts */
-#define NDIF_GRO_MAX_FRAMES 44u /* per merge — the u16 IPH_LEN ceiling:
-                                   1500 + 43*1460 = 64280 <= 65535. The RX-input
-                                   batch (NDIF_RX_CHUNK) is the other bound on a
-                                   run; 64-frame batches split into a 44 + a 20. */
-
-/* per-frame pre-lock classification verdict */
-#define NDIF_GRO_NO      0  /* not IPv4/TCP: deliver immediately */
-#define NDIF_GRO_NOMERGE 1  /* IPv4 TCP but unmergeable (SYN/FIN/RST, options,
-                               padded, fragment): flush its flow first */
-#define NDIF_GRO_MERGE   2  /* in-order-candidate data segment */
-#define NDIF_GRO_ACK     3  /* payload-free pure ACK: coalesce to the freshest
-                               per flow (a bulk sender only needs the newest
-                               cumulative ackno + window) */
-
-struct NdGroMeta
-{
-    ULONG ngm_SrcIp;   /* flow key, raw network order */
-    ULONG ngm_DstIp;
-    ULONG ngm_Ports;   /* src<<16 | dst, raw */
-    union {
-        ULONG ngm_Seq;   /* MERGE frame: data seqno, host order */
-        ULONG ngm_AckNo; /* ACK frame:   ackno,      host order */
-    };
-    UWORD ngm_PayOff;  /* frame offset of TCP payload (l2 + 20 + 20) */
-    UWORD ngm_PayLen;  /* TCP payload bytes (from IPH_LEN, pad excluded) */
-    UBYTE ngm_Class;   /* NDIF_GRO_* */
-    UBYTE ngm_Flags;   /* raw TCP flag byte (PSH propagation) */
-};
-
-struct NdGroCtx
-{
-    struct pbuf *ngc_Head;    /* first frame, headers intact; NULL = idle */
-    struct pbuf *ngc_Tail;    /* append point (manual linking; tot_len of
-                                 the chain is fixed up once at flush) */
-    struct ip_hdr *ngc_Ip;    /* head's IP header (length/csum patch) */
-    struct tcp_hdr *ngc_Tcp;  /* head's TCP header (ackno/wnd/PSH patch) */
-    ULONG ngc_SrcIp;          /* flow key, raw */
-    ULONG ngc_DstIp;
-    ULONG ngc_Ports;
-    union {
-        ULONG ngc_NextSeq;    /* data run: host order, expected next seqno */
-        ULONG ngc_AckNo;      /* ack hold: host order, held (freshest) ackno */
-    };
-    ULONG ngc_PayloadAdd;     /* Σ payload bytes appended after the head */
-    UWORD ngc_Frames;         /* frames absorbed, head included */
-    UBYTE ngc_IsAck;          /* held run is a coalesced pure-ACK, not data
-                                 (valid only while ngc_Head != NULL) */
 };
 
 /* Deferred TX reclaim: nso_TxDone (unit task) enqueues completed pbuf cookies
@@ -163,9 +106,11 @@ struct NetdevIf
                                            snoop from the next slow-path frame;
                                            0 = none */
 
-    /* GRO-lite state: meta lives here; both are unit-task exclusive during nso_RxInput */
-    struct NdGroMeta ndi_GroMeta[NDIF_RX_CHUNK];
-    struct NdGroCtx ndi_Gro[NDIF_GRO_FLOWS];
+    /* GRO-lite state (rx_gro.h; gated on ndi_RxOffload — with lwIP's own TCP
+     * checksum check active, a rewritten merged header would fail it). Both
+     * are unit-task exclusive during nso_RxInput. */
+    struct RxGroMeta ndi_GroMeta[NDIF_RX_CHUNK];
+    struct RxGro ndi_Gro;
 };
 
 /* The stack-side callback table to pass in NetDevAttach.nda_StackOps; use

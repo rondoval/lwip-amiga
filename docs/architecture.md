@@ -11,21 +11,28 @@ flowchart TB
     abi["<b>netdev ABI</b> — include/netdev.h<br/>direct-call, context-based, batched, zero-copy"]
     drv["<b>genet.device</b><br/>first hardware driver"]
     nic["BCM GENET NIC<br/>(Pi4 / CM4 under PiStorm / Emu68)"]
+    s2["<b>SANA-II backend</b> — port/amiga/sana2_*.c<br/>cooked-mode IORequests, client-side RX pump"]
+    s2drv["any SANA-II driver<br/>(Poseidon USB NICs, network cards, ...)"]
 
     app -->|library LVOs| bsd
     bsd -->|tcp_/udp_/raw_ calls under the core lock| lwip
     lwip -->|NetDevDrvOps / NetDevStackOps| abi
     abi --> drv
     drv --> nic
+    lwip --> s2
+    s2 -->|IOSana2Req| s2drv
 ```
 
 Two invariants hold across the whole diagram:
 
-- **The stack never allocates packet memory.** RX buffers are allocated, DMA-filled, and
-  owned by the driver; the stack borrows them and returns them via a release hook. TX
-  memory is stack-owned but drawn from a DMA allocator the driver provides at attach. This
-  is what makes the datapath zero-copy and DMA-correct on a platform where only the
-  driver knows which RAM its engine can reach.
+- **The stack never hands hardware memory it cannot reach.** On the netdev path the
+  stack never allocates packet memory at all: RX buffers are allocated, DMA-filled and
+  owned by the driver (the stack borrows them and returns them via a release hook), and
+  TX memory is stack-owned but drawn from a DMA allocator the driver provides at attach —
+  zero-copy and DMA-correct on a platform where only the driver knows which RAM its
+  engine can reach. The SANA-II backend is copy-based by the ABI's own design (the
+  driver copies every frame through client callbacks), so its packet memory is plain
+  stack-owned heap and no DMA-reachability contract applies.
 - **A single core semaphore serializes all lwIP access, and Exec signals do the blocking.**
   There is no lwIP worker thread; callers run stack code in their own context under the
   lock, and blocking sockets sleep on an Exec signal — no lost wakeups.
@@ -154,10 +161,14 @@ merging (not concatenating) the queues in `tcp_rexmit_rto_prepare`.
 - **Time / RNG** (`netstack.c`): `sys_now()` derives monotonic milliseconds from
   the `timer.device` EClock; `LWIP_RAND` is an xorshift.
 - **Heap** (`netstack_mem.c`): the lwIP heap
-  (`MEM_CUSTOM_*` → `netstack_malloc`/`free`) routes every `PBUF_RAM`/TX payload to the
-  active driver's DMA allocator — fronted by three slab size classes — with an 8-byte
-  origin header so frees route correctly across attach/detach (and an `AllocMem`
-  fallback when no NIC is attached).
+  (`MEM_CUSTOM_*` → `netstack_malloc`/`free`) serves every `PBUF_RAM`/TX payload from
+  three slab size classes in one of two disjoint worlds, selected by whether a netdev
+  is attached: the **DMA world** (arenas from the active driver's DMA allocator,
+  returned at detach) and the **exec world** (`AllocMem` arenas serving SANA-II
+  interfaces, the pre-attach window and loopback; they persist until the stack task's
+  final teardown). An 8-byte origin header routes every free back to the world that
+  allocated it, whichever interface is active by then; only oversize requests take a
+  one-off fallback path.
 
 ## Layer 3 — netif ↔ netdev glue (`port/amiga/netdev_*.c`)
 
@@ -180,6 +191,79 @@ knowledge the exec side doesn't have).
   a zero-copy `pbuf_custom` and feeds `ethernet_input`. Freeing the pbuf calls
   `ndo_RxRelease(cookie)`, recycling the buffer to the driver.
 - **Link**: `nso_LinkChange` drives `netif_set_link_up`/`down`.
+
+## Layer 3b — the SANA-II backend (`port/amiga/sana2_*.c`, `src/bsdsocket/sb_sana.c`)
+
+The compatibility backend: the same lwIP netif over a classic SANA-II driver.
+Both backends embed **`struct NetIfBase`** (`netif_base.h`) first in their
+interface struct — the lwIP netif, a kind tag, the identity block the query
+LVOs read, the in-band VLAN TCI and the refcounted joined-multicast MAC set —
+so everything backend-agnostic (`sb_ifquery`, the VLAN hooks, the IGMP hook,
+the control port) dereferences the base and never cares which driver ABI is
+behind it. The stack task resolves the backend per interface at add time:
+an explicit `TYPE=NETDEV|SANA2`, or `TYPE=AUTO` (the default) probing with
+`NSCMD_DEVICEQUERY` — `NSDEVTYPE_SANA2` means SANA-II, `NETDEV_CMD_ATTACH` in
+the command list means netdev, and a device without NSD support is assumed
+SANA-II (legacy drivers predate it).
+
+The backend runs the driver in **cooked mode** — lwIP keeps building and
+consuming full Ethernet frames, and the glue translates the 14-byte header at
+the boundary (RAW frame mode is unreliable across real drivers). SANA-II is
+copy-based by construction: the driver copies every frame through
+client-supplied callbacks (`S2_CopyToBuff`/`S2_CopyFromBuff`, register-
+convention, interrupt-callable — pure copy loops, no Exec calls, no locks).
+
+- **TX** (`sana2_tx.c`): linkoutput, under the core lock, parses the built
+  header into `ios2_DstAddr`/`ios2_PacketType` (`S2_BROADCAST`/`S2_MULTICAST`/
+  `CMD_WRITE` by destination), refs the pbuf as the `CopyFromBuff` cookie
+  (never edited — retransmit-aliased pbufs are cloned, the netdev idiom) and
+  stages the write request on a FIFO; the outermost `netstack_unlock` submits
+  the batch **quick** (`IOF_QUICK` + direct `BeginIO`, the standard quick-I/O
+  contract) — the `netdevif_tx_kick` idiom. A synchronous driver leaves the
+  flag set and the write retires in place: no `ReplyMsg`, no pump wakeup, no
+  per-frame task switch. A queuing driver clears the flag; only those writes
+  reply to the pump. BeginIO under the lock is deadlock-free: SANA-II
+  drivers never take `ns_Core`, and the only client code a synchronous
+  BeginIO calls back is the lock-free copy callback.
+- **RX** (`sana2_pump.c`): SANA-II has no upcall, so a per-interface **pump
+  task** (a Process at priority 10, the client-side analog of a netdev
+  driver's unit task) keeps typed `CMD_READ`s posted — IPv4 + ARP, plus the
+  0x8100 class under VLAN, each owning a heap pbuf with 14 bytes of headroom.
+  The read pool covers the **whole announced TCP window** (`TCP_WND/MSS` +
+  slack, the `netdevif_rx_hold_budget` rule): a SANA-II driver drops any
+  frame that finds no pending read, so anything less loses burst tails.
+  Completions are harvested FIFO (delivery order == wire order — TCP depends
+  on it) and processed in chunks of 64: one short hold, synthesizes
+  the Ethernet header into the headroom, moves the frame out and re-arms the
+  request with a fresh pbuf; the reposts then go back to the driver BEFORE
+  phase B runs, so the reads are never out of service for the duration of
+  TCP input. Between the phases, off the lock, the pump verifies TCP
+  checksums in software and classifies frames for the **shared GRO-lite
+  engine** (`rx_gro.c`, the same in-order-run merge + pure-ACK coalescing
+  the netdev backend uses); phase B then dispatches through the engine
+  under the lock (with the netdev fairness yield — every held merge run is
+  flushed before any lock release).
+- **Lifecycle** (`sb_sana.c`): `S2_DEVICEQUERY` (full-size first, legacy-30
+  retry — the two size conventions are mutually exclusive across driver
+  generations), Ethernet/48-bit gate, `S2_CONFIGINTERFACE` with the **factory**
+  station address (`ios2_DstAddr` — the current address is zeros until first
+  configure), `S2_ONLINE`, pump start **before** `netif_set_up` (a static
+  config's gratuitous ARP needs the TX reply ports stamped). Link state is
+  seeded up (SANA-II has no state query) and tracked thereafter via a
+  re-armed `S2_ONEVENT`; drivers without events keep the seeded state.
+  Multicast joins push as `S2_ADD/DELMULTICASTADDRESS` deltas against a
+  shadow of the last programmed set; stats map `S2_GETGLOBALSTATS` plus
+  exact glue-side byte counters into the same neutral cache netdev fills.
+  Teardown: netif down + TX gate under one hold, the unlock flushes the
+  staged tail, the pump aborts and drains until every request is home —
+  after which the driver holds no pointer of ours.
+
+Checksums are software in both directions (SANA-II has no offload): lwIP
+generates and verifies everything except inbound TCP, which the pump verifies
+off the lock so the GRO-merged headers escape re-verification. Packet memory
+comes from the heap's exec-slab world — netdev remains the zero-copy,
+offloaded performance path; this backend trades that for compatibility with
+every SANA-II driver ever shipped.
 
 ---
 
@@ -314,7 +398,10 @@ The blockers, in ascending difficulty:
    at the cost of bending the "TX memory comes from the driver's allocator" doctrine
    (would need an attach-time compatible-allocator capability in the ABI). Fallbacks:
    copy at `linkoutput` when the egress unit differs from the allocating one, or forbid
-   heterogeneous DMA domains.
+   heterogeneous DMA domains. **One mix is already safe**: one netdev + one SANA-II
+   interface — with a netdev attached every allocation is DMA-reachable by
+   construction, and the copy-based SANA-II datapath does not care where its pbufs
+   live (frees route home by origin either way).
 
 The gating item is a second netdev driver existing at all (genet is hard-limited to
 unit 0), not the stack refactor — revisit when one is real.

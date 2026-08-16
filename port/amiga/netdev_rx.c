@@ -2,32 +2,24 @@
 /*
  * netdev RX path: driver batches injected into lwIP as zero-copy custom
  * pbufs, with pre-lock checksum verification (RAW-offload fold) and the
- * GRO-lite merge of in-order TCP runs. Everything here runs on the driver's
- * unit task; lwIP entry is bracketed by the netstack core lock.
+ * shared GRO-lite merge of in-order TCP runs (rx_gro.c). Everything here
+ * runs on the driver's unit task; lwIP entry is bracketed by the netstack
+ * core lock.
  */
 
 #include "netstack_sys.h"
 
 #include <debug.h>
 
-#include <lwip/inet_chksum.h>
+#include <lwip/opt.h> /* before the prot headers: they default LWIP_PLATFORM_
+                         macros through lwip/arch.h otherwise */
 #include <lwip/prot/ip.h>
-#include <lwip/prot/tcp.h>
 #include <lwip/prot/udp.h>
 
 #include "netdev_priv.h"
 #include "netstack.h"
 #include "nsprof.h"
-
-/* Fairness yield stride: during an unflow-controlled RX flood (a UDP blast at
- * line rate) the unit task processes every frame under ns_Core while the app
- * task queues on the lock to drain its socket — starving it, so its recv queue
- * overflows and ~everything is dropped past the app. Every this-many frames,
- * IF a task is actually queued on ns_Core, hand the FIFO lock over so the app
- * drains (and frees pool buffers) before we fill its queue with drops. Gated on
- * ss_QueueCount, so the uncontended fast path never pays. Tunable: smaller =
- * fairer to the app but more lock handoffs (2 context switches each). */
-#define NDIF_RX_YIELD_STRIDE 8u
+#include "rx_gro.h"
 
 static void ndif_rx_pbuf_freed(struct pbuf *p)
 {
@@ -67,14 +59,14 @@ static void ndif_rx_pbuf_freed(struct pbuf *p)
 static BOOL ndif_rx_csum_ok(const struct NetDevRxDesc *d, ULONG raw)
 {
     const UBYTE *frame = d->nrd_Data;
-    ULONG l3 = ndif_ip_offset(frame, d->nrd_Len);
+    ULONG l3 = inetfrm_ip_offset(frame, d->nrd_Len);
     if (l3 == 0)
         return TRUE; /* non-IPv4: nothing to fold, accept */
 
     /* `raw` is the 1's-complement sum over [frame + SIZEOF_ETH_HDR .. end].
      * On a tagged frame that region opens with the two 16-bit tag words (the
      * TCI and the inner ethertype) that sit before the IP header, so remove
-     * them here — ndif_pseudo_sum expects a sum over [IP .. end]. */
+     * them here — inetfrm_pseudo_sum expects a sum over [IP .. end]. */
     if (l3 != SIZEOF_ETH_HDR)
     {
         const UWORD *tag = (const UWORD *)(frame + SIZEOF_ETH_HDR);
@@ -98,232 +90,7 @@ static BOOL ndif_rx_csum_ok(const struct NetDevRxDesc *d, ULONG raw)
             return TRUE; /* UDP without checksum is legal on IPv4 */
     }
 
-    return ndif_pseudo_sum(ip, raw) == 0xFFFF;
-}
-
-/* Hand one frame (or merged chain) to lwIP. Under the core lock. */
-static void ndif_deliver(struct NetdevIf *ndi, struct pbuf *p)
-{
-    PERF_T0(t_in);
-    struct netif *nif = &ndi->ndi_Base.nib_Netif;
-    if (nif->input(p, nif) != ERR_OK)
-        pbuf_free(p);
-    PERF_ADD(&ns_perf, NSP_RX_INPUT, t_in);
-}
-
-/* ------------------------------------------------------------ GRO-lite --- */
-
-/* wrap-safe: TRUE iff a is strictly newer than b in TCP sequence space
- * (mirrors lwIP's TCP_SEQ_GT without pulling in <lwip/priv/tcp_priv.h>). */
-static inline BOOL ndif_seq_gt(u32_t a, u32_t b)
-{
-    return ((u32_t)(b - a) & 0x80000000u) != 0;
-}
-
-/* Pre-lock classification of one RX frame; reads frame bytes only. */
-static void ndif_gro_classify(const struct NetDevRxDesc *d, struct NdGroMeta *m)
-{
-    const UBYTE *frame = d->nrd_Data;
-    ULONG l3 = ndif_ip_offset(frame, d->nrd_Len);
-    if (l3 == 0)
-    {
-        m->ngm_Class = NDIF_GRO_NO;
-        return;
-    }
-
-    const struct ip_hdr *ip = (const struct ip_hdr *)(frame + l3);
-    if (IPH_PROTO(ip) != IP_PROTO_TCP)
-    {
-        m->ngm_Class = NDIF_GRO_NO;
-        return;
-    }
-
-    /* IPv4 TCP: record the flow key whatever the verdict — an unmergeable
-     * segment (FIN, options, ...) must still flush its flow's held run */
-    ULONG ihl = (ULONG)IPH_HL(ip) * 4;
-    const struct tcp_hdr *th = (const struct tcp_hdr *)(frame + l3 + ihl);
-    m->ngm_SrcIp = ip4_addr_get_u32(&ip->src);
-    m->ngm_DstIp = ip4_addr_get_u32(&ip->dest);
-    m->ngm_Ports = ((ULONG)th->src << 16) | th->dest;
-    m->ngm_Class = NDIF_GRO_NOMERGE;
-
-    ULONG iplen = lwip_ntohs(IPH_LEN(ip));
-    UWORD flags = TCPH_FLAGS(th);
-
-    /* Mergeable-header shape shared by data segments and pure ACKs: no IP
-     * options, not a fragment, no TCP options, flags ⊆ {ACK,PSH} with ACK. */
-    if (ihl != IP_HLEN ||
-        (IPH_OFFSET(ip) & PP_HTONS(IP_OFFMASK | IP_MF)) != 0 ||
-        TCPH_HDRLEN_BYTES(th) != TCP_HLEN ||
-        (flags & ~(ULONG)(TCP_ACK | TCP_PSH)) != 0 || (flags & TCP_ACK) == 0)
-        return; /* stays NOMERGE */
-
-    if (iplen <= IP_HLEN + TCP_HLEN)
-    {
-        /* No TCP payload. A pure ACK (flags exactly ACK) coalesces to the
-         * freshest per flow; a zero-payload PSH stays per-frame. The frame is
-         * delivered untouched (lwIP trims the Ethernet pad to IPH_LEN), so the
-         * pad-free check the data path needs does not apply here. */
-        if (iplen == IP_HLEN + TCP_HLEN && flags == TCP_ACK)
-        {
-            m->ngm_AckNo = lwip_ntohl(th->ackno);
-            m->ngm_Class = NDIF_GRO_ACK;
-        }
-        return;
-    }
-
-    /* Data segment: require a pad-free frame — padded runts would splice pad
-     * bytes into the reassembled stream. */
-    if (iplen != d->nrd_Len - l3)
-        return;
-
-    m->ngm_Seq = lwip_ntohl(th->seqno);
-    m->ngm_PayOff = (UWORD)(l3 + IP_HLEN + TCP_HLEN);
-    m->ngm_PayLen = (UWORD)(iplen - IP_HLEN - TCP_HLEN);
-    m->ngm_Flags = (UBYTE)flags;
-    m->ngm_Class = NDIF_GRO_MERGE;
-}
-
-/* Deliver a held run: restore the pbuf-chain tot_len invariant (deferred
- * during manual linking), patch the head's IP length + checksum, and feed
- * lwIP once. A 1-frame run is delivered untouched. Under the core lock. */
-static void ndif_gro_flush(struct NetdevIf *ndi, struct NdGroCtx *c)
-{
-    struct pbuf *head = c->ngc_Head;
-    if (head == NULL)
-        return;
-    c->ngc_Head = NULL;
-
-    if (c->ngc_Frames > 1)
-    {
-        ULONG remaining = (ULONG)head->len + c->ngc_PayloadAdd;
-        for (struct pbuf *q = head; q != NULL; q = q->next)
-        {
-            q->tot_len = (u16_t)remaining;
-            remaining -= q->len;
-        }
-
-        /* IP total length + RFC 1624 incremental header-checksum fixup
-         * (CHECK_IP is always on for this netif). ackno/wnd/PSH were
-         * already patched as each frame merged; seqno stays the head's. */
-        u16_t old_len = IPH_LEN(c->ngc_Ip); /* raw big-endian, as is _chksum */
-        u16_t new_len = lwip_htons((u16_t)(lwip_ntohs(old_len) +
-                                           c->ngc_PayloadAdd));
-        ULONG sum = (ULONG)(u16_t)~IPH_CHKSUM(c->ngc_Ip) +
-                    (ULONG)(u16_t)~old_len + (ULONG)new_len;
-        while (sum >> 16)
-            sum = (sum & 0xFFFF) + (sum >> 16);
-        IPH_LEN_SET(c->ngc_Ip, new_len);
-#ifdef TRACE
-        /* cross-check the incremental fixup against a full recompute */
-        IPH_CHKSUM_SET(c->ngc_Ip, 0);
-        u16_t full = inet_chksum(c->ngc_Ip, IP_HLEN);
-        if (full != (u16_t)~sum)
-            Kprintf("[netdevif] GRO csum fixup mismatch: inc 0x%04lx full 0x%04lx\n",
-                    (ULONG)(u16_t)~sum, (ULONG)full);
-#endif
-        IPH_CHKSUM_SET(c->ngc_Ip, (u16_t)~sum);
-    }
-
-    ndif_deliver(ndi, head);
-}
-
-static void ndif_gro_flush_all(struct NetdevIf *ndi)
-{
-    for (ULONG i = 0; i < NDIF_GRO_FLOWS; i++)
-        ndif_gro_flush(ndi, &ndi->ndi_Gro[i]);
-}
-
-/* Per-frame dispatch inside the locked RX loop. Only IPv4 TCP frames get
- * here (class NOMERGE, MERGE or ACK); the caller short-circuits class NO. */
-static void ndif_gro_rx(struct NetdevIf *ndi, struct pbuf *p,
-                        const struct NetDevRxDesc *d, const struct NdGroMeta *m)
-{
-    struct NdGroCtx *c =
-        &ndi->ndi_Gro[(m->ngm_Ports ^ m->ngm_SrcIp) & (NDIF_GRO_FLOWS - 1)];
-    BOOL sameflow = c->ngc_Head != NULL &&
-                    c->ngc_SrcIp == m->ngm_SrcIp &&
-                    c->ngc_DstIp == m->ngm_DstIp &&
-                    c->ngc_Ports == m->ngm_Ports;
-
-    if (m->ngm_Class == NDIF_GRO_NOMERGE)
-    {
-        /* a FIN/RST/option-bearing segment must not overtake held data */
-        if (sameflow)
-            ndif_gro_flush(ndi, c);
-        ndif_deliver(ndi, p);
-        return;
-    }
-
-    if (m->ngm_Class == NDIF_GRO_ACK)
-    {
-        /* Coalesce pure ACKs: hold only the freshest (strictly-advancing
-         * ackno) per flow, delivering one per flush instead of one per ACK.
-         * Non-advancing (duplicate/reordered) ACKs are delivered individually,
-         * so lwIP still sees the dup-ACK run fast retransmit needs. */
-        if (sameflow && c->ngc_IsAck && ndif_seq_gt(m->ngm_AckNo, c->ngc_AckNo))
-        {
-            PERF_T0(t_gro);
-            pbuf_free(c->ngc_Head); /* recycle the superseded ACK's buffer */
-            c->ngc_Head = c->ngc_Tail = p;
-            c->ngc_AckNo = m->ngm_AckNo;
-            PERF_ADD(&ns_perf, NSP_RX_GRO, t_gro);
-            return;
-        }
-
-        /* different flow in the slot, a data run held, or a non-advancing
-         * ackno: deliver whatever was held, then hold this ACK */
-        if (c->ngc_Head != NULL)
-            ndif_gro_flush(ndi, c);
-        c->ngc_Head = c->ngc_Tail = p;
-        c->ngc_SrcIp = m->ngm_SrcIp;
-        c->ngc_DstIp = m->ngm_DstIp;
-        c->ngc_Ports = m->ngm_Ports;
-        c->ngc_AckNo = m->ngm_AckNo;
-        c->ngc_Frames = 1;
-        c->ngc_IsAck = TRUE;
-        return;
-    }
-
-    if (sameflow && !c->ngc_IsAck && m->ngm_Seq == c->ngc_NextSeq &&
-        c->ngc_Frames < NDIF_GRO_MAX_FRAMES)
-    {
-        /* absorb: strip headers, link via the tail pointer (tot_len of the
-         * chain is restored at flush), take the freshest cumulative ackno
-         * and window, OR the PSH hint */
-        PERF_T0(t_gro);
-        pbuf_remove_header(p, m->ngm_PayOff);
-        c->ngc_Tail->next = p;
-        c->ngc_Tail = p;
-        c->ngc_NextSeq += m->ngm_PayLen;
-        c->ngc_PayloadAdd += m->ngm_PayLen;
-        c->ngc_Frames++;
-
-        const struct tcp_hdr *th =
-            (const struct tcp_hdr *)(d->nrd_Data + m->ngm_PayOff - TCP_HLEN);
-        c->ngc_Tcp->ackno = th->ackno;
-        c->ngc_Tcp->wnd = th->wnd;
-        if (m->ngm_Flags & TCP_PSH)
-            TCPH_SET_FLAG(c->ngc_Tcp, TCP_PSH);
-        PERF_ADD(&ns_perf, NSP_RX_GRO, t_gro);
-        return;
-    }
-
-    /* other flow in the slot, sequence discontinuity, or run full */
-    if (c->ngc_Head != NULL)
-        ndif_gro_flush(ndi, c);
-
-    c->ngc_Head = p;
-    c->ngc_Tail = p;
-    c->ngc_Ip = (struct ip_hdr *)(d->nrd_Data + m->ngm_PayOff - TCP_HLEN - IP_HLEN);
-    c->ngc_Tcp = (struct tcp_hdr *)(d->nrd_Data + m->ngm_PayOff - TCP_HLEN);
-    c->ngc_SrcIp = m->ngm_SrcIp;
-    c->ngc_DstIp = m->ngm_DstIp;
-    c->ngc_Ports = m->ngm_Ports;
-    c->ngc_NextSeq = m->ngm_Seq + m->ngm_PayLen;
-    c->ngc_PayloadAdd = 0;
-    c->ngc_Frames = 1;
-    c->ngc_IsAck = FALSE;
+    return inetfrm_pseudo_sum(ip, raw) == 0xFFFF;
 }
 
 /* ----------------------------------------------------------- injection --- */
@@ -358,8 +125,8 @@ ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULONG count
                       !(d->nrd_Flags & NDRF_CSUM_VALID) &&
                       (d->nrd_Flags & NDRF_CSUM_RAW) &&
                       !ndif_rx_csum_ok(d, d->nrd_CsumRaw);
-            if (gro)
-                ndif_gro_classify(d, &ndi->ndi_GroMeta[i]);
+            if (gro && !drop[i])
+                rxgro_classify(d->nrd_Data, d->nrd_Len, &ndi->ndi_GroMeta[i]);
         }
         PERF_ADD(&ns_perf, NSP_RX_CSUM, t_csum);
 
@@ -377,7 +144,7 @@ ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULONG count
              * sequence discontinuity. */
             if (drop[i])
             {
-                ndif_gro_flush_all(ndi);
+                rxgro_flush_all(&ndi->ndi_Gro);
                 ndi->ndi_RxCsumBad++;
                 ndi->ndi_Ops->ndo_RxRelease(ndi->ndi_Drv, d->nrd_Cookie);
                 consumed++;
@@ -388,7 +155,7 @@ ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULONG count
             if (w == NULL)
             {
                 ndi->ndi_RxNoWrap++;
-                ndif_gro_flush_all(ndi); /* held frames are consumed: deliver */
+                rxgro_flush_all(&ndi->ndi_Gro); /* held frames are consumed: deliver */
                 netstack_unlock();
                 return consumed; /* backpressure: driver recycles the tail */
             }
@@ -406,30 +173,21 @@ ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULONG count
                                                  d->nrd_Data, (u16_t)d->nrd_Len);
             consumed++;
 
-            /* non-TCP frames bypass the GRO dispatch entirely */
-            if (gro && ndi->ndi_GroMeta[i].ngm_Class != NDIF_GRO_NO)
-                ndif_gro_rx(ndi, p, d, &ndi->ndi_GroMeta[i]);
-            else
-                ndif_deliver(ndi, p);
+            rxgro_input(&ndi->ndi_Gro, p, &ndi->ndi_GroMeta[i], gro);
 
-            /* Fairness yield (see NDIF_RX_YIELD_STRIDE): under contention, hand
+            /* Fairness yield (see RXGRO_YIELD_STRIDE): under contention, hand
              * the FIFO lock to a queued app task so it drains its socket queue
-             * mid-batch instead of starving. Held merge runs are delivered
-             * first — a context never outlives a lock hold. The loop head
-             * re-reads ndi_FreeWraps after the relock, so wraps freed
-             * meanwhile are seen. */
-            if (++since_yield >= NDIF_RX_YIELD_STRIDE &&
+             * mid-batch instead of starving. The loop head re-reads
+             * ndi_FreeWraps after the relock, so wraps freed meanwhile are
+             * seen. */
+            if (++since_yield >= RXGRO_YIELD_STRIDE &&
                 netstack.ns_Core.ss_QueueCount > 0)
             {
                 since_yield = 0;
-                ndif_gro_flush_all(ndi);
-                netstack_unlock();
-                PERF_T0(t_relock);
-                netstack_lock();
-                PERF_ADD(&ns_perf, NSP_RX_LOCKWAIT, t_relock);
+                rxgro_yield(&ndi->ndi_Gro);
             }
         }
-        ndif_gro_flush_all(ndi);
+        rxgro_flush_all(&ndi->ndi_Gro);
         netstack_unlock();
     }
 
