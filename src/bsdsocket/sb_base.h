@@ -739,6 +739,10 @@ void sb_stack_stop(struct SocketBase *root);
  * short name ("nd0", "lo0"). Core lock held; NULL when nothing matches. */
 struct netif;
 struct netif *sb_if_find(const char *name);
+BOOL sb_if_is_loopback(const struct netif *nif);
+/* fill a caller-provided sockaddr_in from a network-order address
+ * (== host order on 68k); NULL dst is a no-op */
+void sb_if_set_sockaddr(APTR dst, ULONG addr);
 
 /* --- the implemented API surface (register conventions from the NDK sfd) --- */
 

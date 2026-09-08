@@ -38,7 +38,7 @@
 #include "netif_base.h"
 #include "netstack.h"
 
-static BOOL sb_if_is_loopback(const struct netif *nif)
+BOOL sb_if_is_loopback(const struct netif *nif)
 {
     return nif->name[0] == 'l' && nif->name[1] == 'o';
 }
@@ -80,7 +80,7 @@ static BOOL sb_ifq_is_nic_tag(ULONG tag)
 
 /* Fill a caller-provided sockaddr as an AF_INET sockaddr_in. addr is in
  * network byte order (== host order on 68k). */
-static void sb_if_set_sockaddr(APTR dst, ULONG addr)
+void sb_if_set_sockaddr(APTR dst, ULONG addr)
 {
     struct sb_sockaddr_in *sa = dst;
     if (sa == NULL)

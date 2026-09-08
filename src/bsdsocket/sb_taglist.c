@@ -265,7 +265,7 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
             struct netif *nif;
             NETIF_FOREACH(nif)
             {
-                if (nif->name[0] == 'l' && nif->name[1] == 'o')
+                if (sb_if_is_loopback(nif))
                     continue; /* loopback is not an "interface" here */
                 if (netif_is_up(nif) && ip4_addr_get_u32(netif_ip4_addr(nif)) != 0)
                     st |= SBSYSSTAT_Interfaces | SBSYSSTAT_BCast_Interfaces;
