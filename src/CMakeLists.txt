@@ -115,6 +115,7 @@ add_executable(bsdsocket_library
     bsdsocket/sb_rdns.c
     bsdsocket/sb_netstat.c
     bsdsocket/sb_arp.c
+    bsdsocket/sb_route.c
     bsdsocket/end.c
 )
 
@@ -364,6 +365,42 @@ target_compile_definitions(traceroute PRIVATE
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/traceroute
     DESTINATION C
+)
+
+# --- GetNetStatus: scriptable network readiness check -------------------------
+# Roadshow-compatible CHECK conditions over one SBTC_SYSTEM_STATUS query;
+# unsatisfied selected conditions exit RETURN_WARN for "IF WARN" boot scripts.
+add_executable(getnetstatus
+    getnetstatus/getnetstatus.c
+)
+target_compile_options(getnetstatus PRIVATE -Os ${LWIP_WARN})
+target_compile_definitions(getnetstatus PRIVATE
+    TOOL_VERSION="${TOOL_VERSION}"
+    TOOL_DATE="${CURRENT_DATE}"
+)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/getnetstatus
+    DESTINATION C
+    RENAME GetNetStatus
+)
+
+# --- ShowNetStatus: route/ifconfig/netstat-style diagnostics ------------------
+# Roadshow-compatible sections over the query LVOs (interface list/detail,
+# DNS, GetRouteInfo routes, SIOCGARPT ARP cache, GetNetworkStatistics protocol
+# stats and socket tables). Needs include/ for net/if_arp_ioctl.h.
+add_executable(shownetstatus
+    shownetstatus/shownetstatus.c
+)
+target_compile_options(shownetstatus PRIVATE -Os ${LWIP_WARN})
+target_include_directories(shownetstatus PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(shownetstatus PRIVATE
+    TOOL_VERSION="${TOOL_VERSION}"
+    TOOL_DATE="${CURRENT_DATE}"
+)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/shownetstatus
+    DESTINATION C
+    RENAME ShowNetStatus
 )
 
 # Sample interface config. Staged under Storage/NetInterfaces (the inactive

@@ -125,15 +125,17 @@ Packet capture (tcpdump-class). Would map to a promiscuous RAW netif tap.
 
 ### `SBTC_HAVE_ROUTING_API` — route management (5 LVOs)
 
-lwIP has no route table beyond netif + gateway, so there is nothing to expose.
+lwIP has no route table beyond netif + gateway. The query pair is implemented
+by synthesis (`sb_route.c`); the mutators stay stubs, so the capability tag
+**deliberately reports FALSE** — flipping it would promise Add/Delete/Change.
 
 | LVO | Off. | Impl. | Decision | Notes |
 |---|---|---|---|---|
-| `AddRouteTagList` (+ `AddRouteTags`) | −414 | ⛔ | ❌ no | |
+| `AddRouteTagList` (+ `AddRouteTags`) | −414 | ⛔ | ❌ no | Default-gateway-only subset is a TODO item (maps to `netif_set_gw`). |
 | `DeleteRouteTagList` (+ `DeleteRouteTags`) | −420 | ⛔ | ❌ no | |
 | `ChangeRouteTagList` (+ `ChangeRouteTags`) | −426 | ⛔ | ❌ no | Private / unimplemented in Roadshow itself. |
-| `FreeRouteInfo` | −432 | ⛔ | ❌ no | |
-| `GetRouteInfo` | −438 | ⛔ | 🟡 maybe | Only member with plausible value (report netif + gateway) if a tool needs it. |
+| `FreeRouteInfo` | −432 | ✅ | ✅ done | `FreeVec`; NULL is a no-op. |
+| `GetRouteInfo` | −438 | 🟡 | ✅ done | Synthesized v3 `rt_msghdr` table (loopback host route, default netif's on-link net route, default-gateway route), terminated by `rtm_msglen == 0`. Flags filter: entry returned iff it carries every requested `RTF_*` bit, so `RTF_LLINFO` (ARP) queries yield an empty table — use `SIOCGARPT` for the ARP cache. `AF_UNSPEC`/`AF_INET` only. |
 
 ### `SBTC_HAVE_INTERFACE_API` — interface management (10 LVOs)
 
@@ -302,7 +304,7 @@ in the SFD; the doc warns the interface is subject to change.
 | `SBTC_HAVE_GETHOSTADDR_R_API` | 6 | 6 | ✅ done |
 | `SBTC_HAVE_STATUS_API` | 1 | 1 | ✅ done (mapped from lwIP stats; approximate) |
 | `SBTC_HAVE_INTERFACE_API` | 10 | 3 | ✅ query subset; config ❌ (graceful `EINVAL`) |
-| `SBTC_HAVE_ROUTING_API` | 5 | 0 | ❌ (GetRouteInfo maybe) |
+| `SBTC_HAVE_ROUTING_API` | 5 | 2 | ✅ query pair (synthesized); mutators ❌, tag reports FALSE |
 | `SBTC_HAVE_KERNEL_MEMORY_API` | 11 | 0 | ❌ never (only useful to an `ipf_*` hook) |
 | `SBTC_NUM_PACKET_FILTER_CHANNELS` (BPF) | 8 | 0 | 🔜 future |
 | `SBTC_HAVE_MONITORING_API` | 2 | 0 | ❌ never |

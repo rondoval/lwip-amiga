@@ -268,10 +268,19 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
                 if (sb_if_is_loopback(nif))
                     continue; /* loopback is not an "interface" here */
                 if (netif_is_up(nif) && ip4_addr_get_u32(netif_ip4_addr(nif)) != 0)
-                    st |= SBSYSSTAT_Interfaces | SBSYSSTAT_BCast_Interfaces;
+                    st |= SBSYSSTAT_Interfaces | SBSYSSTAT_BCast_Interfaces |
+                          /* such an interface always carries an on-link net
+                           * route, which is exactly what bsd_GetRouteInfo
+                           * synthesizes for it — so "routing information is
+                           * configured" tracks the same condition here. The
+                           * always-present loopback route is deliberately not
+                           * counted: it would make the Roadshow CHECK ROUTES
+                           * condition permanently satisfied, hence useless. */
+                          SBSYSSTAT_Routes;
             }
-            if (ip4_addr_get_u32(ip_2_ip4(dns_getserver(0))) != 0)
+            if (sb_dns_first_server() != NULL)
                 st |= SBSYSSTAT_Resolver;
+            /* the default route is the narrower condition: a gateway on top */
             if (netif_default != NULL &&
                 ip4_addr_get_u32(netif_ip4_gw(netif_default)) != 0)
                 st |= SBSYSSTAT_Routes | SBSYSSTAT_DefaultRoute;

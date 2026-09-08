@@ -234,8 +234,8 @@ LONG sb_ptr_resolve(struct SocketBase *base, ULONG addr, char *out, ULONG outmax
 
     netstack_lock();
 
-    const ip_addr_t *srv = dns_getserver(0);
-    if (srv == NULL || ip_addr_isany(srv))
+    const ip_addr_t *srv = sb_dns_first_server();
+    if (srv == NULL)
     {
         netstack_unlock();
         return -1;

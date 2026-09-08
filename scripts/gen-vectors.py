@@ -101,13 +101,15 @@ IMPLEMENTED = {
     "ConfigureInterfaceTagList": "bsd_InterfaceConfigUnsupported",
     "RemoveInterface": "bsd_InterfaceConfigUnsupported",
     "GetNetworkStatistics": "bsd_GetNetworkStatistics",
+    "GetRouteInfo": "bsd_GetRouteInfo",
+    "FreeRouteInfo": "bsd_FreeRouteInfo",
 }
 
 # Unimplemented LVOs that return POINTERS get the NULL stub; handing an app
 # LibStub's -1 where it checks for NULL would be a crash.
 NULL_STUBS = {
     "mbuf_copym", "mbuf_free", "mbuf_get", "mbuf_gethdr", "mbuf_prepend",
-    "mbuf_pullup", "GetRouteInfo", "CreateAddrAllocMessageA", "ObtainRoadshowData",
+    "mbuf_pullup", "CreateAddrAllocMessageA", "ObtainRoadshowData",
 }
 
 HEADER = """\

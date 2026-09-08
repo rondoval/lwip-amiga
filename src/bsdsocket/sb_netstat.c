@@ -6,7 +6,10 @@
  * BSD struct fields have no lwIP equivalent and are reported zero, and the
  * mapping is best-effort — documented as approximate in the coverage doc. The
  * struct layouts here are transcribed verbatim from the bsdsocket.doc autodoc
- * so their sizes match the caller's <libraries/bsdsocket.h> definitions.
+ * — the same layouts the NDK publishes in the netinet <proto>_var.h headers,
+ * net/route.h and sys/mbuf.h. The library never includes them (they pull libnix
+ * <string.h> into a freestanding TU), so the mirrors are pinned to the wire
+ * sizes below; ShowNetStatus pins the NDK's own structs to the same numbers.
  */
 
 #include "sb_base.h"
@@ -55,8 +58,9 @@ struct sb_icmpstat
 
 struct sb_igmpstat
 {
-    ULONG rcv_total, rcv_tooshort, rcv_badsum, rcv_queries, rcv_badqueries;
-    ULONG rcv_reports, rcv_badreports, rcv_ourreports, snd_reports;
+    ULONG igps_rcv_total, igps_rcv_tooshort, igps_rcv_badsum, igps_rcv_queries;
+    ULONG igps_rcv_badqueries, igps_rcv_reports, igps_rcv_badreports;
+    ULONG igps_rcv_ourreports, igps_snd_reports;
 };
 
 struct sb_ipstat
@@ -127,6 +131,20 @@ struct sb_pcd
     ULONG pcd_send_queue_size;
     LONG pcd_tcp_state;
 };
+
+/* wire ABI pins — ShowNetStatus asserts the NDK structs to the same sizes
+ * (m68k only: host IntelliSense sees a 64-bit long) */
+#ifndef __INTELLISENSE__
+_Static_assert(sizeof(struct sb_icmpstat) == 184, "icmpstat wire ABI");
+_Static_assert(sizeof(struct sb_igmpstat) == 36, "igmpstat wire ABI");
+_Static_assert(sizeof(struct sb_ipstat) == 96, "ipstat wire ABI");
+_Static_assert(sizeof(struct sb_mbstat) == 28, "mbstat wire ABI");
+_Static_assert(sizeof(struct sb_mrtstat) == 32, "mrtstat wire ABI");
+_Static_assert(sizeof(struct sb_rtstat) == 10, "rtstat wire ABI");
+_Static_assert(sizeof(struct sb_tcpstat) == 208, "tcpstat wire ABI");
+_Static_assert(sizeof(struct sb_udpstat) == 36, "udpstat wire ABI");
+_Static_assert(sizeof(struct sb_pcd) == 24, "protocol_connection_data wire ABI");
+#endif
 
 /* copy min(size, total) bytes out; a NULL destination just queries the size */
 static LONG sb_stat_out(APTR destination, LONG size, const void *src, LONG total)
@@ -216,13 +234,13 @@ static void sb_fill_igmp(struct sb_igmpstat *st)
 {
     memset(st, 0, sizeof(*st));
 #if IGMP_STATS
-    st->rcv_total = lwip_stats.igmp.recv;
-    st->rcv_tooshort = lwip_stats.igmp.lenerr;
-    st->rcv_badsum = lwip_stats.igmp.chkerr;
-    st->rcv_queries = lwip_stats.igmp.rx_group + lwip_stats.igmp.rx_general;
-    st->rcv_reports = lwip_stats.igmp.rx_report;
-    st->snd_reports = lwip_stats.igmp.tx_report + lwip_stats.igmp.tx_join +
-                      lwip_stats.igmp.tx_leave;
+    st->igps_rcv_total = lwip_stats.igmp.recv;
+    st->igps_rcv_tooshort = lwip_stats.igmp.lenerr;
+    st->igps_rcv_badsum = lwip_stats.igmp.chkerr;
+    st->igps_rcv_queries = lwip_stats.igmp.rx_group + lwip_stats.igmp.rx_general;
+    st->igps_rcv_reports = lwip_stats.igmp.rx_report;
+    st->igps_snd_reports = lwip_stats.igmp.tx_report + lwip_stats.igmp.tx_join +
+                           lwip_stats.igmp.tx_leave;
 #endif
 }
 
@@ -284,6 +302,15 @@ static LONG sb_tcp_sockets(APTR destination, LONG size)
                     0, 0,
                     ip4_addr_get_u32(ip_2_ip4(&p->local_ip)), p->local_port,
                     0, 0, sb_bsd_tcp_state[LISTEN]);
+    }
+    for (struct tcp_pcb *p = tcp_bound_pcbs; p != NULL; p = p->next)
+    {
+        /* bound but neither connected nor listening: CLOSED with a local
+         * address, matching BSD netstat */
+        sb_pcd_emit(out, size, &written, &count,
+                    0, 0,
+                    ip4_addr_get_u32(ip_2_ip4(&p->local_ip)), p->local_port,
+                    0, 0, sb_bsd_tcp_state[CLOSED]);
     }
     return destination == NULL ? count * (LONG)sizeof(struct sb_pcd) : written;
 }

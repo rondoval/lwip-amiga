@@ -146,6 +146,7 @@ struct sb_timeval
     ULONG tv_micro;
 };
 
+#define SB_AF_UNSPEC 0
 #define SB_AF_INET 2
 #define SB_SOCK_STREAM 1
 #define SB_SOCK_DGRAM 2
@@ -654,7 +655,7 @@ struct SocketBase
     ULONG protoIdx; /* get*ent iterators */
     ULONG servIdx;
     ULONG netIdx;
-    char ntoaBuf[20]; /* Inet_NtoA return buffer */
+    char ntoaBuf[IP4ADDR_STRLEN_MAX]; /* Inet_NtoA return buffer */
 };
 
 #define SB_ROOT(b) ((b)->root != NULL ? (b)->root : (b))
@@ -743,6 +744,11 @@ BOOL sb_if_is_loopback(const struct netif *nif);
 /* fill a caller-provided sockaddr_in from a network-order address
  * (== host order on 68k); NULL dst is a no-op */
 void sb_if_set_sockaddr(APTR dst, ULONG addr);
+
+/* first configured DNS server, or NULL when no slot holds one (sb_dnsconfig.c).
+ * The slots are sparse — see the definition; never probe slot 0 directly.
+ * Core lock held. */
+const ip_addr_t *sb_dns_first_server(void);
 
 /* --- the implemented API surface (register conventions from the NDK sfd) --- */
 
@@ -849,6 +855,10 @@ LONG bsd_InterfaceConfigUnsupported(struct SocketBase *base asm("a6"));
 
 /* sb_netstat.c */
 LONG bsd_GetNetworkStatistics(LONG type asm("d0"), LONG version asm("d1"), APTR destination asm("a0"), LONG size asm("d2"), struct SocketBase *base asm("a6"));
+
+/* sb_route.c — synthesized rt_msghdr route table (Add/Delete/Change stay stubs) */
+APTR bsd_GetRouteInfo(LONG af asm("d0"), LONG flags asm("d1"), struct SocketBase *base asm("a6"));
+VOID bsd_FreeRouteInfo(APTR table asm("a0"), struct SocketBase *base asm("a6"));
 
 /* sb_gai.c */
 LONG bsd_getaddrinfo(STRPTR hostname asm("a0"), STRPTR servname asm("a1"), struct sb_addrinfo *hints asm("a2"), struct sb_addrinfo **res asm("a3"), struct SocketBase *base asm("a6"));
