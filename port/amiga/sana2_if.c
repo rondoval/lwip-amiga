@@ -15,6 +15,7 @@
 #include <netif/ethernet.h>
 
 #include "netstack.h"
+#include "netstack_diag.h"
 #include "sana2_priv.h"
 
 /* ------------------------------------------------------ copy callbacks --- */
@@ -224,8 +225,8 @@ void sana2if_destroy(struct Sana2If *s2i)
     /* pump stop drained everything; a violation here means a write request
      * (and its pbuf ref) leaks with the pool below */
     if (s2i->s2i_TxInFlight != 0 || s2i->s2i_TxStagedHead != NULL)
-        Kprintf("[sana2if] destroy with TX outstanding (%lu in flight)!\n",
-                s2i->s2i_TxInFlight);
+        netstack_log(NS_LOG_WARNING, "%s: destroyed with %lu TX requests in flight",
+                     s2i->s2i_Base.nib_Name, s2i->s2i_TxInFlight);
     netif_remove(&s2i->s2i_Base.nib_Netif);
     if (netstack.ns_ActiveSana2 == s2i)
     {

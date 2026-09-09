@@ -6,12 +6,15 @@
  * promotion and only the finished string reaches the backend.
  *
  * One core, two argument sources (both flat 32-bit cells after promotion):
- * varargs for LWIP_PLATFORM_DIAG and the freestanding snprintf, and a ULONG
- * array for bsd_vsyslog's AmigaOS calling convention.
+ * varargs for netstack_log, LWIP_PLATFORM_DIAG and the freestanding snprintf,
+ * and a ULONG array for bsd_vsyslog's AmigaOS calling convention.
  *
- * Debug tier. netstack_diag_printf stays defined at every tier (lwIP needs
- * LWIP_PLATFORM_DIAG to resolve) but its body compiles out below it, so a
- * build with no sink is completely silent. Hot paths never call this.
+ * The formatter and the runtime log (netstack_log) exist at every tier: they
+ * feed the syslog LVO and the log hook, which are part of the library's API
+ * and must work in a release build. The debug printers (netstack_diag_printf,
+ * snprintf) stay debug-tier: netstack_diag_printf keeps its entry point (lwIP
+ * needs LWIP_PLATFORM_DIAG to resolve) but its body compiles out, so a build
+ * with no sink is completely silent. Hot paths never call any of this.
  */
 
 #include "netstack_sys.h"
@@ -24,8 +27,6 @@
 #include "netstack_diag.h"
 
 #define NS_DIAG_BUF 256
-
-#ifdef DEBUG
 
 /* Argument source: both callers hand over a sequence of 32-bit cells, so the
  * core pulls each one through this and stays agnostic about where they live.
@@ -191,7 +192,7 @@ static ULONG ns_vformat_core(char *dst, ULONG max, const char *fmt,
     return o;
 }
 
-/* --- varargs front end (LWIP_PLATFORM_DIAG, snprintf) --- */
+/* --- varargs front end (netstack_log, LWIP_PLATFORM_DIAG, snprintf) --- */
 
 /* va_list lives in a struct so a pointer to it can cross the accessor
  * boundary: va_list may be an array type, which cannot simply be assigned. */
@@ -240,6 +241,34 @@ unsigned long netstack_vformat_args(char *dst, unsigned long max,
     return ns_vformat_core(dst, (ULONG)max, fmt, ns_next_vec, &v);
 }
 
+/* --- the runtime log ------------------------------------------------------ */
+
+/* The one registered sink (the library's log facility). The port layer has no
+ * notion of hooks or openers: it formats and hands the line over. */
+static netstack_log_sink_fn ns_log_sink;
+
+void netstack_log_set_sink(netstack_log_sink_fn fn)
+{
+    ns_log_sink = fn;
+}
+
+void netstack_log(int pri, const char *fmt, ...)
+{
+    char buf[NS_DIAG_BUF];
+    va_list ap;
+
+    va_start(ap, fmt);
+    ns_vformat(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+
+    if (ns_log_sink != NULL)
+        ns_log_sink(pri, buf);
+    else
+        Kprintf("[log:%ld] %s\n", (LONG)pri, (ULONG)buf); /* no sink: debug tiers only */
+}
+
+#ifdef DEBUG
+
 /* LWIP_PLATFORM_DIAG (see lwipopts.h) */
 void netstack_diag_printf(const char *fmt, ...)
 {
@@ -277,9 +306,5 @@ void netstack_diag_printf(const char *fmt, ...)
 {
     (void)fmt;
 }
-
-/* netstack_vformat_args has no stub: its only caller (bsd_vsyslog) guards the
- * call itself, so below the debug tier it never formats into a discarded
- * buffer — while the LVO stays present and callable. */
 
 #endif /* DEBUG */

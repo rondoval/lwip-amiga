@@ -38,6 +38,78 @@ void sb_set_herrno(struct SocketBase *base, LONG code)
         *base->hErrnoPtr = code;
 }
 
+/* The BSD strerror texts for the codes this library sets (sb_base.h SB_E*) */
+struct SbErrText
+{
+    UBYTE code;
+    const char *text;
+};
+
+static const struct SbErrText sbErrnoText[] = {
+    {SB_EINTR, "Interrupted system call"},
+    {SB_ENXIO, "Device not configured"},
+    {SB_EBADF, "Bad file descriptor"},
+    {SB_ENOMEM, "Cannot allocate memory"},
+    {SB_EACCES, "Permission denied"},
+    {SB_EFAULT, "Bad address"},
+    {SB_EINVAL, "Invalid argument"},
+    {SB_EMFILE, "Too many open files"},
+    {SB_EPIPE, "Broken pipe"},
+    {SB_EWOULDBLOCK, "Resource temporarily unavailable"},
+    {SB_EINPROGRESS, "Operation now in progress"},
+    {SB_EALREADY, "Operation already in progress"},
+    {SB_ENOTSOCK, "Socket operation on non-socket"},
+    {SB_EDESTADDRREQ, "Destination address required"},
+    {SB_EMSGSIZE, "Message too long"},
+    {SB_ENOPROTOOPT, "Protocol not available"},
+    {SB_EPROTONOSUPPORT, "Protocol not supported"},
+    {SB_ESOCKTNOSUPPORT, "Socket type not supported"},
+    {SB_EOPNOTSUPP, "Operation not supported"},
+    {SB_EAFNOSUPPORT, "Address family not supported by protocol family"},
+    {SB_EADDRINUSE, "Address already in use"},
+    {SB_EADDRNOTAVAIL, "Can't assign requested address"},
+    {SB_ENETUNREACH, "Network is unreachable"},
+    {SB_ECONNABORTED, "Software caused connection abort"},
+    {SB_ECONNRESET, "Connection reset by peer"},
+    {SB_ENOBUFS, "No buffer space available"},
+    {SB_EISCONN, "Socket is already connected"},
+    {SB_ENOTCONN, "Socket is not connected"},
+    {SB_ESHUTDOWN, "Can't send after socket shutdown"},
+    {SB_ETIMEDOUT, "Operation timed out"},
+    {SB_ECONNREFUSED, "Connection refused"},
+    {SB_EHOSTUNREACH, "No route to host"},
+};
+
+static const struct SbErrText sbHerrnoText[] = {
+    {SB_HOST_NOT_FOUND, "Unknown host"},
+    {SB_TRY_AGAIN, "Host name lookup failure"},
+    {SB_NO_RECOVERY, "Unknown server error"},
+    {SB_NO_DATA, "No address associated with name"},
+};
+
+static const char *sb_err_lookup(const struct SbErrText *tab, ULONG n, LONG code,
+                                 const char *unknown)
+{
+    if (code == 0)
+        return "No error";
+    for (ULONG i = 0; i < n; i++)
+        if (tab[i].code == code)
+            return tab[i].text;
+    return unknown;
+}
+
+const char *sb_errno_text(LONG code)
+{
+    return sb_err_lookup(sbErrnoText, sizeof(sbErrnoText) / sizeof(sbErrnoText[0]), code,
+                         "Unknown error");
+}
+
+const char *sb_herrno_text(LONG code)
+{
+    return sb_err_lookup(sbHerrnoText, sizeof(sbHerrnoText) / sizeof(sbHerrnoText[0]), code,
+                         "Unknown resolver error");
+}
+
 /* the API-wide fail idiom: set errno, return -1 */
 LONG sb_fail(struct SocketBase *base, LONG code)
 {

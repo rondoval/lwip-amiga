@@ -103,11 +103,11 @@ add_executable(bsdsocket_library
     bsdsocket/sb_sockopt.c
     bsdsocket/sb_select.c
     bsdsocket/sb_errno.c
+    bsdsocket/sb_log.c
     bsdsocket/sb_taglist.c
     bsdsocket/sb_inet.c
     bsdsocket/sb_resolver.c
     bsdsocket/sb_netdb.c
-    bsdsocket/sb_syslog.c
     bsdsocket/sb_sockpass.c
     bsdsocket/sb_dnsconfig.c
     bsdsocket/sb_ifquery.c
@@ -401,6 +401,30 @@ install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/shownetstatus
     DESTINATION C
     RENAME ShowNetStatus
+)
+
+# --- NetLogViewer: log capture commodity --------------------------------------
+add_executable(netlogviewer
+    netlogviewer/netlogviewer.c
+    netlogviewer/nlv_args.c
+    netlogviewer/nlv_window.c
+)
+target_compile_options(netlogviewer PRIVATE -Os ${LWIP_WARN})
+target_compile_definitions(netlogviewer PRIVATE
+    TOOL_VERSION="${TOOL_VERSION}"
+    TOOL_DATE="${CURRENT_DATE}"
+)
+target_link_libraries(netlogviewer PRIVATE amiga)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/netlogviewer
+    DESTINATION C
+    RENAME NetLogViewer
+)
+# Workbench icon (committed static asset; see dist/icons/README.md): carries
+# the CX_POPKEY/CX_PRIORITY/CX_POPUP tooltypes and DONOTWAIT.
+install(
+    FILES ${CMAKE_SOURCE_DIR}/dist/NetLogViewer.info
+    DESTINATION C
 )
 
 # Sample interface config. Staged under Storage/NetInterfaces (the inactive

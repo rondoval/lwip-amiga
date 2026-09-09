@@ -236,9 +236,8 @@ unsigned int netstack_lwip_rand(void)
  * `return ERR_ARG`), so argument validation still recovers in every build. */
 void netstack_platform_diag(const char *msg)
 {
-    (void)msg; /* the only reader is Kprintf, which compiles out below debug */
-    Kprintf("[lwip] ASSERT: %s — task '%s' halted\n", (ULONG)msg,
-            (ULONG)FindTask(NULL)->tc_Node.ln_Name);
+    netstack_log(NS_LOG_CRIT, "lwIP assertion failed: %s, task '%s' halted", msg,
+                 FindTask(NULL)->tc_Node.ln_Name);
     for (;;)
         Wait(0UL);
 }

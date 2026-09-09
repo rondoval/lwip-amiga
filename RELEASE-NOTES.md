@@ -86,6 +86,43 @@ It defaults on — on the Amiga, arming the signal mask with
 `SetSocketSignals()` is itself the opt-in, and AmiTCP-era programs rely on
 that; `FIOASYNC(0)` opts a socket back out.
 
+### NetLogViewer
+
+`NetLogViewer` is a Commodity (`CX_POPKEY/K,CX_PRIORITY/K/N,CX_POPUP/K`,
+default hotkey `shift alt f8`, Exchange Show/Hide, the same names as icon
+tooltypes from Workbench) that captures every message the stack and its
+clients log and shows it in a window with time, origin and severity.
+The list keeps the last 1000 lines and can be saved to a file.
+`NetShutdown` makes the viewer exit, like every other network program.
+It ships with a Workbench icon.
+
+Start it before `AddNetInterface` to see the whole bring-up, for example
+from `S:Network-Startup`:
+
+    Run >NIL: C:NetLogViewer CX_POPUP NO
+
+The stack keeps the last 16 lines of its own boot and replays them to a
+viewer that starts late, so even the configuration warnings from the first
+`OpenLibrary` reach the window.
+
+### The stack keeps a log
+
+`bsdsocket.library` now reports what it does in every build, not only in
+debug builds: interface bring-up and removal, driver selection, link up and
+down, DHCP leases and addresses, DNS in effect, mDNS announcements,
+`netstack.prefs` mistakes, shutdown progress, and failures. Delivery is
+public `SBTC_LOG_HOOK` tag, so any program can subscribe to the same stream,
+and `syslog()` from applications reaches it too — with the program's name as
+the origin and `%m` expanded to the current error text.
+There is no log file or console sink (`SBTC_LOG_FILE_NAME` stays
+unsupported); the viewer saves the list itself.
+
+### Error texts
+
+`SBTC_ERRNOSTRPTR` and `SBTC_HERRNOSTRPTR` now return the BSD text for an
+`errno` or `h_errno` code. `SBTC_LOGFACILITY` defaults to `LOG_USER` as
+documented.
+
 ---
 
 ## Bug fixes / Improvements

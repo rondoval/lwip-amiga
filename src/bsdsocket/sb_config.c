@@ -19,17 +19,6 @@
 #include <strutil.h>
 #include <prefs.h>
 
-static void sb_cfg_copy(char *dst, ULONG max, const char *src)
-{
-    ULONG i = 0;
-    while (src[i] != '\0' && i < max - 1)
-    {
-        dst[i] = src[i];
-        i++;
-    }
-    dst[i] = '\0';
-}
-
 /* Cut the leading blank-delimited word off *rest, in place: the word is
  * NUL-terminated and *rest is left on the first character after it, blanks
  * skipped. Whatever remains is the caller's — a value whose last field is
@@ -105,7 +94,7 @@ static void sb_cfg_defaults(struct SbNetConfig *cfg)
 {
     for (ULONG i = 0; i < sizeof(*cfg); i++)
         ((UBYTE *)cfg)[i] = 0;
-    sb_cfg_copy(cfg->cfg_Hostname, sizeof(cfg->cfg_Hostname), "amiga");
+    strlcpy(cfg->cfg_Hostname, "amiga", sizeof(cfg->cfg_Hostname));
     cfg->cfg_Mdns = TRUE;    /* HOSTNAME.local costs one multicast group */
 }
 
@@ -158,34 +147,34 @@ void sb_config_load(struct SbNetConfig *cfg)
         {
             if (!warnedObsolete)
             {
-                Kprintf("[bsdsocket] netstack.prefs: DEVICE/UNIT/MODE/ADDRESS/"
-                        "NETMASK/GATEWAY/VLAN are obsolete — interfaces are "
-                        "configured in DEVS:NetInterfaces/ (see AddNetInterface)\n");
+                SB_LOG(NS_LOG_WARNING, "netstack.prefs: DEVICE/UNIT/MODE/ADDRESS/"
+                       "NETMASK/GATEWAY/VLAN are obsolete, interfaces are "
+                       "configured in DEVS:NetInterfaces/ (see AddNetInterface)");
                 warnedObsolete = TRUE;
             }
         }
         else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "DNS1") == 0)
         {
             if (!ip4addr_aton(val, &cfg->cfg_Dns[0]))
-                Kprintf("[bsdsocket] netstack.prefs: bad DNS1 '%s'\n", val);
+                SB_LOG(NS_LOG_WARNING, "netstack.prefs: bad DNS1 '%s'", val);
         }
         else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "DNS2") == 0)
         {
             if (!ip4addr_aton(val, &cfg->cfg_Dns[1]))
-                Kprintf("[bsdsocket] netstack.prefs: bad DNS2 '%s'\n", val);
+                SB_LOG(NS_LOG_WARNING, "netstack.prefs: bad DNS2 '%s'", val);
         }
         else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "HOSTNAME") == 0)
         {
-            sb_cfg_copy(cfg->cfg_Hostname, sizeof(cfg->cfg_Hostname), val);
+            strlcpy(cfg->cfg_Hostname, val, sizeof(cfg->cfg_Hostname));
         }
         else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "DOMAIN") == 0)
         {
-            sb_cfg_copy(cfg->cfg_Domain, sizeof(cfg->cfg_Domain), val);
+            strlcpy(cfg->cfg_Domain, val, sizeof(cfg->cfg_Domain));
         }
         else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "MDNS") == 0)
         {
             if (!sb_cfg_parse_bool(val, &cfg->cfg_Mdns))
-                Kprintf("[bsdsocket] netstack.prefs: bad MDNS '%s'\n", val);
+                SB_LOG(NS_LOG_WARNING, "netstack.prefs: bad MDNS '%s'", val);
         }
         else if (_Stricmp((CONST_STRPTR)key, (CONST_STRPTR) "MDNS_SERVICE") == 0)
         {
@@ -200,16 +189,16 @@ void sb_config_load(struct SbNetConfig *cfg)
             LONG port;
             if (*type == '\0' || !StrToLong((STRPTR)portStr, &port) || port <= 0 ||
                 port > 65535)
-                Kprintf("[bsdsocket] netstack.prefs: bad MDNS_SERVICE '%s'\n", type);
+                SB_LOG(NS_LOG_WARNING, "netstack.prefs: bad MDNS_SERVICE '%s'", type);
             else if (cfg->cfg_NumMdnsServices >= SB_CFG_MDNS_MAX)
-                Kprintf("[bsdsocket] netstack.prefs: MDNS_SERVICE table full (max %ld)\n",
-                        (LONG)SB_CFG_MDNS_MAX);
+                SB_LOG(NS_LOG_WARNING, "netstack.prefs: MDNS_SERVICE table full (max %ld)",
+                       (LONG)SB_CFG_MDNS_MAX);
             else
             {
                 struct SbCfgMdnsService *s =
                     &cfg->cfg_MdnsServices[cfg->cfg_NumMdnsServices++];
-                sb_cfg_copy(s->type, sizeof(s->type), type);
-                sb_cfg_copy(s->name, sizeof(s->name), name);
+                strlcpy(s->type, type, sizeof(s->type));
+                strlcpy(s->name, name, sizeof(s->name));
                 s->port = (UWORD)port;
             }
         }
@@ -222,14 +211,14 @@ void sb_config_load(struct SbNetConfig *cfg)
 
             ULONG netnum;
             if (*name == '\0' || !sb_cfg_parse_netnum(num, &netnum))
-                Kprintf("[bsdsocket] netstack.prefs: bad NETWORK '%s'\n", name);
+                SB_LOG(NS_LOG_WARNING, "netstack.prefs: bad NETWORK '%s'", name);
             else if (cfg->cfg_NumNetworks >= SB_CFG_NETWORKS_MAX)
-                Kprintf("[bsdsocket] netstack.prefs: NETWORK table full (max %ld)\n",
-                        (LONG)SB_CFG_NETWORKS_MAX);
+                SB_LOG(NS_LOG_WARNING, "netstack.prefs: NETWORK table full (max %ld)",
+                       (LONG)SB_CFG_NETWORKS_MAX);
             else
             {
                 struct SbCfgNetwork *n = &cfg->cfg_Networks[cfg->cfg_NumNetworks++];
-                sb_cfg_copy(n->name, sizeof(n->name), name);
+                strlcpy(n->name, name, sizeof(n->name));
                 n->net = netnum;
             }
         }

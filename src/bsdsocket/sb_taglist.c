@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * SocketBaseTagList — the per-opener configuration dispatcher: signal
- * masks, errno/h_errno redirection, syslog configuration, fd-table growth,
- * the release string, Roadshow capability probes and the status/byte
- * counters. Returns 0 on success or the 1-based index of the failing tag.
+ * masks, errno/h_errno redirection and texts, syslog configuration and the
+ * stack-wide log hook, fd-table growth, the release string, Roadshow
+ * capability probes and the status/byte counters. Returns 0 on success or
+ * the 1-based index of the failing tag.
  */
 
 #include "sb_base.h"
@@ -148,6 +149,23 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
                 base->logMask = *valp;
             else
                 *valp = base->logMask;
+            break;
+        case SBTC_LOG_HOOK:
+            /* stack-wide, unlike the four above: the one hook every log
+             * line of every opener and of the stack itself goes to */
+            if (isSet)
+                sb_log_set_hook(SB_ROOT(base), (struct Hook *)*valp, base);
+            else
+                *valp = (ULONG)SB_ROOT(base)->logHook;
+            break;
+        case SBTC_ERRNOSTRPTR:
+        case SBTC_HERRNOSTRPTR:
+            /* error code in, pointer to its text out — by reference only,
+             * the cell is both input and output */
+            if (isSet || !isRef)
+                return index;
+            *valp = (ULONG)(code == SBTC_ERRNOSTRPTR ? sb_errno_text((LONG)*valp)
+                                                     : sb_herrno_text((LONG)*valp));
             break;
         case SBTC_DTABLESIZE:
             if (isSet)

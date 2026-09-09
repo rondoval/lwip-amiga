@@ -45,6 +45,7 @@
 
 #include "inet_frame.h"
 #include "netstack.h"
+#include "netstack_diag.h"
 #include "nsprof.h"
 #include "rx_gro.h"
 #include "sana2_priv.h"
@@ -352,8 +353,9 @@ static void s2if_pump_txev(struct S2Pump *pp)
             {
                 /* no usable link events from this driver: the link was
                  * seeded up at bring-up and stays there */
-                Kprintf("[sana2if] S2_ONEVENT unsupported (%ld) — link "
-                        "tracking off\n", (LONG)err);
+                netstack_log(NS_LOG_NOTICE,
+                             "%s: driver has no link events (S2_ONEVENT error %ld), link assumed up",
+                             ((struct NetIfBase *)nf->state)->nib_Name, (LONG)err);
                 pp->s2p_EvDead = TRUE;
             }
         }

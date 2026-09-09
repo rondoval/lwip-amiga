@@ -37,6 +37,14 @@
 
 #include "netdev_if.h"
 #include "netstack.h"
+#include "netstack_diag.h"
+
+/* The corruption reports below run at every tier (see nslab_pop): the first
+ * occurrence carries the evidence, a burst of the same bug must not become a
+ * burst of log lines on a weak CPU — each site reports once per library load. */
+static UBYTE nsmemReportedCorrupt;
+static UBYTE nsmemReportedDoubleFree;
+static UBYTE nsmemReportedBadHeader;
 
 #define NSMEM_ORIGIN_EXEC 0x45584543UL /* 'EXEC' */
 #define NSMEM_ORIGIN_DMA  0x444d4120UL /* 'DMA ' */
@@ -200,13 +208,18 @@ void *netstack_malloc(unsigned int size)
          *
          * Every tier, not just debug: the alternative is handing lwIP an
          * unvalidated pointer, and the check is one load plus a compare on the
-         * cache line the link read already pulled in. Kprintf is DEBUG-gated,
-         * so only the message costs anything below the debug tier. */
+         * cache line the link read already pulled in. Only the (once-only)
+         * report costs anything. */
         if (slot != NULL && ((struct NsMemHeader *)slot)->nsm_Origin != NSMEM_ORIGIN_FREE)
         {
-            Kprintf("[netstack] SLAB-CORRUPT: class %lu freelist head 0x%08lx origin 0x%08lx "
-                    "(expected FREE) — dropping freelist\n",
-                    cls, (ULONG)slot, ((struct NsMemHeader *)slot)->nsm_Origin);
+            if (!nsmemReportedCorrupt)
+            {
+                nsmemReportedCorrupt = TRUE;
+                netstack_log(NS_LOG_ERR,
+                             "SLAB-CORRUPT: class %lu freelist head %p origin 0x%08lx "
+                             "(expected FREE), dropping freelist",
+                             cls, slot, ((struct NsMemHeader *)slot)->nsm_Origin);
+            }
             *freeHead = NULL;
             slot = nslab_grow(nd, cls) ? *freeHead : NULL;
         }
@@ -340,15 +353,22 @@ void netstack_free(void *ptr)
          * Dropping leaks the slot until detach, the cheap side of that trade.
          * `size` is deliberately neither printed nor subtracted: on a freed slot
          * that longword holds the freelist link, not a length. */
-        Kprintf("[netstack] SLAB-DOUBLE-FREE: block 0x%08lx already on a freelist,"
-                " first freed at PC 0x%08lx — dropped\n",
-                (ULONG)h, ((ULONG *)h)[2]);
+        if (!nsmemReportedDoubleFree)
+        {
+            nsmemReportedDoubleFree = TRUE;
+            netstack_log(NS_LOG_ERR,
+                         "SLAB-DOUBLE-FREE: block %p already on a freelist, first freed at PC %p, dropped",
+                         h, ((ULONG *)h)[2]);
+        }
         return;
 
     default:
-        Kprintf("[netstack] SLAB-BAD-HEADER: block 0x%08lx origin 0x%08lx size %lu"
-                " — dropped\n",
-                (ULONG)h, origin, size);
+        if (!nsmemReportedBadHeader)
+        {
+            nsmemReportedBadHeader = TRUE;
+            netstack_log(NS_LOG_ERR, "SLAB-BAD-HEADER: block %p origin 0x%08lx size %lu, dropped",
+                         h, origin, size);
+        }
         return;
     }
 }

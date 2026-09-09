@@ -93,13 +93,13 @@ All 46 are implemented.
 | `getservbyport` | −240 | ✅ | ✅ done | |
 | `getprotobyname` | −246 | ✅ | ✅ done | Built-in table (`ip`, `icmp`, `igmp`, `tcp`, `udp`, `raw`); no `/etc/protocols` file. |
 | `getprotobynumber` | −252 | ✅ | ✅ done | |
-| `vsyslog` (+ `syslog`) | −258 | ✅ | ✅ done | Honours `SBTC_LOGMASK` priority filter, prefixes `SBTC_LOGTAGPTR` ident, and formats `%[-][0][width][.prec]`. Output goes only to the debug backend (`Kprintf`) — there is no syslog file/console sink. |
+| `vsyslog` (+ `syslog`) | −258 | ✅ | ✅ done | Honours the `SBTC_LOGMASK` level filter, expands `%m` (current errno text), formats `%[-][0][width][.prec]`, and delivers the line — tagged with `SBTC_LOGTAGPTR` and the facility (`SBTC_LOGFACILITY` when the priority carries none) — to the stack-wide log hook (`SBTC_LOG_HOOK`, i.e. NetLogViewer), the boot-time replay ring while no hook is installed, and the debug backend. No file/console sink. |
 | `Dup2Socket` | −264 | ✅ | ✅ done | |
 | `sendmsg` | −270 | 🟡 | ✅ done | `msg_iov` scatter is real; `msg_name` is validated. `msg_control` (ancillary data) is accepted and ignored — matching 4.4BSD's datagram output. |
 | `recvmsg` | −276 | 🟡 | ✅ done | `msg_iov` scatter is real (datagrams copy straight from the pbuf chain, no size cap). A datagram larger than the total iov space is truncated with `MSG_TRUNC` set in `msg_flags`. No ancillary data is ever produced (`msg_controllen` = 0). |
 | `gethostname` | −282 | ✅ | ✅ done | |
 | `gethostid` | −288 | ✅ | ✅ done | |
-| `SocketBaseTagList` (+ `SocketBaseTags`) | −294 | ✅ | ✅ done | errno/h_errno wiring (LONGPTR tags readable via GETREF), signal masks, syslog config (`SBTC_LOG*`), `SBTC_RELEASESTRPTR` (GET-only, "lwip-amiga x.y"), `SBTC_DTABLESIZE` GET/SET (grow-only, ceiling `SB_FD_MAX`), and `SBTC_HAVE_*` capability probes (see note above). The C runtimes set `SBTC_LOGTAGPTR` at socket-init — declining it aborts init. |
+| `SocketBaseTagList` (+ `SocketBaseTags`) | −294 | ✅ | ✅ done | errno/h_errno wiring (LONGPTR tags readable via GETREF) and texts (`SBTC_(H)ERRNOSTRPTR`), signal masks, syslog config (`SBTC_LOG*`) and the stack-wide log hook (`SBTC_LOG_HOOK`), `SBTC_RELEASESTRPTR` (GET-only, "lwip-amiga x.y"), `SBTC_DTABLESIZE` GET/SET (grow-only, ceiling `SB_FD_MAX`), and `SBTC_HAVE_*` capability probes (see note above). The C runtimes set `SBTC_LOGTAGPTR` at socket-init — declining it aborts init. |
 | `GetSocketEvents` | −300 | ✅ | ✅ done | |
 
 *(LVOs −306…−360 are 10 reserved slots.)*
@@ -344,10 +344,10 @@ Legend as above — **Impl.**: ✅ handled · 🟡 handled, one direction/limita
 | `SBTC_FDCALLBACK` | 9 | Link-library fd alloc/free callback | ⛔ | ❌ no | Legacy; the header itself says *"don't use in new code"*. |
 | `SBTC_LOGSTAT` | 10 | `openlog()` options (`LOG_PID`, …) | ✅ | ✅ done | Stored per-opener (advisory). |
 | `SBTC_LOGTAGPTR` | 11 | `syslog` ident string pointer | ✅ | ✅ done | Prefixed to each `vsyslog` line. Set by clib2/newlib at init. |
-| `SBTC_LOGFACILITY` | 12 | Default `syslog` facility | ✅ | ✅ done | Stored per-opener (advisory). |
+| `SBTC_LOGFACILITY` | 12 | Default `syslog` facility | ✅ | ✅ done | Stored per-opener, defaults to `LOG_USER`. |
 | `SBTC_LOGMASK` | 13 | `setlogmask()` priority bitmask | ✅ | ✅ done | Honoured by `vsyslog`; defaults to all priorities. |
-| `SBTC_ERRNOSTRPTR` | 14 | Pointer to a string describing current `errno` | ⛔ | ❌ no |  |
-| `SBTC_HERRNOSTRPTR` | 15 | String describing current `h_errno` | ⛔ | ❌ no |  |
+| `SBTC_ERRNOSTRPTR` | 14 | Pointer to a string describing an `errno` code | ✅ | ✅ done | GETREF only: the code goes in, a static BSD text pointer comes out (same table as `vsyslog`'s `%m`). |
+| `SBTC_HERRNOSTRPTR` | 15 | String describing an `h_errno` code | ✅ | ✅ done | As above for the four resolver codes. |
 | `SBTC_IOERRNOSTRPTR` | 16 | String describing the last `IoErr()` | ⛔ | ❌ no |  |
 | `SBTC_S2ERRNOSTRPTR` | 17 | String for the primary I/O error code | ⛔ | ❌ no |  |
 | `SBTC_S2WERRNOSTRPTR` | 18 | String for the secondary/wire I/O error code | ⛔ | ❌ no |  |
@@ -364,8 +364,8 @@ Legend as above — **Impl.**: ✅ handled · 🟡 handled, one direction/limita
 | `SBTC_ICMP_PROCESS_ECHO` | 48 | How to process ICMP echo requests | ⛔ | ❌ no | As above. |
 | `SBTC_ICMP_PROCESS_TSTAMP` | 49 | How to process ICMP timestamp requests | ⛔ | ❌ no | As above. |
 | `SBTC_CAN_SHARE_LIBRARY_BASES` | 51 | Opt in to sharing one base across callers | ⛔ | ❌ no | **Deliberately declined** — per-opener state (`task`, `errnoPtr`, `sigBit`) lives in the child base; callers keep their own base. |
-| `SBTC_LOG_FILE_NAME` | 52 | Get/set the log output file name | ⛔ | ❌ no | Logging goes to the debug backend (`Kprintf`), not a file. |
-| `SBTC_LOG_HOOK` | 55 | Get/set the installed log hook | ⛔ | ❌ no | As above. |
+| `SBTC_LOG_FILE_NAME` | 52 | Get/set the log output file name | ⛔ | ❌ no | No file sink — capture the log with `NetLogViewer` (the log hook below). |
+| `SBTC_LOG_HOOK` | 55 | Get/set the installed log hook | ✅ | ✅ done | Stack-wide (`sb_log.c`): one `struct Hook` receives every line as a `LogHookMessage`, called on the emitter's context. Installing replays the boot-time ring; `NULL` clears; a hook its installer forgot to clear is retracted at its `CloseLibrary`. |
 | `SBTC_SYSTEM_STATUS` | 56 | Query `SBSYSSTAT_*` (interfaces/resolver/routes up) | ✅ | ✅ done | GET-only. Synthesized under the core lock: a non-loopback up netif with an address → `Interfaces\|BCast_Interfaces`; `dns_getserver(0)` set → `Resolver`; default gateway set → `Routes\|DefaultRoute`. Never PTP. |
 | `SBTC_SIG_ADDRESS_CHANGE_MASK` | 57 | Signal on interface-address change | ⛔ | 🔜 later | Plausible once link/DHCP-renew events are surfaced. |
 | `SBTC_IP_FILTER_HOOK` | 62 | Get/set the IP filter (`ipf_*`) hook | ⛔ | ❌ never | Private IP-filter interface; out of scope (see `ipf_*`). |

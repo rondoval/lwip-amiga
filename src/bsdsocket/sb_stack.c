@@ -95,9 +95,9 @@ static LONG sb_if_open(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
             OpenDevice((CONST_STRPTR)base, nif->nif_Unit,
                        (struct IORequest *)ctx->devIO, 0) != 0)
         {
-            Kprintf("[bsdsocket] no %s unit %ld\n",
-                    nif->nif_Device, nif->nif_Unit);
             *aux = ctx->devIO->io_Error;
+            SB_LOG(NS_LOG_ERR, "%s: cannot open %s unit %ld (error %ld)", nif->nif_Name,
+                   nif->nif_Device, nif->nif_Unit, *aux);
             return NETCTL_ERR_DEVICE;
         }
     }
@@ -156,8 +156,8 @@ LONG sb_if_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
         ctx->ifKind = NIF_KIND_SANA2;
     else
         ctx->ifKind = sb_if_probe_kind(ctx);
-    Kprintf("[bsdsocket] %s unit %ld -> %s backend\n", nif->nif_Device,
-            nif->nif_Unit, ctx->ifKind == NIF_KIND_NETDEV ? "netdev" : "SANA-II");
+    SB_LOG(NS_LOG_INFO, "%s: %s unit %ld, %s driver", nif->nif_Name, nif->nif_Device,
+           nif->nif_Unit, ctx->ifKind == NIF_KIND_NETDEV ? "netdev" : "SANA-II");
 
     return ctx->ifKind == NIF_KIND_NETDEV ? sb_netdev_up(ctx, nif, aux)
                                           : sb_sana_up(ctx, nif, aux);
@@ -201,8 +201,8 @@ void sb_if_configure(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif)
      * as; lwIP's own short name stays with the backend */
     netifbase_stamp(nib, nif, ctx->root->netCfg.cfg_Hostname);
     if (nif->nif_VlanTci >= 0)
-        Kprintf("[bsdsocket] VLAN enabled: vid %ld pcp %ld\n",
-                (LONG)(nif->nif_VlanTci & 0xFFF), (LONG)((nif->nif_VlanTci >> 13) & 7));
+        SB_LOG(NS_LOG_INFO, "%s: VLAN %ld (pcp %ld)", nib->nib_Name,
+               (LONG)(nif->nif_VlanTci & 0xFFF), (LONG)((nif->nif_VlanTci >> 13) & 7));
 
     netstack_lock();
     netif_set_default(nf);
@@ -225,20 +225,19 @@ void sb_if_configure(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif)
  * it re-probes itself when DHCP supplies one). */
 void sb_if_services(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif)
 {
-    struct netif *nf = &sb_ctx_base(ctx)->nib_Netif;
+    struct NetIfBase *nib = sb_ctx_base(ctx);
+    struct netif *nf = &nib->nib_Netif;
 
     if (nif->nif_Flags & NETCTL_IFF_DHCP)
     {
         netstack_lock();
         dhcp_start(nf);
         netstack_unlock();
-        Kprintf("[bsdsocket] interface up, DHCP running\n");
+        SB_LOG(NS_LOG_INFO, "%s: interface up, requesting a DHCP lease", nib->nib_Name);
     }
     else
     {
-        Kprintf("[bsdsocket] interface up, static %lu.%lu.%lu.%lu\n",
-                (nif->nif_Addr >> 24) & 0xFF, (nif->nif_Addr >> 16) & 0xFF,
-                (nif->nif_Addr >> 8) & 0xFF, nif->nif_Addr & 0xFF);
+        SB_LOG(NS_LOG_INFO, "%s: interface up", nib->nib_Name);
     }
 
     sb_mdns_start(nf, &ctx->root->netCfg);
@@ -293,13 +292,14 @@ static void SbStackTask(void)
     if (tick == NULL ||
         OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_MICROHZ, &tick->tr_node, 0) != 0)
     {
-        Kprintf("[bsdsocket] stack task: no timer.device\n");
+        SB_LOG(NS_LOG_ERR, "stack task: cannot open timer.device");
         ctx->startResult = -1;
         Signal(parent, SIGBREAKF_CTRL_F);
         goto out;
     }
 
     netstack_init(tick->tr_node.io_Device);
+    sb_log_netif_attach();
     sb_config_load(&ctx->root->netCfg);
     /* seed the resolver search domain from prefs via the LVO that owns the
      * field's truncation contract; apps may override it later the same way */
@@ -335,7 +335,7 @@ static void SbStackTask(void)
         Signal(parent, SIGBREAKF_CTRL_F);
         goto out;
     }
-    Kprintf("[bsdsocket] stack up (loopback only) — waiting for AddNetInterface\n");
+    SB_LOG(NS_LOG_INFO, "stack started, loopback only: waiting for AddNetInterface");
 
     ctx->startResult = 0;
     ctx->root->stackTask = FindTask(NULL);

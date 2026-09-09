@@ -51,6 +51,7 @@
 #include <strutil.h>
 
 #include "sb_config.h"
+#include "sb_log.h"
 
 struct tcp_pcb;
 struct udp_pcb;
@@ -265,6 +266,8 @@ struct sb_ip_mreq
 
 #define SB_HOST_NOT_FOUND 1
 #define SB_TRY_AGAIN 2
+#define SB_NO_RECOVERY 3
+#define SB_NO_DATA 4
 
 /* getaddrinfo/getnameinfo (netinclude/netdb.h) */
 #define SB_PF_UNSPEC 0
@@ -328,16 +331,25 @@ struct sb_addrinfo
 #define SBTC_LOGTAGPTR 11
 #define SBTC_LOGFACILITY 12
 #define SBTC_LOGMASK 13
-/* <sys/syslog.h>: a message of priority p is logged when its bit is set in the
- * mask; the default mask enables all eight priorities. */
+/* <sys/syslog.h>: a priority word is facility<<3 | level. A message is
+ * logged when its level's bit is set in the mask; the default mask enables
+ * all eight levels. A message without facility bits takes the opener's
+ * SBTC_LOGFACILITY, which defaults to LOG_USER. */
 #define SB_LOG_PRIMASK 0x07
+#define SB_LOG_FACMASK 0x03F8UL
+#define SB_LOG_USER (1UL << 3)
 #define SB_LOG_MASK(pri) (1UL << ((pri) & SB_LOG_PRIMASK))
 #define SB_LOGMASK_ALL 0xFFUL
+#define SBTC_ERRNOSTRPTR 14
+#define SBTC_HERRNOSTRPTR 15
 #define SBTC_ERRNOBYTEPTR 21
 #define SBTC_ERRNOWORDPTR 22
 #define SBTC_ERRNOLONGPTR 24
 #define SBTC_HERRNOLONGPTR 25
 #define SBTC_RELEASESTRPTR 29 /* GET-only: stack-identifying version string */
+/* the log hook (sb_log.h): stack-wide, unlike the per-opener SBTC_LOG* above.
+ * SBTC_LOG_FILE_NAME (52) is deliberately absent — there is no file sink. */
+#define SBTC_LOG_HOOK 55
 
 /* Roadshow feature-capability tags (SBTM_GETREF(...) probes): an opener reads
  * these through SocketBaseTagList to learn which extension LVO groups this
@@ -589,6 +601,17 @@ struct SocketBase
      * completes), read-only afterwards — no locking needed */
     struct SbNetConfig netCfg;
 
+    /* runtime log (sb_log.c): the SBTC_LOG_HOOK hook, the opener that
+     * installed it (CloseLibrary retracts a forgotten hook), the recursion
+     * guard, and the boot-time replay ring. */
+    struct Hook *logHook;
+    struct SocketBase *logHookOwner;
+    struct SbLogEntry *logRing; /* SB_LOG_RING entries; NULL = no ring */
+    UBYTE logBusy;
+    UBYTE logRingHead;  /* next slot written */
+    UBYTE logRingCount; /* entries held, <= SB_LOG_RING */
+    UBYTE pad4;
+
     /* NIC statistics cache. Refreshed once/second by the stack task, which
      * owns devIO and holds NO core lock while polling. NEVER issue a netdev
      * DoIO (GET_STATS/GET_LINK) under netstack_lock: the driver's unit task
@@ -625,6 +648,7 @@ struct SocketBase
     STRPTR logTagPtr;  /* ident string prefixed to each message */
     ULONG logFacility; /* default facility — advisory */
     ULONG logMask;     /* setlogmask() priority bitmask */
+    char logFmtBuf[SB_SYSLOG_BUF]; /* %m expansion scratch */
 
     struct SbSocket **fd; /* fdCount entries; grown via SBTC_DTABLESIZE */
     ULONG fdCount;        /* SB_FD_COUNT..SB_FD_MAX */
@@ -670,6 +694,10 @@ struct SocketBase
 void sb_set_errno(struct SocketBase *base, LONG code);
 void sb_set_herrno(struct SocketBase *base, LONG code);
 LONG sb_fail(struct SocketBase *base, LONG code);
+/* BSD error texts: syslog's %m and the SBTC_(H)ERRNOSTRPTR tags. Static
+ * strings, valid forever; unknown codes get a generic text. */
+const char *sb_errno_text(LONG code);
+const char *sb_herrno_text(LONG code);
 
 /* socket core (sb_socket.c) */
 struct SbSocket *sb_sock_alloc(struct SocketBase *base, SbSockType type);
@@ -829,7 +857,7 @@ VOID bsd_setservent(LONG stayOpen asm("d0"), struct SocketBase *base asm("a6"));
 VOID bsd_endservent(struct SocketBase *base asm("a6"));
 APTR bsd_getservent(struct SocketBase *base asm("a6"));
 
-/* sb_syslog.c */
+/* sb_log.c — the vsyslog LVO */
 VOID bsd_vsyslog(LONG pri asm("d0"), STRPTR msg asm("a0"), APTR args asm("a1"), struct SocketBase *base asm("a6"));
 
 /* sb_sockpass.c — fd duplication and task handoff */

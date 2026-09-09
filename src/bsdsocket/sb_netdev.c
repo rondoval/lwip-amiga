@@ -49,7 +49,7 @@ LONG sb_netdev_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
     BYTE err = sb_netdev_cmd(ctx->devIO, NETDEV_CMD_ATTACH, &att, sizeof(att));
     if (err != 0)
     {
-        Kprintf("[bsdsocket] netdev ATTACH failed (%ld)\n", (LONG)err);
+        SB_LOG(NS_LOG_ERR, "%s: netdev ATTACH failed (error %ld)", nif->nif_Name, (LONG)err);
         *aux = err;
         sb_if_down(ctx);
         return NETCTL_ERR_DEVICE;
@@ -58,7 +58,7 @@ LONG sb_netdev_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
 
     if (netdevif_create(&ctx->ndi, att.nda_DrvCtx, att.nda_DrvOps, &att.nda_Caps) != 0)
     {
-        Kprintf("[bsdsocket] netdevif_create failed\n");
+        SB_LOG(NS_LOG_ERR, "%s: out of memory creating the interface", nif->nif_Name);
         sb_if_down(ctx);
         return NETCTL_ERR_NOMEM;
     }
@@ -69,7 +69,7 @@ LONG sb_netdev_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
     err = sb_netdev_cmd(ctx->devIO, NETDEV_CMD_START, NULL, 0);
     if (err != 0)
     {
-        Kprintf("[bsdsocket] netdev START failed (%ld)\n", (LONG)err);
+        SB_LOG(NS_LOG_ERR, "%s: netdev START failed (error %ld)", nif->nif_Name, (LONG)err);
         *aux = err;
         sb_if_down(ctx);
         return NETCTL_ERR_DEVICE;
@@ -101,7 +101,8 @@ void sb_netdev_down(struct SbStackCtx *ctx)
     if (ctx->attached)
     {
         if (sb_netdev_cmd(ctx->devIO, NETDEV_CMD_DETACH, NULL, 0) != 0)
-            Kprintf("[bsdsocket] netdev DETACH failed — RX buffers leaked?\n");
+            SB_LOG(NS_LOG_WARNING, "%s: netdev DETACH failed, driver RX buffers may be leaked",
+                   ctx->ndi.ndi_Base.nib_Name);
         ctx->attached = FALSE;
     }
     /* the device close itself belongs to sb_if_down (common to both backends) */

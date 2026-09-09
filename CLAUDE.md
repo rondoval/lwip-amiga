@@ -39,6 +39,17 @@ backs `LWIP_PLATFORM_DIAG` because lwIP's own format strings live in the submodu
 cannot be rewritten. `bsd_vsyslog` shares that formatter via `netstack_vformat_args`.
 There is exactly one formatter in this component — do not add a second.
 
+**Operator-facing events go to the runtime log**, not to `Kprintf`: `SB_LOG(NS_LOG_x, ...)`
+in the library (`sb_log.h`) and `netstack_log(NS_LOG_x, ...)` in the port layer, which
+exist at every tier and reach `NetLogViewer` through the `SBTC_LOG_HOOK` hook (see
+`docs/architecture.md`, "The runtime log"). Use it for lifecycle and errors — interface,
+link, lease, config, failures — never per packet, per call or per tick, and never from an
+interrupt or inside `Disable()` (it runs a foreign hook under `Forbid`; under the core
+lock is fine). Its format rules are C's through the one formatter: every argument cell is
+32-bit, so `%ld`/`%lu` and `%d`/`%u` are interchangeable, `%p` prints 8 hex digits,
+`%s` needs no cast, and there is no `%m` (that is `vsyslog`'s alone). At the debug tiers
+every line is mirrored to the debug backend as `[log:N] origin: text`.
+
 Below the debug tier `lwipopts.h` sets `LWIP_NOASSERT`, compiling out lwIP's ~490
 `LWIP_ASSERT` sites (~19 KB off the library); `LWIP_ERROR` is unaffected and keeps
 recovering gracefully in every build.

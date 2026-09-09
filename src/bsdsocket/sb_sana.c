@@ -85,16 +85,16 @@ LONG sb_sana_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
     io->ios2_StatData = NULL;
     if (err != 0 || q.SizeSupplied < legacyLen)
     {
-        Kprintf("[bsdsocket] S2_DEVICEQUERY failed (%ld, supplied %lu)\n",
-                (LONG)err, q.SizeSupplied);
+        SB_LOG(NS_LOG_ERR, "%s: S2_DEVICEQUERY failed (error %ld, supplied %lu)",
+               nif->nif_Name, (LONG)err, q.SizeSupplied);
         *aux = err;
         sb_if_down(ctx);
         return NETCTL_ERR_DEVICE;
     }
     if (q.HardwareType != S2WireType_Ethernet || q.AddrFieldSize != 48)
     {
-        Kprintf("[bsdsocket] not 48-bit Ethernet: wire type %lu, %lu addr bits\n",
-                q.HardwareType, (ULONG)q.AddrFieldSize);
+        SB_LOG(NS_LOG_ERR, "%s: not a 48-bit Ethernet device (wire type %lu, %lu address bits)",
+               nif->nif_Name, q.HardwareType, (ULONG)q.AddrFieldSize);
         sb_if_down(ctx);
         return NETCTL_ERR_HWTYPE;
     }
@@ -102,7 +102,8 @@ LONG sb_sana_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
     err = sb_sana_cmd(io, S2_GETSTATIONADDRESS);
     if (err != 0)
     {
-        Kprintf("[bsdsocket] S2_GETSTATIONADDRESS failed (%ld)\n", (LONG)err);
+        SB_LOG(NS_LOG_ERR, "%s: S2_GETSTATIONADDRESS failed (error %ld)", nif->nif_Name,
+               (LONG)err);
         *aux = err;
         sb_if_down(ctx);
         return NETCTL_ERR_DEVICE;
@@ -116,13 +117,13 @@ LONG sb_sana_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
         mac[i] = io->ios2_DstAddr[i];
     if (!sb_sana_mac_usable(mac))
     {
-        Kprintf("[bsdsocket] no usable factory station address\n");
+        SB_LOG(NS_LOG_ERR, "%s: driver reports no usable station address", nif->nif_Name);
         sb_if_down(ctx);
         return NETCTL_ERR_DEVICE;
     }
-    Kprintf("[bsdsocket] station address %02lx:%02lx:%02lx:%02lx:%02lx:%02lx\n",
-            (ULONG)mac[0], (ULONG)mac[1], (ULONG)mac[2],
-            (ULONG)mac[3], (ULONG)mac[4], (ULONG)mac[5]);
+    SB_LOG(NS_LOG_INFO, "%s: station address %02lx:%02lx:%02lx:%02lx:%02lx:%02lx",
+           nif->nif_Name, (ULONG)mac[0], (ULONG)mac[1], (ULONG)mac[2], (ULONG)mac[3],
+           (ULONG)mac[4], (ULONG)mac[5]);
 
     /* Configure with the current station address. Already-configured (a
      * previous stack instance, or a driver that auto-configures) is fine. */
@@ -140,7 +141,8 @@ LONG sb_sana_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
     }
     else
     {
-        Kprintf("[bsdsocket] S2_CONFIGINTERFACE failed (%ld)\n", (LONG)err);
+        SB_LOG(NS_LOG_ERR, "%s: S2_CONFIGINTERFACE failed (error %ld)", nif->nif_Name,
+               (LONG)err);
         *aux = err;
         sb_if_down(ctx);
         return NETCTL_ERR_DEVICE;
@@ -151,7 +153,7 @@ LONG sb_sana_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
     err = sb_sana_cmd(io, S2_ONLINE);
     if (err != 0 && err != S2ERR_BAD_STATE && err != IOERR_NOCMD)
     {
-        Kprintf("[bsdsocket] S2_ONLINE failed (%ld)\n", (LONG)err);
+        SB_LOG(NS_LOG_ERR, "%s: S2_ONLINE failed (error %ld)", nif->nif_Name, (LONG)err);
         *aux = err;
         sb_if_down(ctx);
         return NETCTL_ERR_DEVICE;
@@ -163,7 +165,7 @@ LONG sb_sana_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
     ULONG hwMtu = q.MTU;
     if (hwMtu == 0 || hwMtu > 9000)
     {
-        Kprintf("[bsdsocket] suspicious SANA-II MTU %lu — using 1500\n", hwMtu);
+        SB_LOG(NS_LOG_WARNING, "%s: driver reports MTU %lu, using 1500", nif->nif_Name, hwMtu);
         hwMtu = 1500;
     }
     ULONG mtu = hwMtu;
@@ -176,7 +178,7 @@ LONG sb_sana_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
                        bufMgmt, mac, (UWORD)mtu, (UWORD)hwMtu, q.BPS,
                        nif->nif_VlanTci) != 0)
     {
-        Kprintf("[bsdsocket] sana2if_create failed\n");
+        SB_LOG(NS_LOG_ERR, "%s: out of memory creating the interface", nif->nif_Name);
         sb_if_down(ctx);
         return NETCTL_ERR_NOMEM;
     }
@@ -187,7 +189,7 @@ LONG sb_sana_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
      * port stamped into the TX pool. */
     if (sana2if_pump_start(&ctx->s2i) != 0)
     {
-        Kprintf("[bsdsocket] sana2 pump start failed\n");
+        SB_LOG(NS_LOG_ERR, "%s: cannot start the SANA-II receive task", nif->nif_Name);
         sb_if_down(ctx);
         return NETCTL_ERR_NOMEM;
     }
@@ -360,8 +362,8 @@ void sb_sana_mcast_sync(struct SbStackCtx *ctx)
             if (err == IOERR_NOCMD)
                 goto unsupported;
             if (err != 0)
-                Kprintf("[bsdsocket] S2_ADDMULTICASTADDRESS failed (%ld)\n",
-                        (LONG)err);
+                SB_LOG(NS_LOG_WARNING, "%s: S2_ADDMULTICASTADDRESS failed (error %ld)",
+                       ctx->s2i.s2i_Base.nib_Name, (LONG)err);
         }
     }
 
@@ -374,7 +376,7 @@ void sb_sana_mcast_sync(struct SbStackCtx *ctx)
 
 unsupported:
     /* the driver receives all multicast or none — either way, stop asking */
-    Kprintf("[bsdsocket] SANA-II multicast commands unsupported — relying on "
-            "driver defaults\n");
+    SB_LOG(NS_LOG_WARNING, "%s: driver has no multicast filter commands, relying on its defaults",
+           ctx->s2i.s2i_Base.nib_Name);
     ctx->sanaMcastUnsupported = TRUE;
 }

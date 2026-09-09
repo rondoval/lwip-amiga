@@ -89,9 +89,10 @@ The API surface is grouped topically: lifecycle/control (`sb_api.c`), the data p
 (`sb_io.c`), options and events (`sb_sockopt.c`), `WaitSelect` (`sb_select.c`), errno
 plumbing (`sb_errno.c`), `SocketBaseTagList` (`sb_taglist.c`), address conversion
 (`sb_inet.c`), the resolver (`sb_resolver.c`), the netdb tables (`sb_netdb.c`), syslog
-(`sb_syslog.c`), socket handoff (`sb_sockpass.c`), DNS configuration
-(`sb_dnsconfig.c`) and getaddrinfo (`sb_gai.c`); the generated LVO jump table is
-`vectors.c` (139 slots emitted from the SFD by `scripts/gen-vectors.py`).
+and the runtime log behind it (`sb_log.c`), socket handoff
+(`sb_sockpass.c`), DNS configuration (`sb_dnsconfig.c`) and getaddrinfo (`sb_gai.c`);
+the generated LVO jump table is `vectors.c` (139 slots emitted from the SFD by
+`scripts/gen-vectors.py`).
 
 Interface **status** is read-only (`sb_ifquery.c`): the Roadshow interface-query LVOs
 (`ObtainInterfaceList` / `QueryInterfaceTagList`) report the live netif's address, mask,
@@ -125,6 +126,18 @@ forced. `SHUTDOWN`/`CANCEL_SHUTDOWN` implement the expunge handshake above. Tear
 withdraws the port under `Forbid()` and drains stragglers with `ERR_INACTIVE`, so no
 client message is ever lost — which is what lets the commands keep messages on their
 own stacks.
+
+### The runtime log — the log hook (`sb_log.c`, `port/amiga/netstack_diag.c`)
+
+Operational events — interface bring-up and removal, link and address changes, DHCP
+leases, mDNS, configuration mistakes, failures — and every client `syslog()` line go
+through one facility that exists at every build tier (the `Kprintf` family stays the
+compile-time trace tool and is untouched). The stack's own sites call `SB_LOG(pri, ...)`
+(`netstack_log`, C format semantics, `<sys/syslog.h>` priorities, never per packet or
+per tick); the port layer formats with the component's one formatter and hands the
+finished line to the sink the library registered at init; the lwIP netif ext-callback
+observer in `sb_log.c` turns link and address events into lines so no emitter has to
+remember them.
 
 ## Layer 2 — lwIP core + Amiga port layer (`lwip/`, `port/amiga/`)
 

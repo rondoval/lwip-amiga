@@ -76,6 +76,7 @@ ULONG LibExpunge(struct SocketBase *base asm("a6"))
     /* orphaned ReleaseSocket parkings die with the library (the pool frees
      * their memory wholesale; the pcbs die with the stack) */
     sb_stack_stop(root);
+    sb_log_exit(root);
 
     if (root->sockPool != NULL)
     {
@@ -113,6 +114,7 @@ static struct Library *LibInit(struct Library *base asm("d0"), ULONG seglist asm
     _NewMinList(&root->releasedSockets);
     _NewMinList(&root->openers);
     InitSemaphore(&root->openLock);
+    sb_log_init(root);
 
     Kprintf("[bsdsocket] initialized\n");
     return base;
@@ -219,7 +221,7 @@ struct SocketBase *LibOpen(ULONG version asm("d0"), struct SocketBase *base asm(
     b->hErrnoPtr = &b->hErrno;
     b->logStat = 0;
     b->logTagPtr = NULL;
-    b->logFacility = 0;
+    b->logFacility = SB_LOG_USER;
     b->logMask = SB_LOGMASK_ALL;
     b->timerPort = CreateMsgPort();
     b->timerReq = (struct timerequest *)CreateIORequest(b->timerPort, sizeof(struct timerequest));
@@ -260,6 +262,8 @@ ULONG LibClose(struct SocketBase *base asm("a6"))
         return 0;
     }
 
+    /* a log hook this opener installed and never cleared dies with it */
+    sb_log_owner_closed(root, base);
     child_cleanup(base);
 
     /* Deregister BEFORE the base is freed (it holds the openers link), and

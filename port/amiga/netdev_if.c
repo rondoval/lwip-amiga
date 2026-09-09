@@ -15,6 +15,7 @@
 
 #include "netdev_priv.h"
 #include "netstack.h"
+#include "netstack_diag.h"
 
 #define NDIF_MIN_WRAPS 64
 
@@ -249,8 +250,9 @@ void netdevif_destroy(struct NetdevIf *ndi)
     BOOL leakWraps = ndi->ndi_WrapsOut != 0;
     if (leakWraps)
     {
-        Kprintf("[netdevif] %lu RX wraps still held by sockets — wrap pool leaked\n",
-                ndi->ndi_WrapsOut);
+        netstack_log(NS_LOG_WARNING,
+                     "%s: %lu RX buffers still held by sockets, wrap pool leaked until they close",
+                     ndi->ndi_Base.nib_Name, ndi->ndi_WrapsOut);
         struct NdRxWrap *w = ndi->ndi_WrapStorage;
         for (ULONG i = 0; i < ndi->ndi_WrapStorageSize / sizeof(struct NdRxWrap); i++)
             w[i].nrw_If = NULL;

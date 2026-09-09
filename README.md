@@ -182,9 +182,18 @@ See [RELEASE-NOTES.md](RELEASE-NOTES.md) for more on what's behind these numbers
   STATUS` shows what this Amiga advertises. Services can be advertised as they start —
   `mdns ADD _ftp._tcp PORT 21` — and withdrawn again with `mdns DEL <slot>`; anything
   listed under `MDNS_SERVICE` in `netstack.prefs` is advertised from boot.
+- **`NetLogViewer`** — a Commodity that captures every message the stack and its
+  clients log and shows it with time, origin and severity. The stack reports
+  interface bring-up and removal, link changes, DHCP leases and addresses, mDNS,
+  configuration mistakes and errors; programs that call `syslog()` appear under
+  their own name. The window keeps the last 1000 lines and saves them to a file
+  (`Project » Save message list as...`). Start it before `AddNetInterface` to see
+  the whole bring-up — the stack keeps the last 16 lines of its own boot and
+  replays them to a viewer that starts late — for example from `S:Network-Startup`:
+  `Run >NIL: C:NetLogViewer CX_POPUP NO`.
 
-`netinfo` and `netdev-stats` are read-only status tools; the stack is configured
-through the interface files and `netstack.prefs` above, plus the
+`netinfo`, `netdev-stats` and `NetLogViewer` are read-only status tools; the stack is
+configured through the interface files and `netstack.prefs` above, plus the
 `AddNetInterface`/`RemoveNetInterface`/`NetShutdown`/`Arp` commands at runtime.
 
 Scripts can test the outcome Roadshow-style: with `QUIET`, the commands demote every
@@ -205,6 +214,9 @@ the interface is up but the DHCP lease has not arrived yet.
   done with the bundled `AddNetInterface`/`RemoveNetInterface` commands instead, so
   genuine Roadshow configuration binaries won't), the low-level `mbuf_*`/`bpf_*`
   families, and (by design) the private `ipf_*` packet filter.
+- **No log file.** Roadshow can write its log to a file or console (`SBTC_LOG_FILE_NAME`);
+  lwip-amiga delivers the log only to a viewer that installs the log hook, such as the
+  bundled `NetLogViewer`, which can save the list to disk itself.
 
 ## For developers
 
@@ -254,6 +266,9 @@ See [docs/architecture.md](docs/architecture.md) for how the stack works.
   `pbuf_custom` recycle + GRO-lite, zero-copy TX scatter-gather + L4 checksum
   offsets), `netdev_if.c` (netif lifecycle, link events).
 - `src/bsdsocket/` — `bsdsocket.library` (socket layer, LVO table, stack task).
+- `src/netlogviewer/` — the `NetLogViewer` commodity (ReAction window, log hook client).
+- `dist/` — committed Workbench icons; `dist/icons/` holds their source art and the
+  generator (see its README).
 - `src/sockbench/` — LAN TCP/UDP throughput benchmark over `bsdsocket.library`
   (developer tool; built but not shipped).
 - `sfd/`, `scripts/gen-vectors.py` — the NDK `bsdsocket` SFD and the generator that

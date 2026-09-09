@@ -144,6 +144,18 @@ static BOOL sb_netctl_try_complete_add(struct SbStackCtx *ctx)
 
     sb_netctl_apply_dns(ctx->root);
     sb_netctl_fill_outputs(ctx, msg);
+
+    /* the address line came from the netif observer; this adds what only
+     * the completed add knows — the resolver configuration in effect */
+    char dns1[IP4ADDR_STRLEN_MAX];
+    char dns2[IP4ADDR_STRLEN_MAX];
+    ip4_addr_t a;
+    a.addr = msg->ncm_DnsOut[0];
+    ip4addr_ntoa_r(&a, dns1, sizeof(dns1));
+    a.addr = msg->ncm_DnsOut[1];
+    ip4addr_ntoa_r(&a, dns2, sizeof(dns2));
+    SB_LOG(NS_LOG_NOTICE, "%s: operational, DNS %s %s", sb_ctx_base(ctx)->nib_Name, dns1, dns2);
+
     msg->ncm_Result = NETCTL_OK;
     ReplyMsg(&msg->ncm_Msg);
     ctx->pendingAdd = NULL;
@@ -201,6 +213,9 @@ static LONG sb_netctl_cancel_add(struct SbStackCtx *ctx)
 
     /* the interface stays added and keeps trying: a link or lease that
      * arrives late is strictly better than no interface */
+    SB_LOG(NS_LOG_WARNING, "%s: no %s yet, AddNetInterface stopped waiting (the interface stays up)",
+           sb_ctx_base(ctx)->nib_Name,
+           (ctx->pendingAdd->ncm_Config.nif_Flags & NETCTL_IFF_DHCP) ? "DHCP lease" : "link");
     ctx->pendingAdd->ncm_Result = NETCTL_ERR_PENDING;
     sb_netctl_fill_outputs(ctx, ctx->pendingAdd);
     ReplyMsg(&ctx->pendingAdd->ncm_Msg);
@@ -255,6 +270,8 @@ static LONG sb_netctl_rem(struct SbStackCtx *ctx, struct NetCtlMsg *msg)
         return NETCTL_ERR_NOTFOUND;
     if (msg->ncm_Force == 0 && bound > 0)
     {
+        SB_LOG(NS_LOG_WARNING, "%s: %lu socket(s) still bound, RemoveNetInterface refused",
+               sb_ctx_base(ctx)->nib_Name, bound);
         msg->ncm_Count = bound;
         return NETCTL_ERR_BUSY;
     }
@@ -267,8 +284,8 @@ static LONG sb_netctl_rem(struct SbStackCtx *ctx, struct NetCtlMsg *msg)
         ctx->pendingAdd = NULL;
     }
 
-    Kprintf("[bsdsocket] netctl: removing interface '%s'%s\n",
-            sb_ctx_base(ctx)->nib_Name, msg->ncm_Force != 0 ? " (forced)" : "");
+    SB_LOG(NS_LOG_NOTICE, "%s: interface removed%s", sb_ctx_base(ctx)->nib_Name,
+           msg->ncm_Force != 0 ? " (forced)" : "");
     sb_stats_drain(ctx);
     sb_if_down(ctx);
     return NETCTL_OK;
@@ -297,8 +314,7 @@ static LONG sb_netctl_shutdown(struct SbStackCtx *ctx, struct NetCtlMsg *msg)
     ObtainSemaphore(&root->openLock);
     root->shuttingDown = TRUE; /* LibOpen refuses new clients from here on */
     sb_netctl_nudge_openers(root);
-    Kprintf("[bsdsocket] netctl: shutdown requested, %lu client(s)\n",
-            root->openCount);
+    SB_LOG(NS_LOG_NOTICE, "shutdown requested, asking %lu client(s) to quit", root->openCount);
     ReleaseSemaphore(&root->openLock);
 
     /* Parked until the last client closes (LibClose signals CTRL_E; the
@@ -323,8 +339,7 @@ static LONG sb_netctl_cancel_shutdown(struct SbStackCtx *ctx)
     ctx->pendingShutdown->ncm_Count = clients;
     ReplyMsg(&ctx->pendingShutdown->ncm_Msg);
     ctx->pendingShutdown = NULL;
-    Kprintf("[bsdsocket] netctl: shutdown cancelled, %lu client(s) remain\n",
-            clients);
+    SB_LOG(NS_LOG_NOTICE, "shutdown cancelled, %lu client(s) remain", clients);
     return NETCTL_OK;
 }
 
