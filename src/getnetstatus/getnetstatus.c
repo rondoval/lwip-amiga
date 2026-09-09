@@ -43,7 +43,7 @@ enum
 };
 
 /* the six SBSYSSTAT_* conditions, in Roadshow's display order; the
- * unsatisfied text carries two %s slots for the bold on/off sequences */
+ * unsatisfied text carries two %s slots for the emphasis on/off sequences */
 static const struct condition
 {
     ULONG flag;
@@ -218,11 +218,11 @@ int main(void)
     }
 
     /* emphasize the negations on an interactive console */
-    const char *bold_on = "", *bold_off = "";
+    const char *emph_on = "", *emph_off = "";
     if (IsInteractive(Output()))
     {
-        bold_on = "\33[1m";
-        bold_off = "\33[0m";
+        emph_on = "\33[4m";
+        emph_off = "\33[24m";
     }
 
     rc = RETURN_OK;
@@ -236,7 +236,7 @@ int main(void)
         else
         {
             if (!quiet && (check == NULL || selected[i]))
-                printf(conditions[i].fail, bold_on, bold_off);
+                printf(conditions[i].fail, emph_on, emph_off);
             if (selected[i])
                 rc = RETURN_WARN;
         }

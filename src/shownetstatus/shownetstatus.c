@@ -1110,10 +1110,11 @@ int main(void)
         goto out_lib;
     }
 
-    if (IsInteractive(Output()))
+    BOOL interactive = IsInteractive(Output());
+    if (interactive)
     {
         ul_on = "\33[4m";
-        ul_off = "\33[0m";
+        ul_off = "\33[24m";
     }
 
     for (;;)
@@ -1253,7 +1254,8 @@ int main(void)
             rc = RETURN_WARN;
             goto out_socket;
         }
-        printf("\f"); /* clear the console for the next round */
+        if (interactive)
+            printf("\f"); /* clear the console for the next round */
     }
 
     rc = RETURN_OK;
