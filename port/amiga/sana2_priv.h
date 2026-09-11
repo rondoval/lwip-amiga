@@ -97,8 +97,7 @@ err_t s2if_linkoutput(struct netif *nif, struct pbuf *p);
 void s2if_tx_complete(struct Sana2If *s2i, struct S2TxReq *req); /* core lock */
 
 /* sana2_if.c — the driver-called buffer callbacks (register convention,
- * interrupt-callable: pure copies, no Exec calls, no locks). Prototypes see
- * complete types only (the gcc16 regargs gate). */
+ * interrupt-callable: pure copies, no Exec calls, no locks). */
 BOOL s2if_copy_to_buff(APTR to asm("a0"), APTR from asm("a1"), ULONG len asm("d0"));
 BOOL s2if_copy_from_buff(APTR to asm("a0"), APTR from asm("a1"), ULONG len asm("d0"));
 
