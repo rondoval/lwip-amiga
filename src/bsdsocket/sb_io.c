@@ -13,6 +13,9 @@
 #include <lwip/raw.h>
 #include <lwip/tcp.h>
 #include <lwip/udp.h>
+#include <lwip/ip.h>
+#include <lwip/prot/ip4.h>
+#include <lwip/inet_chksum.h>
 
 #include <debug.h>
 
@@ -59,13 +62,13 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
     KprintfT("[bsdsocket] %s: len %ld flags 0x%lx\n", __func__, len, (ULONG)flags);
     LONG sent = 0;
     BOOL dontwait = s->nonblock || (flags & SB_MSG_DONTWAIT);
+    /* MSG_OOB: BSD semantics — the LAST byte of this write is urgent. The
+     * mark is armed by flagging the tcp_write call that enqueues that byte;
+     * if a nonblocking partial write never gets there, no mark is set and
+     * the caller's retry (with MSG_OOB and the rest) arms it instead. */
+    BOOL oob = (flags & SB_MSG_OOB) != 0 && len > 0;
     struct SbTimedWait tw = { 0, FALSE };
     LONG ret;
-
-    /* no TCP urgent data: lwIP never sets the URG bit, so accepting the flag
-     * would silently send the byte inline — refuse instead (callers probe) */
-    if (flags & SB_MSG_OOB)
-        return sb_fail(base, SB_EOPNOTSUPP);
 
     PERF_T0(t_lock);
     netstack_lock();
@@ -134,6 +137,8 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
         u8_t wf = TCP_WRITE_FLAG_COPY;
         if ((LONG)(sent + (LONG)chunk) < len)
             wf |= TCP_WRITE_FLAG_MORE;
+        else if (oob)
+            wf |= TCP_WRITE_FLAG_URG; /* this chunk carries the urgent byte */
 
         PERF_T0(t_write);
         err_t r = tcp_write(s->pcb.tcp, buf + sent, (u16_t)chunk, wf);
@@ -181,6 +186,49 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
     return sent;
 }
 
+/* Complete an IP_HDRINCL header the way the BSD/Linux kernels do — lwIP
+ * itself transmits it verbatim. Per Linux raw(7): total length and header
+ * checksum are ALWAYS set by the stack; source address and id are filled
+ * only when the app left them zero. Core lock held (the id counter and the
+ * route query rely on it). Returns 0 or an SB_* errno. */
+static LONG sb_hdrincl_complete(struct SbSocket *s, struct pbuf *p,
+                                const ip_addr_t *dst)
+{
+    static u16_t sb_hdrincl_id;
+
+    /* the IPv4-only ip_route() macro discards its source argument */
+    LWIP_UNUSED_ARG(s);
+
+    if (p->len < IP_HLEN)
+        return SB_EINVAL;
+
+    struct ip_hdr *iphdr = (struct ip_hdr *)p->payload;
+    u16_t hlen = IPH_HL_BYTES(iphdr);
+    if (IPH_V(iphdr) != 4 || hlen < IP_HLEN || hlen > p->tot_len)
+        return SB_EINVAL;
+
+    IPH_LEN_SET(iphdr, lwip_htons(p->tot_len));
+
+    if (IPH_ID(iphdr) == 0)
+        IPH_ID_SET(iphdr, lwip_htons(++sb_hdrincl_id));
+
+    if (ip4_addr_get_u32(&iphdr->src) == 0)
+    {
+        struct netif *nif = ip_route(&s->pcb.raw->local_ip, dst);
+        if (nif == NULL)
+            return SB_ENETUNREACH;
+        const ip_addr_t *src = ip_netif_get_local_ip(nif, dst);
+        if (src == NULL)
+            return SB_ENETUNREACH;
+        ip4_addr_copy(iphdr->src, *ip_2_ip4(src));
+    }
+
+    IPH_CHKSUM_SET(iphdr, 0);
+    IPH_CHKSUM_SET(iphdr, inet_chksum(iphdr, hlen));
+
+    return 0;
+}
+
 static LONG sb_dgram_send(struct SocketBase *base, struct SbSocket *s,
                           const UBYTE *buf, LONG len,
                           BOOL have_dst, ip_addr_t *dst, u16_t port)
@@ -206,8 +254,20 @@ static LONG sb_dgram_send(struct SocketBase *base, struct SbSocket *s,
         r = have_dst ? udp_sendto(s->pcb.udp, p, dst, port)
                      : udp_send(s->pcb.udp, p);
     else if (s->type == SBT_RAW && s->pcb.raw != NULL)
+    {
+        if (raw_flags(s->pcb.raw) & RAW_FLAGS_HDRINCL)
+        {
+            LONG e = sb_hdrincl_complete(s, p, have_dst ? dst : &s->pcb.raw->remote_ip);
+            if (e != 0)
+            {
+                pbuf_free(p);
+                netstack_unlock();
+                return sb_fail(base, e);
+            }
+        }
         r = have_dst ? raw_sendto(s->pcb.raw, p, dst)
                      : raw_send(s->pcb.raw, p);
+    }
 
     pbuf_free(p);
     PERF_ADD(&ns_perf, NSP_UDP_SEND, t_send);
@@ -231,6 +291,10 @@ LONG bsd_sendto(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
 
     if (s->type == SBT_TCP)
         return sb_tcp_send(base, s, buf, len, flags);
+
+    /* urgent data is a TCP concept; BSD refuses it on datagram sockets */
+    if (flags & SB_MSG_OOB)
+        return sb_fail(base, SB_EOPNOTSUPP);
 
     if (to != NULL)
     {
@@ -276,14 +340,24 @@ LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
 
     if (s->type == SBT_TCP)
     {
-        /* stream: iovs are just consecutive sends */
+        /* stream: iovs are just consecutive sends. MSG_OOB marks the last
+         * byte of the whole message, so only the final non-empty iov may
+         * carry the flag down to sb_tcp_send. */
+        ULONG lastiov = 0;
+        if (flags & SB_MSG_OOB)
+            for (ULONG i = 0; i < mh->msg_iovlen; i++)
+                if (mh->msg_iov[i].iov_len != 0)
+                    lastiov = i;
+
         LONG total = 0;
         for (ULONG i = 0; i < mh->msg_iovlen; i++)
         {
             const struct sb_iovec *iv = &mh->msg_iov[i];
             if (iv->iov_len == 0)
                 continue;
-            LONG n = bsd_send(sock, iv->iov_base, (LONG)iv->iov_len, flags, base);
+            LONG f = ((flags & SB_MSG_OOB) && i != lastiov) ? flags & ~SB_MSG_OOB
+                                                            : flags;
+            LONG n = bsd_send(sock, iv->iov_base, (LONG)iv->iov_len, f, base);
             if (n < 0)
                 return total > 0 ? total : -1;
             total += n;
@@ -291,6 +365,13 @@ LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
                 break;
         }
         return total;
+    }
+
+    /* urgent data is a TCP concept; BSD refuses it on datagram sockets */
+    if (flags & SB_MSG_OOB)
+    {
+        sb_set_errno(base, SB_EOPNOTSUPP);
+        return -1;
     }
 
     /* datagram: one message from all iovs */
@@ -338,7 +419,20 @@ LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
         if (s->type == SBT_UDP && s->pcb.udp != NULL)
             r = udp_sendto(s->pcb.udp, p, &ip, port);
         else if (s->type == SBT_RAW && s->pcb.raw != NULL)
+        {
+            if (raw_flags(s->pcb.raw) & RAW_FLAGS_HDRINCL)
+            {
+                e = sb_hdrincl_complete(s, p, &ip);
+                if (e != 0)
+                {
+                    pbuf_free(p);
+                    netstack_unlock();
+                    sb_set_errno(base, e);
+                    return -1;
+                }
+            }
             r = raw_sendto(s->pcb.raw, p, &ip);
+        }
     }
     else
     {
@@ -355,7 +449,20 @@ LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
             r = udp_send(s->pcb.udp, p);
         }
         else if (s->type == SBT_RAW && s->pcb.raw != NULL)
+        {
+            if (raw_flags(s->pcb.raw) & RAW_FLAGS_HDRINCL)
+            {
+                LONG e = sb_hdrincl_complete(s, p, &s->pcb.raw->remote_ip);
+                if (e != 0)
+                {
+                    pbuf_free(p);
+                    netstack_unlock();
+                    sb_set_errno(base, e);
+                    return -1;
+                }
+            }
             r = raw_send(s->pcb.raw, p);
+        }
     }
     pbuf_free(p);
     netstack_unlock();
@@ -380,14 +487,70 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
     LONG copied = 0;
     struct SbTimedWait tw = { 0, FALSE };
 
-    /* no urgent data support (sends refuse MSG_OOB), so there is never OOB
-     * to read — EINVAL, per BSD for "no out-of-band data pending" */
+    /* MSG_OOB: read the single out-of-band byte (4.4BSD PRU_RCVOOB).
+     * EINVAL when there is no unconsumed mark — never marked, byte already
+     * read, mark passed, or SO_OOBINLINE (the byte is in-band then). MARKED
+     * means the mark is known but its byte is still in flight: BSD returns
+     * EWOULDBLOCK there; we soften that to a bounded wait on blocking
+     * sockets (strictly more useful, and probes still can't hang — NONE is
+     * an immediate EINVAL). */
     if (flags & SB_MSG_OOB)
-        return sb_fail(base, SB_EINVAL);
+    {
+        if (s->oobInline || len < 1)
+            return sb_fail(base, SB_EINVAL);
+        netstack_lock();
+        for (;;)
+        {
+            if (s->oobState == SB_OOB_HAVE)
+            {
+                buf[0] = s->oobByte;
+                if (!peek)
+                    s->oobState = SB_OOB_READ;
+                netstack_unlock();
+                return 1;
+            }
+            if (s->oobState != SB_OOB_MARKED)
+            {
+                netstack_unlock();
+                return sb_fail(base, SB_EINVAL);
+            }
+            if (s->err != 0)
+            {
+                LONG e = s->err;
+                s->err = 0;
+                netstack_unlock();
+                return sb_fail(base, e);
+            }
+            if (s->rxeof || s->shut_rd || s->pcb.tcp == NULL)
+            {
+                netstack_unlock();
+                return sb_fail(base, SB_EINVAL); /* the byte is never coming */
+            }
+            if (dontwait)
+            {
+                netstack_unlock();
+                return sb_fail(base, SB_EWOULDBLOCK);
+            }
+            LONG we = sb_wait_to(base, s->rcvTimeoMs, &tw);
+            if (we != 0)
+            {
+                netstack_unlock();
+                return sb_fail(base, we);
+            }
+        }
+    }
 
     PERF_T0(t_lock);
     netstack_lock();
     PERF_ADD(&ns_perf, NSP_RECV_LOCKWAIT, t_lock);
+
+    /* A consuming read that STARTS at the urgent mark passes it: what
+     * follows is post-mark data (SIOCATMARK read 1 between the calls). A
+     * read that merely REACHES the mark stops there instead (below). */
+    if (!peek && s->oobMarkDist == 0 &&
+        (s->oobState == SB_OOB_HAVE || s->oobState == SB_OOB_READ))
+        s->oobState = SB_OOB_NONE;
+
     for (;;)
     {
         while (s->rxq == NULL)
@@ -442,11 +605,25 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
             }
         }
 
+        /* Reads never cross the urgent mark (BSD): clamp this pass to the
+         * mark distance and stop there. A peek sitting exactly AT the mark
+         * is the one exception — it sees post-mark data without passing
+         * the mark (non-consuming). */
+        LONG lim = len;
+        BOOL hitmark = FALSE;
+        if ((s->oobState == SB_OOB_HAVE || s->oobState == SB_OOB_READ) &&
+            (s->oobMarkDist > 0 || !peek) &&
+            s->oobMarkDist <= (ULONG)(len - copied))
+        {
+            lim = copied + (LONG)s->oobMarkDist;
+            hitmark = TRUE;
+        }
+
         if (peek)
         {
             /* non-destructive; pbuf_copy_partial walks per-pbuf len fields
              * but takes a u16 count — cap the peek */
-            ULONG want = (ULONG)(len - copied);
+            ULONG want = (ULONG)(lim - copied);
             if (want > s->rxBytes)
                 want = s->rxBytes;
             if (want > 0xFFFF)
@@ -465,13 +642,13 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
          * tot_len is u16, which the backlog under a 256 KB+ window
          * overflows. */
         ULONG acked = 0;
-        while (copied < len && s->rxq != NULL)
+        while (copied < lim && s->rxq != NULL)
         {
             struct pbuf *run = s->rxq;
             struct pbuf *last = NULL;
             ULONG take = 0;
             for (struct pbuf *p = run;
-                 p != NULL && take + p->len <= (ULONG)(len - copied) && take + p->len <= 0xFFFF;
+                 p != NULL && take + p->len <= (ULONG)(lim - copied) && take + p->len <= 0xFFFF;
                  p = p->next)
             {
                 take += p->len;
@@ -483,13 +660,15 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
                 /* the head pbuf alone exceeds the remaining request:
                  * partial consume in place, at most one buffer's worth */
                 struct pbuf *h = run;
-                ULONG n = (ULONG)(len - copied);
+                ULONG n = (ULONG)(lim - copied);
                 pbuf_copy_partial(h, buf + copied, (u16_t)n, 0);
                 copied += (LONG)n;
                 s->rxBytes -= n;
+                if (s->oobState == SB_OOB_HAVE || s->oobState == SB_OOB_READ)
+                    s->oobMarkDist -= n;
                 pbuf_remove_header(h, n);
                 acked += n;
-                continue; /* copied == len now; the loop exits */
+                continue; /* copied == lim now; the loop exits */
             }
 
             /* unlink the run — exclusively ours once detached */
@@ -498,6 +677,12 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
                 s->rxqTail = NULL;
             last->next = NULL;
             s->rxBytes -= take;
+            /* mark bookkeeping under THIS lock hold: the copy below runs
+             * unlocked, and a new mark latched meanwhile measures its
+             * distance from the already-shrunk queue — it must not be
+             * decremented for this run's bytes as well */
+            if (s->oobState == SB_OOB_HAVE || s->oobState == SB_OOB_READ)
+                s->oobMarkDist -= take;
 
             netstack_unlock();
             PERF_T0(t_copy);
@@ -542,6 +727,8 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
             PERF_ADD(&ns_perf, NSP_RECV_ACKFLUSH, t_ack);
         }
 
+        if (hitmark && copied >= lim)
+            break; /* stopped at the urgent mark: hard break, even for MSG_WAITALL */
         if (copied >= len || !waitall)
             break;
     }
@@ -701,6 +888,9 @@ LONG bsd_recvfrom(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
         }
         return r;
     }
+    /* urgent data is a TCP concept; BSD refuses it on datagram sockets */
+    if (flags & SB_MSG_OOB)
+        return sb_fail(base, SB_EOPNOTSUPP);
     return sb_dgram_recv(base, s, buf, len, flags, addr, addrlen);
 }
 

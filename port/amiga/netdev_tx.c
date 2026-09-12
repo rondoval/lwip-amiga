@@ -97,7 +97,7 @@ void netdevif_tx_reclaim(struct NetdevIf *ndi)
 static void ndif_hh_prime(struct NetdevIf *ndi, const struct pbuf *p)
 {
     const UBYTE *frame = p->payload;
-    ULONG l3 = ndif_ip_offset(frame, p->len);
+    ULONG l3 = inetfrm_ip_offset(frame, p->len);
     if (l3 == 0)
         return; /* not IPv4 (an ARP request, say) — nothing to cache */
 
@@ -124,7 +124,7 @@ static void ndif_hh_prime(struct NetdevIf *ndi, const struct pbuf *p)
 static ULONG ndif_l4_offsets(struct pbuf *p, UWORD *csum_start, UWORD *csum_offset)
 {
     /* headers (incl. any VLAN tag) must be contiguous in the first pbuf */
-    ULONG l3 = ndif_ip_offset(p->payload, p->len);
+    ULONG l3 = inetfrm_ip_offset(p->payload, p->len);
     if (l3 == 0)
         return 0xFFFF; /* not IPv4 (or non-contiguous): not offloadable */
 
@@ -150,7 +150,7 @@ static ULONG ndif_l4_offsets(struct pbuf *p, UWORD *csum_start, UWORD *csum_offs
     }
 
     UWORD *csum_field = (UWORD *)((UBYTE *)p->payload + l4_start + field);
-    *csum_field = ndif_pseudo_sum(ip, 0);
+    *csum_field = inetfrm_pseudo_sum(ip, 0);
 
     *csum_start = (UWORD)l4_start;
     *csum_offset = (UWORD)(l4_start + field);

@@ -27,10 +27,10 @@
 #include <lwip/pbuf.h>
 
 #include <devices/netdev.h>
+#include "netif_base.h"
+#include "rx_gro.h"
 
 struct NdRxWrap;
-struct ip_hdr;  /* lwip/prot/ip4.h */
-struct tcp_hdr; /* lwip/prot/tcp.h */
 
 /* Upper bound on frames processed per netstack_lock() hold in ndif_rx_input,
  * and the size of the per-chunk verdict arrays (drop[], ndi_GroMeta). This is
@@ -50,75 +50,12 @@ struct tcp_hdr; /* lwip/prot/tcp.h */
 #define NDIF_HH_ENTRIES    4u  /* direct-mapped by dst-IP low bits */
 #define NDIF_HH_HDR_MAX    18u /* Ethernet 14 + one 802.1Q tag */
 
-/* Exact multicast RX filter: how many distinct multicast MACs the stack
- * tracks and hands the driver in one NETDEV_CMD_SET_RXFILTER. Beyond this the
- * glue falls back to NDFF_ALLMULTI (see ndif_igmp_mac_filter). Generous vs
- * real group counts; the driver imposes its own (smaller) exact-slot bound and
- * falls back to all-multi independently if the list overruns it. */
-#define NDIF_MCAST_MAX     32u
-
 struct NdHhEntry
 {
     ULONG nhh_DstIp;   /* network-order dst IP; 0 = empty */
     UWORD nhh_Len;     /* 14, or 18 when the frame carries a VLAN tag */
     UWORD nhh_Left;    /* fast hits left before a slow-path revalidation */
     UBYTE nhh_Hdr[NDIF_HH_HDR_MAX];
-};
-
-/* GRO-lite: merge N consecutive in-order same-flow TCP data frames from one
- * driver RX batch into a single pbuf chain and feed lwIP once. Candidates are
- * classified in the pre-lock pass; merge contexts live only WITHIN one core
- * lock hold (flushed before every unlock), so nothing survives across
- * holds, link changes or teardown. Gated on ndi_RxOffload: with lwIP's own
- * TCP checksum check active, a rewritten merged header would fail it. */
-#define NDIF_GRO_FLOWS      4u  /* direct-mapped merge contexts */
-#define NDIF_GRO_MAX_FRAMES 44u /* per merge — the u16 IPH_LEN ceiling:
-                                   1500 + 43*1460 = 64280 <= 65535. The RX-input
-                                   batch (NDIF_RX_CHUNK) is the other bound on a
-                                   run; 64-frame batches split into a 44 + a 20. */
-
-/* per-frame pre-lock classification verdict */
-#define NDIF_GRO_NO      0  /* not IPv4/TCP: deliver immediately */
-#define NDIF_GRO_NOMERGE 1  /* IPv4 TCP but unmergeable (SYN/FIN/RST, options,
-                               padded, fragment): flush its flow first */
-#define NDIF_GRO_MERGE   2  /* in-order-candidate data segment */
-#define NDIF_GRO_ACK     3  /* payload-free pure ACK: coalesce to the freshest
-                               per flow (a bulk sender only needs the newest
-                               cumulative ackno + window) */
-
-struct NdGroMeta
-{
-    ULONG ngm_SrcIp;   /* flow key, raw network order */
-    ULONG ngm_DstIp;
-    ULONG ngm_Ports;   /* src<<16 | dst, raw */
-    union {
-        ULONG ngm_Seq;   /* MERGE frame: data seqno, host order */
-        ULONG ngm_AckNo; /* ACK frame:   ackno,      host order */
-    };
-    UWORD ngm_PayOff;  /* frame offset of TCP payload (l2 + 20 + 20) */
-    UWORD ngm_PayLen;  /* TCP payload bytes (from IPH_LEN, pad excluded) */
-    UBYTE ngm_Class;   /* NDIF_GRO_* */
-    UBYTE ngm_Flags;   /* raw TCP flag byte (PSH propagation) */
-};
-
-struct NdGroCtx
-{
-    struct pbuf *ngc_Head;    /* first frame, headers intact; NULL = idle */
-    struct pbuf *ngc_Tail;    /* append point (manual linking; tot_len of
-                                 the chain is fixed up once at flush) */
-    struct ip_hdr *ngc_Ip;    /* head's IP header (length/csum patch) */
-    struct tcp_hdr *ngc_Tcp;  /* head's TCP header (ackno/wnd/PSH patch) */
-    ULONG ngc_SrcIp;          /* flow key, raw */
-    ULONG ngc_DstIp;
-    ULONG ngc_Ports;
-    union {
-        ULONG ngc_NextSeq;    /* data run: host order, expected next seqno */
-        ULONG ngc_AckNo;      /* ack hold: host order, held (freshest) ackno */
-    };
-    ULONG ngc_PayloadAdd;     /* Σ payload bytes appended after the head */
-    UWORD ngc_Frames;         /* frames absorbed, head included */
-    UBYTE ngc_IsAck;          /* held run is a coalesced pure-ACK, not data
-                                 (valid only while ngc_Head != NULL) */
 };
 
 /* Deferred TX reclaim: nso_TxDone (unit task) enqueues completed pbuf cookies
@@ -134,17 +71,19 @@ struct NdGroCtx
 
 struct NetdevIf
 {
-    struct netif ndi_Netif;
+    struct NetIfBase ndi_Base;          /* must stay first: netif->state points
+                                           at this struct, the base, and the
+                                           netif all at once (netif_base.h) */
     APTR ndi_Drv;                       /* nda_DrvCtx */
     const struct NetDevDrvOps *ndi_Ops; /* nda_DrvOps */
     struct NetDevCaps ndi_Caps;
-    LONG ndi_VlanTci;                   /* in-band 802.1Q: -1 = no VLAN, else
-                                           (pcp<<13)|(vid&0xFFF); read by the
-                                           lwIP VLAN hooks. create() defaults it;
-                                           the opener overrides from prefs before
-                                           the interface is brought up. */
 
     struct NdRxWrap *ndi_FreeWraps;     /* under the core lock */
+    ULONG ndi_WrapsOut;                 /* wraps lent to lwIP (under the core
+                                           lock). Nonzero at destroy = sockets
+                                           still hold RX pbufs past a forced
+                                           remove -> the pool is marked dead
+                                           and leaked (see netdevif_destroy) */
     APTR ndi_WrapStorage;
     ULONG ndi_WrapStorageSize;
     BOOL ndi_RxOffload;                 /* lwIP TCP/UDP checking disabled */
@@ -162,30 +101,16 @@ struct NetdevIf
     ULONG ndi_TxFreeOverflow;           /* backstop: inline frees on a full ring
                                            (unreachable at correct sizing) */
 
-    /* IGMP -> exact driver RX filter. ndif_igmp_mac_filter (lwIP hook, under
-     * the core lock) keeps the set of joined multicast MACs — 01:00:5e + the
-     * group's low 23 bits, refcounted so the several IPv4 groups that can alias
-     * one MAC share a slot — and raises ndi_RxFilterDirty on any change. The
-     * stack task (sb_rxfilter_sync) snapshots the list and issues
-     * NETDEV_CMD_SET_RXFILTER OFF the lock — that command runs on the driver
-     * unit task, which takes the core lock in its RX path, so issuing it under
-     * the lock would deadlock. Joins past NDIF_MCAST_MAX bump ndi_McastOverflow,
-     * falling back to NDFF_ALLMULTI until they drain. */
-    UBYTE ndi_McastList[NDIF_MCAST_MAX][6]; /* distinct joined multicast MACs */
-    UWORD ndi_McastRefs[NDIF_MCAST_MAX];    /* per-MAC join refcount */
-    UWORD ndi_McastCount;                   /* distinct MACs in the list */
-    UWORD ndi_McastOverflow;                /* joins that didn't fit -> allmulti */
-    UWORD ndi_RxFilterWant;                 /* desired NDFF_* (0 or NDFF_ALLMULTI) */
-    BOOL ndi_RxFilterDirty;                 /* set changed; stack task must push */
-
     struct NdHhEntry ndi_Hh[NDIF_HH_ENTRIES];
     ULONG ndi_HhPrimeDst;               /* dst IP whose header linkoutput should
                                            snoop from the next slow-path frame;
                                            0 = none */
 
-    /* GRO-lite state: meta lives here; both are unit-task exclusive during nso_RxInput */
-    struct NdGroMeta ndi_GroMeta[NDIF_RX_CHUNK];
-    struct NdGroCtx ndi_Gro[NDIF_GRO_FLOWS];
+    /* GRO-lite state (rx_gro.h; gated on ndi_RxOffload — with lwIP's own TCP
+     * checksum check active, a rewritten merged header would fail it). Both
+     * are unit-task exclusive during nso_RxInput. */
+    struct RxGroMeta ndi_GroMeta[NDIF_RX_CHUNK];
+    struct RxGro ndi_Gro;
 };
 
 /* The stack-side callback table to pass in NetDevAttach.nda_StackOps; use
@@ -230,5 +155,11 @@ void netdevif_tx_reclaim(struct NetdevIf *ndi);
  * MEM_ALIGNMENT for one-off blocks, 64 for cache-line-tiled slab arenas). */
 APTR netdevif_dma_alloc(struct NetdevIf *ndi, ULONG size, ULONG align);
 void netdevif_dma_free(struct NetdevIf *ndi, APTR ptr, ULONG size);
+
+/* Drop the whole L2 header cache (and the pending snoop prime). Needed
+ * whenever an IP->MAC binding changes underneath it: link transitions and
+ * manual ARP table mutations (SIOCSARP/SIOCDARP). Caller holds the core
+ * lock; the cache refills lazily through the slow path. */
+void netdevif_hh_invalidate(struct NetdevIf *ndi);
 
 #endif /* LWIPAMIGA_NETDEV_IF_H */

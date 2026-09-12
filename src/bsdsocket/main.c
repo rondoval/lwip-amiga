@@ -56,14 +56,17 @@ ULONG LibExpunge(struct SocketBase *base asm("a6"))
         return 0;
     }
 
-    /* A running stack is not expungeable. Once sb_stack_start has brought the
-     * netif up we own a DHCP lease, a netdev ATTACH that handed the driver
-     * function pointers into this code, and an interface every other opener
-     * expects to still be there. Apps that open and close the library around
-     * each individual call may drop lib_OpenCnt to zero constantly and letting
-     * exec expunge in those windows would tear the network down under them, 
-     * unloading code the driver's unit task still calls.
-     * Teardown happens only when the stack never started, or failed to. */
+    /* A running stack is not expungeable. While the stack task exists it may
+     * own a netdev ATTACH that handed the driver function pointers into this
+     * code (plus its DHCP lease), and every opener expects the stack — at
+     * minimum loopback and its parked sockets — to persist. lib_OpenCnt
+     * legitimately drops to zero all the time (apps open and close the
+     * library around each individual call) and expunging in those windows
+     * would tear the network down under them. The sanctioned way down is the
+     * control port's shutdown handshake (sb_netctl.c): once it has stopped
+     * the stack task, stackTask is NULL and this path runs for real — from
+     * the NetShutdown command's RemLibrary. It also runs when the stack
+     * never started, or failed to. */
     if (root->stackTask != NULL)
     {
         root->libNode.lib_Flags |= LIBF_DELEXP;
@@ -73,6 +76,7 @@ ULONG LibExpunge(struct SocketBase *base asm("a6"))
     /* orphaned ReleaseSocket parkings die with the library (the pool frees
      * their memory wholesale; the pcbs die with the stack) */
     sb_stack_stop(root);
+    sb_log_exit(root);
 
     if (root->sockPool != NULL)
     {
@@ -104,10 +108,13 @@ static struct Library *LibInit(struct Library *base asm("d0"), ULONG seglist asm
     root->stackTask = NULL;
     root->sockPool = NULL;
     root->openCount = 0;
+    root->shuttingDown = FALSE;
     root->nextSockId = 1;
     root->defaultDomain[0] = '\0';
     _NewMinList(&root->releasedSockets);
+    _NewMinList(&root->openers);
     InitSemaphore(&root->openLock);
+    sb_log_init(root);
 
     Kprintf("[bsdsocket] initialized\n");
     return base;
@@ -164,6 +171,15 @@ struct SocketBase *LibOpen(ULONG version asm("d0"), struct SocketBase *base asm(
 
     ObtainSemaphore(&root->openLock);
 
+    /* a NetShutdown is in progress: the stack is going away, no new
+     * clients. Once it completes and the library is expunged, a fresh
+     * OpenLibrary loads and starts everything anew. */
+    if (root->shuttingDown)
+    {
+        ReleaseSemaphore(&root->openLock);
+        return NULL;
+    }
+
     if (root->stackTask == NULL)
     {
         if (root->sockPool == NULL)
@@ -205,7 +221,7 @@ struct SocketBase *LibOpen(ULONG version asm("d0"), struct SocketBase *base asm(
     b->hErrnoPtr = &b->hErrno;
     b->logStat = 0;
     b->logTagPtr = NULL;
-    b->logFacility = 0;
+    b->logFacility = SB_LOG_USER;
     b->logMask = SB_LOGMASK_ALL;
     b->timerPort = CreateMsgPort();
     b->timerReq = (struct timerequest *)CreateIORequest(b->timerPort, sizeof(struct timerequest));
@@ -229,6 +245,7 @@ struct SocketBase *LibOpen(ULONG version asm("d0"), struct SocketBase *base asm(
     root->libNode.lib_OpenCnt++;
     root->libNode.lib_Flags &= (UBYTE)~LIBF_DELEXP;
     root->openCount++;
+    AddTail((struct List *)&root->openers, (struct Node *)&b->openNode);
 
     ReleaseSemaphore(&root->openLock);
     return b;
@@ -245,16 +262,24 @@ ULONG LibClose(struct SocketBase *base asm("a6"))
         return 0;
     }
 
+    /* a log hook this opener installed and never cleared dies with it */
+    sb_log_owner_closed(root, base);
     child_cleanup(base);
+
+    /* Deregister BEFORE the base is freed (it holds the openers link), and
+     * only then free the memory. When the last client of a pending
+     * NetShutdown closes, wake the stack task so it can finish the job. */
+    ObtainSemaphore(&root->openLock);
+    Remove((struct Node *)&base->openNode);
+    root->libNode.lib_OpenCnt--;
+    root->openCount--;
+    if (root->shuttingDown && root->openCount == 0 && root->stackTask != NULL)
+        Signal(root->stackTask, SIGBREAKF_CTRL_E);
+    ReleaseSemaphore(&root->openLock);
 
     ULONG negSize = base->libNode.lib_NegSize;
     ULONG posSize = base->libNode.lib_PosSize;
     FreeMem((UBYTE *)base - negSize, negSize + posSize);
-
-    ObtainSemaphore(&root->openLock);
-    root->libNode.lib_OpenCnt--;
-    root->openCount--;
-    ReleaseSemaphore(&root->openLock);
 
     if (root->libNode.lib_OpenCnt == 0 && (root->libNode.lib_Flags & LIBF_DELEXP))
         return LibExpunge(root);

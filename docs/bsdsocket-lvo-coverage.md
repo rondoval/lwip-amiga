@@ -25,9 +25,9 @@ The library has two tiers:
 > address-conversion, reentrant/getaddrinfo, **status**, **interface**) report
 > `TRUE`, the rest `FALSE`, and `SBTC_NUM_PACKET_FILTER_CHANNELS` reports `0`. The
 > interface tag reports `TRUE` for its read-only query subset; the config LVOs
-> in that group refuse gracefully with `EINVAL` (configuration is
-> prefs-file-only). Feature-probing apps get a definitive answer instead of an
-> "unknown tag" error.
+> in that group refuse gracefully with `EINVAL` (configuration runs over the
+> private control port via the bundled commands). Feature-probing apps get a
+> definitive answer instead of an "unknown tag" error.
 
 ## Summary
 
@@ -60,18 +60,18 @@ All 46 are implemented.
 | `listen` | −42 | ✅ | ✅ done | |
 | `accept` | −48 | ✅ | ✅ done | |
 | `connect` | −54 | ✅ | ✅ done | |
-| `sendto` | −60 | ✅ | ✅ done | |
-| `send` | −66 | ✅ | ✅ done | |
-| `recvfrom` | −72 | ✅ | ✅ done | |
-| `recv` | −78 | ✅ | ✅ done | |
+| `sendto` | −60 | ✅ | ✅ done | `MSG_OOB` sends TCP urgent data (last byte of the write; real URG + urgent pointer on the wire). Refused on UDP/RAW (`EOPNOTSUPP`), per BSD. |
+| `send` | −66 | ✅ | ✅ done | Same `MSG_OOB` support as `sendto`. |
+| `recvfrom` | −72 | ✅ | ✅ done | `MSG_OOB` returns the out-of-band byte (4.4BSD PRU_RCVOOB semantics: `EINVAL` with no mark pending or with `SO_OOBINLINE`; the byte is excised from the in-band stream, and normal reads stop at the urgent mark). |
+| `recv` | −78 | ✅ | ✅ done | Same `MSG_OOB` support as `recvfrom`. |
 | `shutdown` | −84 | ✅ | ✅ done | |
-| `setsockopt` | −90 | 🟡 | ✅ done | `SO_REUSEADDR/KEEPALIVE/BROADCAST/LINGER/SNDTIMEO/RCVTIMEO/EVENTMASK` and `TCP_NODELAY` are real. `SO_SNDBUF`/`SO_RCVBUF` **accept-and-ignore** — the value is dropped and success returned (buffers are compile-time fixed; `getsockopt` honestly reports `TCP_SND_BUF`/`TCP_WND`). Other options → `ENOPROTOOPT`. `SO_LINGER` with a non-zero timeout now does a real timed drain on close (timeout ⇒ RST); `MSG_OOB` is refused. |
+| `setsockopt` | −90 | 🟡 | ✅ done | `SO_REUSEADDR/KEEPALIVE/BROADCAST/LINGER/SNDTIMEO/RCVTIMEO/EVENTMASK` and `TCP_NODELAY` are real. `SO_SNDBUF`/`SO_RCVBUF` **accept-and-ignore** — the value is dropped and success returned (buffers are compile-time fixed; `getsockopt` honestly reports `TCP_SND_BUF`/`TCP_WND`). At `IPPROTO_IP` level: `IP_ADD_MEMBERSHIP`/`IP_DROP_MEMBERSHIP` are real (IGMP joins, per-socket bookkeeping), `IP_MULTICAST_TTL/LOOP/IF` accept-and-ignore (single netif, defaults already match), and `IP_HDRINCL` is real on raw sockets with kernel-style header completion (Linux raw(7) semantics): total length and header checksum are always set by the library, source address and id are filled in when the app leaves them zero (source from the route — no route is `ENETUNREACH`), and a malformed header (version ≠ 4, bad `ip_hl`) is `EINVAL`. lwIP itself transmits the header verbatim; the completion lives in the raw send paths (`sb_io.c`). `traceroute` uses this to set per-probe TTL. Other options → `ENOPROTOOPT`. `SO_LINGER` with a non-zero timeout now does a real timed drain on close (timeout ⇒ RST); `SO_OOBINLINE` is real (urgent byte stays in-stream, affects marks latched from then on). |
 | `getsockopt` | −96 | ✅ | ✅ done | |
 | `getsockname` | −102 | ✅ | ✅ done | |
 | `getpeername` | −108 | ✅ | ✅ done | TCP/UDP read the live remote from the pcb; RAW sockets always return `ENOTCONN`. |
-| `IoctlSocket` | −114 | ✅ | ✅ done | |
+| `IoctlSocket` | −114 | ✅ | ✅ done | `FIONBIO`, `FIONREAD`, `FIOASYNC` (per-socket SIGIO toggle, defaults on — arming `SBTC_SIGIOMASK` is the Amiga-side opt-in), `SIOCATMARK`, and the ARP table quartet `SIOCSARP`/`SIOCDARP`/`SIOCGARP` plus whole-table `SIOCGARPT` (classic 4.3BSD/AmiTCP numbering; codes and `struct arptabreq` published in `include/net/if_arp_ioctl.h` — Roadshow's netinclude has `struct arpreq` but no codes). `ATF_PUBL`/`ATF_USETRAILERS` are rejected with `EINVAL`, never supported. |
 | `CloseSocket` | −120 | ✅ | ✅ done | |
-| `WaitSelect` | −126 | ✅ | ✅ done | Waits on socket readiness, the caller's signal mask, the break mask and a real timeout. `exceptfds` is always cleared — there is no out-of-band data, so no exceptional condition ever fires. |
+| `WaitSelect` | −126 | ✅ | ✅ done | Waits on socket readiness, the caller's signal mask, the break mask and a real timeout. `exceptfds` reports pending out-of-band data (an unconsumed urgent mark), per BSD. |
 | `SetSocketSignals` | −132 | ✅ | ✅ done | |
 | `getdtablesize` | −138 | ✅ | ✅ done | Returns the opener's current fd-table size (`SB_FD_COUNT` by default, grows via `SBTC_DTABLESIZE`). |
 | `ObtainSocket` | −144 | ✅ | ✅ done | |
@@ -93,13 +93,13 @@ All 46 are implemented.
 | `getservbyport` | −240 | ✅ | ✅ done | |
 | `getprotobyname` | −246 | ✅ | ✅ done | Built-in table (`ip`, `icmp`, `igmp`, `tcp`, `udp`, `raw`); no `/etc/protocols` file. |
 | `getprotobynumber` | −252 | ✅ | ✅ done | |
-| `vsyslog` (+ `syslog`) | −258 | ✅ | ✅ done | Honours `SBTC_LOGMASK` priority filter, prefixes `SBTC_LOGTAGPTR` ident, and formats `%[-][0][width][.prec]`. Output goes only to the debug backend (`Kprintf`) — there is no syslog file/console sink. |
+| `vsyslog` (+ `syslog`) | −258 | ✅ | ✅ done | Honours the `SBTC_LOGMASK` level filter, expands `%m` (current errno text), formats `%[-][0][width][.prec]`, and delivers the line — tagged with `SBTC_LOGTAGPTR` and the facility (`SBTC_LOGFACILITY` when the priority carries none) — to the stack-wide log hook (`SBTC_LOG_HOOK`, i.e. NetLogViewer), the boot-time replay ring while no hook is installed, and the debug backend. No file/console sink. |
 | `Dup2Socket` | −264 | ✅ | ✅ done | |
 | `sendmsg` | −270 | 🟡 | ✅ done | `msg_iov` scatter is real; `msg_name` is validated. `msg_control` (ancillary data) is accepted and ignored — matching 4.4BSD's datagram output. |
 | `recvmsg` | −276 | 🟡 | ✅ done | `msg_iov` scatter is real (datagrams copy straight from the pbuf chain, no size cap). A datagram larger than the total iov space is truncated with `MSG_TRUNC` set in `msg_flags`. No ancillary data is ever produced (`msg_controllen` = 0). |
 | `gethostname` | −282 | ✅ | ✅ done | |
 | `gethostid` | −288 | ✅ | ✅ done | |
-| `SocketBaseTagList` (+ `SocketBaseTags`) | −294 | ✅ | ✅ done | errno/h_errno wiring (LONGPTR tags readable via GETREF), signal masks, syslog config (`SBTC_LOG*`), `SBTC_RELEASESTRPTR` (GET-only, "lwip-amiga x.y"), `SBTC_DTABLESIZE` GET/SET (grow-only, ceiling `SB_FD_MAX`), and `SBTC_HAVE_*` capability probes (see note above). The C runtimes set `SBTC_LOGTAGPTR` at socket-init — declining it aborts init. |
+| `SocketBaseTagList` (+ `SocketBaseTags`) | −294 | ✅ | ✅ done | errno/h_errno wiring (LONGPTR tags readable via GETREF) and texts (`SBTC_(H)ERRNOSTRPTR`), signal masks, syslog config (`SBTC_LOG*`) and the stack-wide log hook (`SBTC_LOG_HOOK`), `SBTC_RELEASESTRPTR` (GET-only, "lwip-amiga x.y"), `SBTC_DTABLESIZE` GET/SET (grow-only, ceiling `SB_FD_MAX`), and `SBTC_HAVE_*` capability probes (see note above). The C runtimes set `SBTC_LOGTAGPTR` at socket-init — declining it aborts init. |
 | `GetSocketEvents` | −300 | ✅ | ✅ done | |
 
 *(LVOs −306…−360 are 10 reserved slots.)*
@@ -125,36 +125,44 @@ Packet capture (tcpdump-class). Would map to a promiscuous RAW netif tap.
 
 ### `SBTC_HAVE_ROUTING_API` — route management (5 LVOs)
 
-lwIP has no route table beyond netif + gateway, so there is nothing to expose.
+lwIP has no route table beyond netif + gateway. The query pair is implemented
+by synthesis (`sb_route.c`); the mutators stay stubs, so the capability tag
+**deliberately reports FALSE** — flipping it would promise Add/Delete/Change.
 
 | LVO | Off. | Impl. | Decision | Notes |
 |---|---|---|---|---|
-| `AddRouteTagList` (+ `AddRouteTags`) | −414 | ⛔ | ❌ no | |
+| `AddRouteTagList` (+ `AddRouteTags`) | −414 | ⛔ | ❌ no | Default-gateway-only subset is a TODO item (maps to `netif_set_gw`). |
 | `DeleteRouteTagList` (+ `DeleteRouteTags`) | −420 | ⛔ | ❌ no | |
 | `ChangeRouteTagList` (+ `ChangeRouteTags`) | −426 | ⛔ | ❌ no | Private / unimplemented in Roadshow itself. |
-| `FreeRouteInfo` | −432 | ⛔ | ❌ no | |
-| `GetRouteInfo` | −438 | ⛔ | 🟡 maybe | Only member with plausible value (report netif + gateway) if a tool needs it. |
+| `FreeRouteInfo` | −432 | ✅ | ✅ done | `FreeVec`; NULL is a no-op. |
+| `GetRouteInfo` | −438 | 🟡 | ✅ done | Synthesized v3 `rt_msghdr` table (loopback host route, default netif's on-link net route, default-gateway route), terminated by `rtm_msglen == 0`. Flags filter: entry returned iff it carries every requested `RTF_*` bit, so `RTF_LLINFO` (ARP) queries yield an empty table — use `SIOCGARPT` for the ARP cache. `AF_UNSPEC`/`AF_INET` only. |
 
 ### `SBTC_HAVE_INTERFACE_API` — interface management (10 LVOs)
 
-The stack self-configures from `ENVARC:netstack.prefs`, so **configuration is
-declined**: the config/create family refuses gracefully with `EINVAL` (a shared
-`bsd_InterfaceConfigUnsupported` stub, `sb_ifquery.c`). The **read-only query
-subset is implemented** (`sb_ifquery.c`) and backs the `netinfo` CLI; the
-capability tag is advertised so third-party status apps can use it too.
+Interface **configuration is declined at the LVO level by decision**: runtime
+add/remove and stack shutdown run over the private control port instead
+(`include/netstack_ctl.h`, served by `sb_netctl.c`; driven by the bundled
+`AddNetInterface` / `RemoveNetInterface` / `NetShutdown` commands from
+`DEVS:NetInterfaces/` config files). The config/create LVO family refuses
+gracefully with `EINVAL` (a shared `bsd_InterfaceConfigUnsupported` stub,
+`sb_ifquery.c`) — genuine Roadshow config binaries and third-party config
+GUIs are NOT supported; implementing these LVOs as marshaling front-ends to
+the control port is a known possible future step (see TODO). The **read-only
+query subset is implemented** (`sb_ifquery.c`) and backs the `netinfo` CLI;
+the capability tag is advertised so third-party status apps can use it too.
 
 | LVO | Off. | Impl. | Decision | Notes |
 |---|---|---|---|---|
-| `AddInterfaceTagList` (+ `AddInterfaceTags`) | −444 | 🟡 | ❌ no | Refuses with `EINVAL`; config is prefs-file-only. |
+| `AddInterfaceTagList` (+ `AddInterfaceTags`) | −444 | 🟡 | ❌ no | Refuses with `EINVAL`; use `AddNetInterface` (control port). |
 | `ConfigureInterfaceTagList` (+ `ConfigureInterfaceTags`) | −450 | 🟡 | ❌ no | Refuses with `EINVAL`. |
 | `ReleaseInterfaceList` | −456 | ✅ | ✅ done | |
 | `ObtainInterfaceList` | −462 | ✅ | ✅ done | Names of the live (non-loopback) interfaces. |
 | `QueryInterfaceTagList` (+ `QueryInterfaceTags`) | −468 | ✅ | ✅ done | Address/mask/broadcast/MTU/MAC/state/bind-type/DNS tags, plus packet/byte/error/drop counters (`IFQ_PacketsReceived`, `IFQ_GetBytesIn/Out`, `IFQ_Input/OutputDrops`, `IFQ_IPDrops`, …) backed by the NIC-stats cache and lwIP stats. Counter/link tags are answered only for the active NIC's interface (skipped for e.g. loopback — the cache describes one NIC). Multicast counters, the Max/Pending request tags, `IFQ_AddressLeaseExpires` and `IFQ_GetSANA2CopyStats` are not answered (left untouched). |
-| `CreateAddrAllocMessageA` (+ `CreateAddrAllocMessage`) | −474 | ⛔ | ❌ no | Config; `NULL` stub. |
+| `CreateAddrAllocMessageA` (+ `CreateAddrAllocMessage`) | −474 | ⛔ | ❌ no | Config; `NULL` stub. DHCP waits run inside the stack (`ADD_IF` parks until the lease binds), not via AAM messages. |
 | `DeleteAddrAllocMessage` | −480 | ⛔ | ❌ no | |
 | `BeginInterfaceConfig` | −486 | ⛔ | ❌ no | |
 | `AbortInterfaceConfig` | −492 | ⛔ | ❌ no | |
-| `RemoveInterface` | −732 | 🟡 | ❌ no | Refuses with `EINVAL`. (SFD lists it later, same feature.) |
+| `RemoveInterface` | −732 | 🟡 | ❌ no | Refuses with `EINVAL`; use `RemoveNetInterface` (control port). (SFD lists it later, same feature.) |
 
 ### `SBTC_HAVE_MONITORING_API` — monitor management (2 LVOs)
 
@@ -296,7 +304,7 @@ in the SFD; the doc warns the interface is subject to change.
 | `SBTC_HAVE_GETHOSTADDR_R_API` | 6 | 6 | ✅ done |
 | `SBTC_HAVE_STATUS_API` | 1 | 1 | ✅ done (mapped from lwIP stats; approximate) |
 | `SBTC_HAVE_INTERFACE_API` | 10 | 3 | ✅ query subset; config ❌ (graceful `EINVAL`) |
-| `SBTC_HAVE_ROUTING_API` | 5 | 0 | ❌ (GetRouteInfo maybe) |
+| `SBTC_HAVE_ROUTING_API` | 5 | 2 | ✅ query pair (synthesized); mutators ❌, tag reports FALSE |
 | `SBTC_HAVE_KERNEL_MEMORY_API` | 11 | 0 | ❌ never (only useful to an `ipf_*` hook) |
 | `SBTC_NUM_PACKET_FILTER_CHANNELS` (BPF) | 8 | 0 | 🔜 future |
 | `SBTC_HAVE_MONITORING_API` | 2 | 0 | ❌ never |
@@ -328,7 +336,7 @@ Legend as above — **Impl.**: ✅ handled · 🟡 handled, one direction/limita
 |---|---|---|---|---|---|
 | `SBTC_BREAKMASK` | 1 | Signal mask that aborts blocking calls (^C) | ✅ | ✅ done | Per-opener; defaults to `SIGBREAKF_CTRL_C`. |
 | `SBTC_SIGIOMASK` | 2 | Signal delivered on async socket readiness (SIGIO) | ✅ | ✅ done | |
-| `SBTC_SIGURGMASK` | 3 | Signal delivered on out-of-band data (SIGURG) | 🟡 | 🟡 stored, never delivered | The mask is stored and read back, but **SIGURG is never sent** — there is no out-of-band/urgent-data path anywhere (`MSG_OOB` refused, `FD_OOB` never raised, `exceptfds` never fires). Kept so OOB-probing apps don't error; matches Roadshow (which also fails `recv(MSG_OOB)`). |
+| `SBTC_SIGURGMASK` | 3 | Signal delivered on out-of-band data (SIGURG) | ✅ | ✅ done | Delivered to every owner base when a new urgent mark arrives (`sb_wake_urg`) — on that event only, never on ordinary readiness changes. `FD_OOB` is raised through the event system on the same edge. |
 | `SBTC_SIGEVENTMASK` | 4 | Signal delivered on `FD_*` socket events | ✅ | ✅ done | |
 | `SBTC_ERRNO` | 6 | Current `errno` value | ✅ | ✅ done | |
 | `SBTC_HERRNO` | 7 | Current `h_errno` value | ✅ | ✅ done | |
@@ -336,10 +344,10 @@ Legend as above — **Impl.**: ✅ handled · 🟡 handled, one direction/limita
 | `SBTC_FDCALLBACK` | 9 | Link-library fd alloc/free callback | ⛔ | ❌ no | Legacy; the header itself says *"don't use in new code"*. |
 | `SBTC_LOGSTAT` | 10 | `openlog()` options (`LOG_PID`, …) | ✅ | ✅ done | Stored per-opener (advisory). |
 | `SBTC_LOGTAGPTR` | 11 | `syslog` ident string pointer | ✅ | ✅ done | Prefixed to each `vsyslog` line. Set by clib2/newlib at init. |
-| `SBTC_LOGFACILITY` | 12 | Default `syslog` facility | ✅ | ✅ done | Stored per-opener (advisory). |
+| `SBTC_LOGFACILITY` | 12 | Default `syslog` facility | ✅ | ✅ done | Stored per-opener, defaults to `LOG_USER`. |
 | `SBTC_LOGMASK` | 13 | `setlogmask()` priority bitmask | ✅ | ✅ done | Honoured by `vsyslog`; defaults to all priorities. |
-| `SBTC_ERRNOSTRPTR` | 14 | Pointer to a string describing current `errno` | ⛔ | ❌ no |  |
-| `SBTC_HERRNOSTRPTR` | 15 | String describing current `h_errno` | ⛔ | ❌ no |  |
+| `SBTC_ERRNOSTRPTR` | 14 | Pointer to a string describing an `errno` code | ✅ | ✅ done | GETREF only: the code goes in, a static BSD text pointer comes out (same table as `vsyslog`'s `%m`). |
+| `SBTC_HERRNOSTRPTR` | 15 | String describing an `h_errno` code | ✅ | ✅ done | As above for the four resolver codes. |
 | `SBTC_IOERRNOSTRPTR` | 16 | String describing the last `IoErr()` | ⛔ | ❌ no |  |
 | `SBTC_S2ERRNOSTRPTR` | 17 | String for the primary I/O error code | ⛔ | ❌ no |  |
 | `SBTC_S2WERRNOSTRPTR` | 18 | String for the secondary/wire I/O error code | ⛔ | ❌ no |  |
@@ -356,8 +364,8 @@ Legend as above — **Impl.**: ✅ handled · 🟡 handled, one direction/limita
 | `SBTC_ICMP_PROCESS_ECHO` | 48 | How to process ICMP echo requests | ⛔ | ❌ no | As above. |
 | `SBTC_ICMP_PROCESS_TSTAMP` | 49 | How to process ICMP timestamp requests | ⛔ | ❌ no | As above. |
 | `SBTC_CAN_SHARE_LIBRARY_BASES` | 51 | Opt in to sharing one base across callers | ⛔ | ❌ no | **Deliberately declined** — per-opener state (`task`, `errnoPtr`, `sigBit`) lives in the child base; callers keep their own base. |
-| `SBTC_LOG_FILE_NAME` | 52 | Get/set the log output file name | ⛔ | ❌ no | Logging goes to the debug backend (`Kprintf`), not a file. |
-| `SBTC_LOG_HOOK` | 55 | Get/set the installed log hook | ⛔ | ❌ no | As above. |
+| `SBTC_LOG_FILE_NAME` | 52 | Get/set the log output file name | ⛔ | ❌ no | No file sink — capture the log with `NetLogViewer` (the log hook below). |
+| `SBTC_LOG_HOOK` | 55 | Get/set the installed log hook | ✅ | ✅ done | Stack-wide (`sb_log.c`): one `struct Hook` receives every line as a `LogHookMessage`, called on the emitter's context. Installing replays the boot-time ring; `NULL` clears; a hook its installer forgot to clear is retracted at its `CloseLibrary`. |
 | `SBTC_SYSTEM_STATUS` | 56 | Query `SBSYSSTAT_*` (interfaces/resolver/routes up) | ✅ | ✅ done | GET-only. Synthesized under the core lock: a non-loopback up netif with an address → `Interfaces\|BCast_Interfaces`; `dns_getserver(0)` set → `Resolver`; default gateway set → `Routes\|DefaultRoute`. Never PTP. |
 | `SBTC_SIG_ADDRESS_CHANGE_MASK` | 57 | Signal on interface-address change | ⛔ | 🔜 later | Plausible once link/DHCP-renew events are surfaced. |
 | `SBTC_IP_FILTER_HOOK` | 62 | Get/set the IP filter (`ipf_*`) hook | ⛔ | ❌ never | Private IP-filter interface; out of scope (see `ipf_*`). |

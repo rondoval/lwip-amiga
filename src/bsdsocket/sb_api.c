@@ -337,7 +337,34 @@ LONG bsd_connect(LONG sock asm("d0"), APTR name asm("a0"), LONG namelen asm("d1"
 
     case SBT_UDP:
         if (s->pcb.udp != NULL)
-            r = udp_connect(s->pcb.udp, &ip, port);
+        {
+            /* BSD in_pcbconnect semantics: connecting a UDP socket also
+             * commits the local address, so getsockname() afterwards reports
+             * the source the sends will use — the classic "which address
+             * routes there" discovery (traceroute does this). lwIP's
+             * udp_connect only records the remote, so route and pin here;
+             * no route is ENETUNREACH, as on BSD. */
+            if (ip_addr_isany(&s->pcb.udp->local_ip))
+            {
+                struct netif *nif = ip_route(&s->pcb.udp->local_ip, &ip);
+                if (nif == NULL)
+                {
+                    netstack_unlock();
+                    return sb_fail(base, SB_ENETUNREACH);
+                }
+                r = udp_connect(s->pcb.udp, &ip, port);
+                if (r == ERR_OK)
+                {
+                    const ip_addr_t *src = ip_netif_get_local_ip(nif, &ip);
+                    if (src != NULL)
+                        ip_addr_copy(s->pcb.udp->local_ip, *src);
+                }
+            }
+            else
+            {
+                r = udp_connect(s->pcb.udp, &ip, port);
+            }
+        }
         break;
     case SBT_RAW:
         if (s->pcb.raw != NULL)
@@ -535,6 +562,9 @@ LONG bsd_IoctlSocket(LONG sock asm("d0"), ULONG req asm("d1"), APTR argp asm("a0
     case SB_FIONBIO:
         s->nonblock = (*(LONG *)argp != 0);
         return 0;
+    case SB_FIOASYNC:
+        s->asyncIo = (*(LONG *)argp != 0);
+        return 0;
     case SB_FIONREAD:
     {
         LONG n = 0;
@@ -547,6 +577,25 @@ LONG bsd_IoctlSocket(LONG sock asm("d0"), ULONG req asm("d1"), APTR argp asm("a0
         *(LONG *)argp = n;
         return 0;
     }
+    case SB_SIOCATMARK:
+    {
+        /* at-mark: the next byte the app reads is the one right after the
+         * urgent byte (or, with SO_OOBINLINE, the urgent byte itself).
+         * Non-TCP reports 0, per 4.4BSD's socket-level handling. */
+        LONG at = 0;
+        netstack_lock();
+        if (s->type == SBT_TCP && s->oobMarkDist == 0 &&
+            (s->oobState == SB_OOB_HAVE || s->oobState == SB_OOB_READ))
+            at = 1;
+        netstack_unlock();
+        *(LONG *)argp = at;
+        return 0;
+    }
+    case SB_SIOCSARP:
+    case SB_SIOCDARP:
+    case SB_SIOCGARP:
+    case SB_SIOCGARPT:
+        return sb_arp_ioctl(base, req, argp);
     default:
         return sb_fail(base, SB_EINVAL);
     }

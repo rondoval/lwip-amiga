@@ -51,6 +51,7 @@
 #include <strutil.h>
 
 #include "sb_config.h"
+#include "sb_log.h"
 
 struct tcp_pcb;
 struct udp_pcb;
@@ -146,6 +147,7 @@ struct sb_timeval
     ULONG tv_micro;
 };
 
+#define SB_AF_UNSPEC 0
 #define SB_AF_INET 2
 #define SB_SOCK_STREAM 1
 #define SB_SOCK_DGRAM 2
@@ -156,6 +158,7 @@ struct sb_timeval
 #define SB_IPPROTO_UDP 17
 
 /* IP-level socket options (level SB_IPPROTO_IP), BSD/AmiTCP numbering */
+#define SB_IP_HDRINCL 2
 #define SB_IP_MULTICAST_IF 9
 #define SB_IP_MULTICAST_TTL 10
 #define SB_IP_MULTICAST_LOOP 11
@@ -180,6 +183,7 @@ struct sb_ip_mreq
 #define SB_SO_SNDTIMEO 0x1005
 #define SB_SO_RCVTIMEO 0x1006
 #define SB_SO_ERROR 0x1007
+#define SB_SO_OOBINLINE 0x0100
 #define SB_SO_TYPE 0x1008
 #define SB_TCP_NODELAY 1
 
@@ -200,11 +204,35 @@ struct sb_ip_mreq
 #define SB_FD_ERROR 0x20
 #define SB_FD_CLOSE 0x40
 
+#define SB_FIOASYNC 0x8004667DUL
 #define SB_FIONBIO 0x8004667EUL
 #define SB_FIONREAD 0x4004667FUL
+#define SB_SIOCATMARK 0x40047307UL
+
+/* ARP table ioctls (include/net/if_arp_ioctl.h; classic 4.3BSD/AmiTCP
+ * numbering, argument structs mirrored in sb_arp.c) */
+#define SB_SIOCSARP 0x8024691EUL  /* _IOW ('i',30, struct arpreq)    */
+#define SB_SIOCDARP 0x80246920UL  /* _IOW ('i',32, struct arpreq)    */
+#define SB_SIOCGARP 0xC0246926UL  /* _IOWR('i',38, struct arpreq)    */
+#define SB_SIOCGARPT 0xC00C695BUL /* _IOWR('i',91, struct arptabreq) */
+
+/* netinclude/net/if_arp.h arp_flags values */
+#define SB_ATF_INUSE 0x01       /* entry in use */
+#define SB_ATF_COM 0x02         /* completed entry (MAC valid) */
+#define SB_ATF_PERM 0x04        /* permanent entry */
+#define SB_ATF_PUBL 0x08        /* publish entry -- never supported */
+#define SB_ATF_USETRAILERS 0x10 /* trailers -- never supported */
+
+/* TCP urgent-data (MSG_OOB) receive state, 4.4BSD semantics. Transitions in
+ * sb_tcp_recv_cb (latch/excise) and sb_tcp_recv (consume/pass the mark). */
+#define SB_OOB_NONE 0   /* no mark; recv(MSG_OOB) = EINVAL */
+#define SB_OOB_MARKED 1 /* mark known, byte not yet delivered; recv(MSG_OOB) waits/EWOULDBLOCK */
+#define SB_OOB_HAVE 2   /* byte latched (excised) or, inline, in-stream at the mark */
+#define SB_OOB_READ 3   /* byte consumed via MSG_OOB; mark clamp active until passed */
 
 /* BSD errno values (netinclude/sys/errno.h) */
 #define SB_EINTR 4
+#define SB_ENXIO 6
 #define SB_EBADF 9
 #define SB_ENOMEM 12
 #define SB_EACCES 13
@@ -238,6 +266,8 @@ struct sb_ip_mreq
 
 #define SB_HOST_NOT_FOUND 1
 #define SB_TRY_AGAIN 2
+#define SB_NO_RECOVERY 3
+#define SB_NO_DATA 4
 
 /* getaddrinfo/getnameinfo (netinclude/netdb.h) */
 #define SB_PF_UNSPEC 0
@@ -301,16 +331,25 @@ struct sb_addrinfo
 #define SBTC_LOGTAGPTR 11
 #define SBTC_LOGFACILITY 12
 #define SBTC_LOGMASK 13
-/* <sys/syslog.h>: a message of priority p is logged when its bit is set in the
- * mask; the default mask enables all eight priorities. */
+/* <sys/syslog.h>: a priority word is facility<<3 | level. A message is
+ * logged when its level's bit is set in the mask; the default mask enables
+ * all eight levels. A message without facility bits takes the opener's
+ * SBTC_LOGFACILITY, which defaults to LOG_USER. */
 #define SB_LOG_PRIMASK 0x07
+#define SB_LOG_FACMASK 0x03F8UL
+#define SB_LOG_USER (1UL << 3)
 #define SB_LOG_MASK(pri) (1UL << ((pri) & SB_LOG_PRIMASK))
 #define SB_LOGMASK_ALL 0xFFUL
+#define SBTC_ERRNOSTRPTR 14
+#define SBTC_HERRNOSTRPTR 15
 #define SBTC_ERRNOBYTEPTR 21
 #define SBTC_ERRNOWORDPTR 22
 #define SBTC_ERRNOLONGPTR 24
 #define SBTC_HERRNOLONGPTR 25
 #define SBTC_RELEASESTRPTR 29 /* GET-only: stack-identifying version string */
+/* the log hook (sb_log.h): stack-wide, unlike the per-opener SBTC_LOG* above.
+ * SBTC_LOG_FILE_NAME (52) is deliberately absent — there is no file sink. */
+#define SBTC_LOG_HOOK 55
 
 /* Roadshow feature-capability tags (SBTM_GETREF(...) probes): an opener reads
  * these through SocketBaseTagList to learn which extension LVO groups this
@@ -477,6 +516,11 @@ struct SbSocket
     UBYTE rxeof;
     UBYTE shut_rd;
     UBYTE shut_wr;
+    /* FIOASYNC: this socket participates in SIGIO (SBTC_SIGIOMASK) delivery.
+     * Defaults ON, unlike BSD: on Amiga arming the mask is itself the opt-in,
+     * and AmiTCP-era apps park in Wait() on it without ever calling FIOASYNC
+     * (see sb_wake). FIOASYNC(0) opts a socket back out. */
+    UBYTE asyncIo;
 
     UBYTE lingerOn;  /* SO_LINGER; on + time 0 => abort (RST) on close */
     UBYTE forceRst;  /* linger deadline expired: teardown must abort (RST) */
@@ -506,6 +550,19 @@ struct SbSocket
     struct pbuf *rxqTail;
     ULONG rxBytes;
 
+    /* TCP urgent data (MSG_OOB). rxNextSeq tracks the absolute seqno of the
+     * next byte sb_tcp_recv_cb will enqueue (origin set at connect/accept),
+     * mapping the pcb's rcv_up mark onto the byte queue. oobMarkDist counts
+     * readable bytes from the app's read point to the mark and is what the
+     * drain clamp and SIOCATMARK run on; the excised byte itself is never in
+     * rxq/rxBytes unless oobInline. */
+    ULONG rxNextSeq;
+    ULONG oobMarkDist;
+    UBYTE oobState; /* SB_OOB_* */
+    UBYTE oobByte;  /* latched urgent byte (non-inline HAVE/READ) */
+    UBYTE oobInline; /* SO_OOBINLINE: byte stays in-stream, no excision */
+    UBYTE oobPad;
+
     /* UDP/RAW receive: queued datagrams */
     struct MinList dgrams;
     ULONG ndgrams;
@@ -528,6 +585,13 @@ struct SocketBase
     struct Task *stackTask;         /* the lwIP stack task; NULL while the stack is down */
     APTR sockPool;      /* objects; alloc/free under the core lock only */
     ULONG openCount;    /* child bases alive */
+    struct MinList openers; /* their openNode links (under openLock): the
+                             * registry NetShutdown uses to ask every client
+                             * to let go (Signal via each opener's breakMask) */
+    UBYTE shuttingDown; /* NetShutdown in progress: LibOpen refuses new
+                         * clients; LibClose of the last one signals the
+                         * stack task (SIGBREAKF_CTRL_E). Under openLock. */
+    UBYTE pad3[3];
     struct MinList releasedSockets; /* ReleaseSocket parking lot (core lock) */
     LONG nextSockId;    /* ReleaseSocket UNIQUE_ID allocator; wraps to 1 rather
                          * than going negative, and skips ids still parked */
@@ -536,6 +600,17 @@ struct SocketBase
      * sb_stack_start() returns (i.e. before the first OpenLibrary()
      * completes), read-only afterwards — no locking needed */
     struct SbNetConfig netCfg;
+
+    /* runtime log (sb_log.c): the SBTC_LOG_HOOK hook, the opener that
+     * installed it (CloseLibrary retracts a forgotten hook), the recursion
+     * guard, and the boot-time replay ring. */
+    struct Hook *logHook;
+    struct SocketBase *logHookOwner;
+    struct SbLogEntry *logRing; /* SB_LOG_RING entries; NULL = no ring */
+    UBYTE logBusy;
+    UBYTE logRingHead;  /* next slot written */
+    UBYTE logRingCount; /* entries held, <= SB_LOG_RING */
+    UBYTE pad4;
 
     /* NIC statistics cache. Refreshed once/second by the stack task, which
      * owns devIO and holds NO core lock while polling. NEVER issue a netdev
@@ -551,12 +626,13 @@ struct SocketBase
     UBYTE pad2[3];
 
     /* --- per-opener state (child bases; garbage in the root) --- */
+    struct MinNode openNode; /* link in root->openers (under openLock) */
     struct Task *task;  /* the opener; the Signal() target of every wake */
     BYTE sigBit;        /* the wait bit of the header's blocking pattern; -1 if AllocSignal failed */
     UBYTE pad0[3];
     ULONG breakMask;    /* SBTC_BREAKMASK; aborts a blocking call with SB_EINTR (default SIGBREAKF_CTRL_C) */
     ULONG sigIoMask;    /* SBTC_SIGIOMASK; async SIGIO, delivered on every readiness change (see sb_wake) */
-    ULONG sigUrgMask;   /* SBTC_SIGURGMASK; stored and reported back, never delivered — no OOB support */
+    ULONG sigUrgMask;   /* SBTC_SIGURGMASK; SIGURG, delivered when an urgent mark arrives (sb_wake_urg) */
     ULONG sigEventMask; /* SBTC_SIGEVENTMASK; stored, delivered with SIGIO */
 
     LONG internalErrno; /* the errno cell itself, used until SetErrnoPtr redirects errnoPtr */
@@ -572,6 +648,7 @@ struct SocketBase
     STRPTR logTagPtr;  /* ident string prefixed to each message */
     ULONG logFacility; /* default facility — advisory */
     ULONG logMask;     /* setlogmask() priority bitmask */
+    char logFmtBuf[SB_SYSLOG_BUF]; /* %m expansion scratch */
 
     struct SbSocket **fd; /* fdCount entries; grown via SBTC_DTABLESIZE */
     ULONG fdCount;        /* SB_FD_COUNT..SB_FD_MAX */
@@ -602,10 +679,14 @@ struct SocketBase
     ULONG protoIdx; /* get*ent iterators */
     ULONG servIdx;
     ULONG netIdx;
-    char ntoaBuf[20]; /* Inet_NtoA return buffer */
+    char ntoaBuf[IP4ADDR_STRLEN_MAX]; /* Inet_NtoA return buffer */
 };
 
 #define SB_ROOT(b) ((b)->root != NULL ? (b)->root : (b))
+
+/* opener registry: openNode link back to its child base */
+#define SB_OPENER_FROM_NODE(n) \
+    ((struct SocketBase *)((UBYTE *)(n) - __builtin_offsetof(struct SocketBase, openNode)))
 
 /* --- internals ------------------------------------------------------------- */
 
@@ -613,6 +694,10 @@ struct SocketBase
 void sb_set_errno(struct SocketBase *base, LONG code);
 void sb_set_herrno(struct SocketBase *base, LONG code);
 LONG sb_fail(struct SocketBase *base, LONG code);
+/* BSD error texts: syslog's %m and the SBTC_(H)ERRNOSTRPTR tags. Static
+ * strings, valid forever; unknown codes get a generic text. */
+const char *sb_errno_text(LONG code);
+const char *sb_herrno_text(LONG code);
 
 /* socket core (sb_socket.c) */
 struct SbSocket *sb_sock_alloc(struct SocketBase *base, SbSockType type);
@@ -632,6 +717,7 @@ BOOL sb_owner_incref(struct SbSocket *s, struct SocketBase *b);
 void sb_owner_decref(struct SbSocket *s, struct SocketBase *b);
 struct SocketBase *sb_owner_first(struct SbSocket *s);
 void sb_wake(struct SbSocket *s);
+void sb_wake_urg(struct SbSocket *s); /* SIGURG only — on urgent arrival, not every readiness change */
 void sb_event(struct SbSocket *s, ULONG ev); /* under lock; signals sigEventMask */
 LONG sb_wait(struct SocketBase *base); /* 0 or SB_EINTR; drops+retakes the lock */
 
@@ -652,6 +738,7 @@ void sb_udp_wire(struct SbSocket *s);
 void sb_raw_wire(struct SbSocket *s);
 BOOL sb_sock_readable(const struct SbSocket *s);
 BOOL sb_sock_writable(struct SbSocket *s);
+BOOL sb_sock_exceptable(const struct SbSocket *s); /* pending unconsumed OOB */
 LONG sb_map_err(signed char lwip_err);
 /* TCP peer address readout (sb_socket.c); core lock held, 0/0 without a pcb */
 void sb_peer_ip(struct SbSocket *s, ULONG *addr, UWORD *port);
@@ -659,6 +746,9 @@ void sb_peer_ip(struct SbSocket *s, ULONG *addr, UWORD *port);
 /* app sockaddr_in conversion (sb_api.c); shared with the sb_io.c data path */
 LONG sb_addr_in(const struct sb_sockaddr_in *sa, LONG salen, ip_addr_t *ip, u16_t *port);
 void sb_addr_out(APTR name, LONG *namelen, ULONG addr, UWORD port);
+
+/* ARP table ioctls (sb_arp.c); caller task, takes the core lock itself */
+LONG sb_arp_ioctl(struct SocketBase *base, ULONG req, APTR argp);
 
 /* library plumbing (main.c) */
 extern const APTR bsdsocket_functable[];
@@ -672,6 +762,21 @@ APTR LibStubNull(void); /* for the pointer-returning unimplemented LVOs */
 /* stack task (sb_stack.c) */
 LONG sb_stack_start(struct SocketBase *root); /* under root->openLock */
 void sb_stack_stop(struct SocketBase *root);
+
+/* interface-name resolution (sb_ifquery.c): matches the Roadshow-style
+ * identity (NetIfBase nib_Name, case-insensitive) first, then lwIP's own
+ * short name ("nd0", "lo0"). Core lock held; NULL when nothing matches. */
+struct netif;
+struct netif *sb_if_find(const char *name);
+BOOL sb_if_is_loopback(const struct netif *nif);
+/* fill a caller-provided sockaddr_in from a network-order address
+ * (== host order on 68k); NULL dst is a no-op */
+void sb_if_set_sockaddr(APTR dst, ULONG addr);
+
+/* first configured DNS server, or NULL when no slot holds one (sb_dnsconfig.c).
+ * The slots are sparse — see the definition; never probe slot 0 directly.
+ * Core lock held. */
+const ip_addr_t *sb_dns_first_server(void);
 
 /* --- the implemented API surface (register conventions from the NDK sfd) --- */
 
@@ -752,7 +857,7 @@ VOID bsd_setservent(LONG stayOpen asm("d0"), struct SocketBase *base asm("a6"));
 VOID bsd_endservent(struct SocketBase *base asm("a6"));
 APTR bsd_getservent(struct SocketBase *base asm("a6"));
 
-/* sb_syslog.c */
+/* sb_log.c — the vsyslog LVO */
 VOID bsd_vsyslog(LONG pri asm("d0"), STRPTR msg asm("a0"), APTR args asm("a1"), struct SocketBase *base asm("a6"));
 
 /* sb_sockpass.c — fd duplication and task handoff */
@@ -778,6 +883,10 @@ LONG bsd_InterfaceConfigUnsupported(struct SocketBase *base asm("a6"));
 
 /* sb_netstat.c */
 LONG bsd_GetNetworkStatistics(LONG type asm("d0"), LONG version asm("d1"), APTR destination asm("a0"), LONG size asm("d2"), struct SocketBase *base asm("a6"));
+
+/* sb_route.c — synthesized rt_msghdr route table (Add/Delete/Change stay stubs) */
+APTR bsd_GetRouteInfo(LONG af asm("d0"), LONG flags asm("d1"), struct SocketBase *base asm("a6"));
+VOID bsd_FreeRouteInfo(APTR table asm("a0"), struct SocketBase *base asm("a6"));
 
 /* sb_gai.c */
 LONG bsd_getaddrinfo(STRPTR hostname asm("a0"), STRPTR servname asm("a1"), struct sb_addrinfo *hints asm("a2"), struct sb_addrinfo **res asm("a3"), struct SocketBase *base asm("a6"));

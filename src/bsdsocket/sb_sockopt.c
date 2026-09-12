@@ -11,6 +11,7 @@
 #include <lwip/tcp.h>
 #include <lwip/igmp.h>
 #include <lwip/ip_addr.h>
+#include <lwip/raw.h>
 
 #include <debug.h>
 
@@ -131,6 +132,11 @@ LONG bsd_setsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
         case SB_SO_SNDBUF:
         case SB_SO_RCVBUF:
             break; /* accepted, fixed internally */
+        case SB_SO_OOBINLINE:
+            /* affects marks latched from now on; a byte already excised
+             * into oobByte stays out-of-band */
+            s->oobInline = val != 0;
+            break;
         case SB_SO_LINGER:
         {
             const struct sb_linger *lg = optval;
@@ -162,6 +168,8 @@ LONG bsd_setsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
             if (s->type == SBT_TCP && s->connected && s->pcb.tcp != NULL &&
                 tcp_sndbuf(s->pcb.tcp) > 0)
                 ev |= SB_FD_WRITE;
+            if (s->oobState == SB_OOB_MARKED || s->oobState == SB_OOB_HAVE)
+                ev |= SB_FD_OOB;
             if (ev != 0)
                 sb_event(s, ev);
             break;
@@ -220,6 +228,19 @@ LONG bsd_setsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
                 e = sb_mcast_leave(s, mreq->imr_multiaddr, mreq->imr_interface);
             break;
         }
+        case SB_IP_HDRINCL:
+            /* Raw sockets only: the caller supplies the complete IP header
+             * and lwIP transmits it verbatim. */
+            if (s->type != SBT_RAW || s->pcb.raw == NULL)
+            {
+                e = SB_EINVAL;
+                break;
+            }
+            if (val)
+                raw_set_flags(s->pcb.raw, RAW_FLAGS_HDRINCL);
+            else
+                raw_clear_flags(s->pcb.raw, RAW_FLAGS_HDRINCL);
+            break;
         case SB_IP_MULTICAST_TTL:
         case SB_IP_MULTICAST_LOOP:
         case SB_IP_MULTICAST_IF:
@@ -327,6 +348,9 @@ LONG bsd_getsockopt(LONG sock asm("d0"), LONG level asm("d1"), LONG optname asm(
         break;
     case SB_SO_RCVBUF:
         val = s->type == SBT_TCP ? TCP_WND : 0xFFFF;
+        break;
+    case SB_SO_OOBINLINE:
+        val = s->oobInline;
         break;
     default:
         return sb_fail(base, SB_ENOPROTOOPT);

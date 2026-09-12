@@ -5,9 +5,11 @@
  * Enumerates interfaces via the Roadshow interface-query API
  * (ObtainInterfaceList / QueryInterfaceTagList) and prints each one's
  * address, netmask, broadcast, MTU, MAC, link state, address source
- * (DHCP/static) and DNS servers. It never configures anything — the stack
- * is configured from ENVARC:netstack.prefs. (Gateway/routes are not part
- * of the interface-query API and are not shown, as with classic ifconfig.)
+ * (DHCP/static) and DNS servers. It never configures anything — interfaces
+ * are added with AddNetInterface, stack-wide settings live in
+ * ENVARC:netstack.prefs. Loopback is omitted from the enumeration by the
+ * library, as in Roadshow. (Gateway/routes are not part of the
+ * interface-query API and are not shown, as with classic ifconfig.)
  *
  * A bsdsocket.library client, so it uses the NDK bsdsocket headers and
  * their inline glue rather than open-coding LVO stubs.
@@ -112,6 +114,11 @@ int main(void)
         return 0;
     }
 
+    if (list->lh_Head->ln_Succ == NULL)
+    {
+        /* the normal state right after the stack boots: loopback only */
+        printf("no network interfaces (loopback only) - add one with AddNetInterface\n");
+    }
     for (struct Node *n = list->lh_Head; n->ln_Succ != NULL; n = n->ln_Succ)
         print_interface((STRPTR)n->ln_Name);
 

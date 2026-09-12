@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * SocketBaseTagList — the per-opener configuration dispatcher: signal
- * masks, errno/h_errno redirection, syslog configuration, fd-table growth,
- * the release string, Roadshow capability probes and the status/byte
- * counters. Returns 0 on success or the 1-based index of the failing tag.
+ * masks, errno/h_errno redirection and texts, syslog configuration and the
+ * stack-wide log hook, fd-table growth, the release string, Roadshow
+ * capability probes and the status/byte counters. Returns 0 on success or
+ * the 1-based index of the failing tag.
  */
 
 #include "sb_base.h"
@@ -149,6 +150,23 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
             else
                 *valp = base->logMask;
             break;
+        case SBTC_LOG_HOOK:
+            /* stack-wide, unlike the four above: the one hook every log
+             * line of every opener and of the stack itself goes to */
+            if (isSet)
+                sb_log_set_hook(SB_ROOT(base), (struct Hook *)*valp, base);
+            else
+                *valp = (ULONG)SB_ROOT(base)->logHook;
+            break;
+        case SBTC_ERRNOSTRPTR:
+        case SBTC_HERRNOSTRPTR:
+            /* error code in, pointer to its text out — by reference only,
+             * the cell is both input and output */
+            if (isSet || !isRef)
+                return index;
+            *valp = (ULONG)(code == SBTC_ERRNOSTRPTR ? sb_errno_text((LONG)*valp)
+                                                     : sb_herrno_text((LONG)*valp));
+            break;
         case SBTC_DTABLESIZE:
             if (isSet)
             {
@@ -265,13 +283,22 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
             struct netif *nif;
             NETIF_FOREACH(nif)
             {
-                if (nif->name[0] == 'l' && nif->name[1] == 'o')
+                if (sb_if_is_loopback(nif))
                     continue; /* loopback is not an "interface" here */
                 if (netif_is_up(nif) && ip4_addr_get_u32(netif_ip4_addr(nif)) != 0)
-                    st |= SBSYSSTAT_Interfaces | SBSYSSTAT_BCast_Interfaces;
+                    st |= SBSYSSTAT_Interfaces | SBSYSSTAT_BCast_Interfaces |
+                          /* such an interface always carries an on-link net
+                           * route, which is exactly what bsd_GetRouteInfo
+                           * synthesizes for it — so "routing information is
+                           * configured" tracks the same condition here. The
+                           * always-present loopback route is deliberately not
+                           * counted: it would make the Roadshow CHECK ROUTES
+                           * condition permanently satisfied, hence useless. */
+                          SBSYSSTAT_Routes;
             }
-            if (ip4_addr_get_u32(ip_2_ip4(dns_getserver(0))) != 0)
+            if (sb_dns_first_server() != NULL)
                 st |= SBSYSSTAT_Resolver;
+            /* the default route is the narrower condition: a gateway on top */
             if (netif_default != NULL &&
                 ip4_addr_get_u32(netif_ip4_gw(netif_default)) != 0)
                 st |= SBSYSSTAT_Routes | SBSYSSTAT_DefaultRoute;

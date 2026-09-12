@@ -19,7 +19,9 @@
 #include <perf.h> /* struct lock_prof: core-lock wait/hold profiling */
 
 struct Device;
+struct NetIfBase;
 struct NetdevIf;
+struct Sana2If;
 
 /* Slab front-end size classes over the packet heap (see netstack_mem.c). */
 #define NS_SLAB_CLASSES 3
@@ -36,18 +38,36 @@ struct NetStack
 
     ULONG ns_RandState;
 
-    /* v1: the single attached NIC; routes the lwIP heap to its DMA
-     * allocator (multi-netif TX pools are a design-phase open question) */
-    struct NetdevIf *ns_ActiveNetdev;
+    /* The single attached hardware interface, seen two ways. ns_ActiveIf is
+     * the backend-agnostic view (identity, VLAN, multicast set — what
+     * sb_ifquery and the base hooks read); the typed pointers below are the
+     * backend views, of which EXACTLY ONE is non-NULL and equal to
+     * ns_ActiveIf whenever it is set. Heap routing and the outermost-lock
+     * TX hooks key on the typed pointers (NULL = cheap no-op), so they stay
+     * branch-light and cast-free. */
+    struct NetIfBase *ns_ActiveIf;
+    struct NetdevIf *ns_ActiveNetdev; /* also routes the lwIP heap to the
+                                         driver's DMA allocator; NULL means
+                                         the AllocMem fallback serves it */
+    struct Sana2If *ns_ActiveSana2;
 
     ULONG ns_MemInUse;  /* diagnostic */
 
-    /* packet-heap slab front-end (netstack_mem.c): O(1) per-class freelists
-     * over arenas from the attached driver's DMA pool; all access under
-     * ns_Core. Freelist links live inside the free slots. */
-    void *ns_SlabFree[NS_SLAB_CLASSES];   /* intrusive freelist heads */
-    void *ns_SlabArenas[NS_SLAB_CLASSES]; /* NsSlabArena chains */
-    ULONG ns_SlabGrows[NS_SLAB_CLASSES];  /* diagnostic */
+    /* packet-heap slab front-end (netstack_mem.c): O(1) per-class freelists,
+     * all access under ns_Core, freelist links live inside the free slots.
+     * TWO disjoint worlds that never share a freelist or an arena: the DMA
+     * world (arenas from the attached netdev's allocator, returned at
+     * detach) and the exec world (AllocMem arenas serving the no-netdev
+     * case — SANA-II interfaces and the pre-attach window — persisting
+     * until the stack task's final teardown). Which world serves an
+     * allocation follows ns_ActiveNetdev; a block's origin word routes its
+     * free back to the right world whenever it dies. */
+    void *ns_SlabFree[NS_SLAB_CLASSES];    /* DMA-world freelist heads */
+    void *ns_SlabArenas[NS_SLAB_CLASSES];  /* DMA-world NsSlabArena chains */
+    ULONG ns_SlabGrows[NS_SLAB_CLASSES];   /* diagnostic */
+    void *ns_SlabFreeX[NS_SLAB_CLASSES];   /* exec-world freelist heads */
+    void *ns_SlabArenasX[NS_SLAB_CLASSES]; /* exec-world arena chains */
+    ULONG ns_SlabGrowsX[NS_SLAB_CLASSES];  /* diagnostic */
 
     /* Core-lock profiling (emu68-common lock_prof): wait/hold timing of
      * ns_Core, outermost holds only. Written under PROFILE; the field is
@@ -60,9 +80,15 @@ struct NetStack
 /* The singleton (defined in netstack.c). */
 extern struct NetStack netstack;
 
-/* One-time init. @timerBase: an opened timer.device base (UNIT_ECLOCK or
- * UNIT_MICROHZ; only ReadEClock is used) owned by the caller and valid for
- * the stack's lifetime. Calls lwip_init() internally (under the lock). */
+/* The stack task's timer.device base (defined in netstack.c, set by
+ * netstack_init): ReadEClock for the ms clock, GetSysTime for timestamps. */
+extern struct Device *TimerBase;
+
+/* Init. @timerBase: an opened timer.device base (UNIT_ECLOCK or UNIT_MICROHZ;
+ * only library calls are used) owned by the caller and valid for the stack's
+ * lifetime. The first call runs lwip_init() (under the lock); later calls
+ * (stack-task restart while the library stays loaded) only re-aim the time
+ * base. */
 void netstack_init(struct Device *timerBase);
 
 void netstack_lock(void);
@@ -74,9 +100,16 @@ void netstack_tick(void);
 /* Monotonic milliseconds (also lwIP's sys_now). Call under the lock. */
 ULONG netstack_now_ms(void);
 
-/* Return the slab arenas to @nd's DMA pool and reset the freelists.
- * netdevif_destroy calls this under the core lock, before it clears
- * ns_ActiveNetdev. */
+/* Return the DMA-world slab arenas to @nd's DMA pool and reset that
+ * world's freelists. netdevif_destroy calls this under the core lock,
+ * before it clears ns_ActiveNetdev. The exec world is untouched. */
 void netstack_slab_detach(struct NetdevIf *nd);
+
+/* Free the exec-world arenas and forget their freelists. Only for the
+ * stack task's final teardown — every interface down, every client gone,
+ * nothing left that could hold a live slab block. A restarted stack task
+ * regrows on demand; without this call the arenas would outlive the
+ * library at expunge. */
+void netstack_slab_exec_release(void);
 
 #endif /* LWIPAMIGA_NETSTACK_H */

@@ -49,9 +49,14 @@ add_library(netstack STATIC
     ${CMAKE_SOURCE_DIR}/port/amiga/netstack.c
     ${CMAKE_SOURCE_DIR}/port/amiga/netstack_mem.c
     ${CMAKE_SOURCE_DIR}/port/amiga/netstack_diag.c
+    ${CMAKE_SOURCE_DIR}/port/amiga/netif_base.c
+    ${CMAKE_SOURCE_DIR}/port/amiga/rx_gro.c
     ${CMAKE_SOURCE_DIR}/port/amiga/netdev_if.c
     ${CMAKE_SOURCE_DIR}/port/amiga/netdev_rx.c
     ${CMAKE_SOURCE_DIR}/port/amiga/netdev_tx.c
+    ${CMAKE_SOURCE_DIR}/port/amiga/sana2_if.c
+    ${CMAKE_SOURCE_DIR}/port/amiga/sana2_tx.c
+    ${CMAKE_SOURCE_DIR}/port/amiga/sana2_pump.c
 )
 
 target_compile_options(netstack PRIVATE -O3 ${LWIP_WARN})
@@ -88,6 +93,9 @@ add_executable(bsdsocket_library
     bsdsocket/vectors.c
     bsdsocket/sb_config.c
     bsdsocket/sb_stack.c
+    bsdsocket/sb_netdev.c
+    bsdsocket/sb_sana.c
+    bsdsocket/sb_netctl.c
     bsdsocket/sb_mdns.c
     bsdsocket/sb_socket.c
     bsdsocket/sb_api.c
@@ -95,17 +103,19 @@ add_executable(bsdsocket_library
     bsdsocket/sb_sockopt.c
     bsdsocket/sb_select.c
     bsdsocket/sb_errno.c
+    bsdsocket/sb_log.c
     bsdsocket/sb_taglist.c
     bsdsocket/sb_inet.c
     bsdsocket/sb_resolver.c
     bsdsocket/sb_netdb.c
-    bsdsocket/sb_syslog.c
     bsdsocket/sb_sockpass.c
     bsdsocket/sb_dnsconfig.c
     bsdsocket/sb_ifquery.c
     bsdsocket/sb_gai.c
     bsdsocket/sb_rdns.c
     bsdsocket/sb_netstat.c
+    bsdsocket/sb_arp.c
+    bsdsocket/sb_route.c
     bsdsocket/end.c
 )
 
@@ -157,6 +167,10 @@ set_target_properties(bsdsocket_library PROPERTIES
 # (Developer/include/devices/ — see the root CMakeLists packaging step), hence
 # the devices/ path: it is a device ABI.
 install(FILES ${CMAKE_SOURCE_DIR}/include/devices/netdev.h DESTINATION include/devices)
+
+# SIOC*ARP request codes for IoctlSocket — the NDK netinclude has struct arpreq
+# but no codes. Ships in the SDK (Developer/include/net/) for third parties.
+install(FILES ${CMAKE_SOURCE_DIR}/include/net/if_arp_ioctl.h DESTINATION include/net)
 
 add_library(netdev_headers INTERFACE)
 target_include_directories(netdev_headers
@@ -261,6 +275,165 @@ target_include_directories(mdns PRIVATE ${CMAKE_SOURCE_DIR}/include)
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/mdns
     DESTINATION C
+)
+
+# --- Roadshow-style network commands ----------------------------------------
+# AddNetInterface / RemoveNetInterface / NetShutdown: runtime interface
+# management and stack shutdown over the stack's control port
+# (include/netstack_ctl.h, shared with sb_netctl.c). Roadshow-compatible CLI
+# templates; the interface config-file format (DEVS:NetInterfaces/) is
+# lwip-amiga's own. Installed under their canonical mixed-case names.
+add_executable(addnetinterface
+    netctl/addnetinterface.c
+    netctl/netctl_client.c
+)
+target_compile_options(addnetinterface PRIVATE -Os ${LWIP_WARN})
+target_include_directories(addnetinterface PRIVATE ${CMAKE_SOURCE_DIR}/include)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/addnetinterface
+    DESTINATION C
+    RENAME AddNetInterface
+)
+
+add_executable(removenetinterface
+    netctl/removenetinterface.c
+    netctl/netctl_client.c
+)
+target_compile_options(removenetinterface PRIVATE -Os ${LWIP_WARN})
+target_include_directories(removenetinterface PRIVATE ${CMAKE_SOURCE_DIR}/include)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/removenetinterface
+    DESTINATION C
+    RENAME RemoveNetInterface
+)
+
+add_executable(netshutdown
+    netctl/netshutdown.c
+    netctl/netctl_client.c
+)
+target_compile_options(netshutdown PRIVATE -Os ${LWIP_WARN})
+target_include_directories(netshutdown PRIVATE ${CMAKE_SOURCE_DIR}/include)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/netshutdown
+    DESTINATION C
+    RENAME NetShutdown
+)
+
+# --- Arp: ARP table display and control --------------------------------------
+# 4.3BSD arp(8) ported onto the library's SIOC*ARP IoctlSocket requests
+# (include/net/if_arp_ioctl.h, shared with sb_arp.c). Roadshow-compatible
+# template minus the PUBLISH/PROXY switches (unsupported by the stack).
+add_executable(arp
+    arp/arp.c
+)
+target_compile_options(arp PRIVATE -Os ${LWIP_WARN})
+target_include_directories(arp PRIVATE ${CMAKE_SOURCE_DIR}/include)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/arp
+    DESTINATION C
+)
+
+# --- ping / traceroute: 4.4BSD network diagnostics ---------------------------
+# Mike Muuss's ping and Van Jacobson's traceroute (4.4BSD-Lite2, via Olaf
+# Barthel's Roadshow port from the AmigaOS 3.2 NDK; Amiga-side changes are
+# public domain). Roadshow-compatible templates and output. traceroute sends
+# through the raw-socket IP_HDRINCL path (sb_sockopt.c). The $VER cookie
+# carries the component release version, stamped here like the library's.
+set(TOOL_VERSION "${lwip-amiga_VERSION_MAJOR}.${lwip-amiga_VERSION_MINOR}")
+
+add_executable(ping
+    ping/ping.c
+)
+target_compile_options(ping PRIVATE -Os ${LWIP_WARN})
+target_compile_definitions(ping PRIVATE
+    TOOL_VERSION="${TOOL_VERSION}"
+    TOOL_DATE="${CURRENT_DATE}"
+)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/ping
+    DESTINATION C
+)
+
+add_executable(traceroute
+    traceroute/traceroute.c
+)
+target_compile_options(traceroute PRIVATE -Os ${LWIP_WARN})
+target_compile_definitions(traceroute PRIVATE
+    TOOL_VERSION="${TOOL_VERSION}"
+    TOOL_DATE="${CURRENT_DATE}"
+)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/traceroute
+    DESTINATION C
+)
+
+# --- GetNetStatus: scriptable network readiness check -------------------------
+# Roadshow-compatible CHECK conditions over one SBTC_SYSTEM_STATUS query;
+# unsatisfied selected conditions exit RETURN_WARN for "IF WARN" boot scripts.
+add_executable(getnetstatus
+    getnetstatus/getnetstatus.c
+)
+target_compile_options(getnetstatus PRIVATE -Os ${LWIP_WARN})
+target_compile_definitions(getnetstatus PRIVATE
+    TOOL_VERSION="${TOOL_VERSION}"
+    TOOL_DATE="${CURRENT_DATE}"
+)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/getnetstatus
+    DESTINATION C
+    RENAME GetNetStatus
+)
+
+# --- ShowNetStatus: route/ifconfig/netstat-style diagnostics ------------------
+# Roadshow-compatible sections over the query LVOs (interface list/detail,
+# DNS, GetRouteInfo routes, SIOCGARPT ARP cache, GetNetworkStatistics protocol
+# stats and socket tables). Needs include/ for net/if_arp_ioctl.h.
+add_executable(shownetstatus
+    shownetstatus/shownetstatus.c
+)
+target_compile_options(shownetstatus PRIVATE -Os ${LWIP_WARN})
+target_include_directories(shownetstatus PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(shownetstatus PRIVATE
+    TOOL_VERSION="${TOOL_VERSION}"
+    TOOL_DATE="${CURRENT_DATE}"
+)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/shownetstatus
+    DESTINATION C
+    RENAME ShowNetStatus
+)
+
+# --- NetLogViewer: log capture commodity --------------------------------------
+add_executable(netlogviewer
+    netlogviewer/netlogviewer.c
+    netlogviewer/nlv_args.c
+    netlogviewer/nlv_window.c
+)
+target_compile_options(netlogviewer PRIVATE -Os ${LWIP_WARN})
+target_compile_definitions(netlogviewer PRIVATE
+    TOOL_VERSION="${TOOL_VERSION}"
+    TOOL_DATE="${CURRENT_DATE}"
+)
+target_link_libraries(netlogviewer PRIVATE amiga)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/netlogviewer
+    DESTINATION C
+    RENAME NetLogViewer
+)
+# Workbench icon (committed static asset; see dist/icons/README.md): carries
+# the CX_POPKEY/CX_PRIORITY/CX_POPUP tooltypes and DONOTWAIT.
+install(
+    FILES ${CMAKE_SOURCE_DIR}/dist/NetLogViewer.info
+    DESTINATION C
+)
+
+# Sample interface config. Staged under Storage/NetInterfaces (the inactive
+# drawer, AmigaOS-style) so a dev-loop upload can never feed the
+# DEVS:NetInterfaces boot wildcard a stray file; the Installer copies it to
+# DEVS:NetInterfaces/genet only when absent.
+install(
+    FILES ${CMAKE_SOURCE_DIR}/prefs/NetInterfaces/genet
+    DESTINATION Storage/NetInterfaces
 )
 
 # The shippable library.

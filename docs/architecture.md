@@ -11,21 +11,28 @@ flowchart TB
     abi["<b>netdev ABI</b> — include/netdev.h<br/>direct-call, context-based, batched, zero-copy"]
     drv["<b>genet.device</b><br/>first hardware driver"]
     nic["BCM GENET NIC<br/>(Pi4 / CM4 under PiStorm / Emu68)"]
+    s2["<b>SANA-II backend</b> — port/amiga/sana2_*.c<br/>cooked-mode IORequests, client-side RX pump"]
+    s2drv["any SANA-II driver<br/>(Poseidon USB NICs, network cards, ...)"]
 
     app -->|library LVOs| bsd
     bsd -->|tcp_/udp_/raw_ calls under the core lock| lwip
     lwip -->|NetDevDrvOps / NetDevStackOps| abi
     abi --> drv
     drv --> nic
+    lwip --> s2
+    s2 -->|IOSana2Req| s2drv
 ```
 
 Two invariants hold across the whole diagram:
 
-- **The stack never allocates packet memory.** RX buffers are allocated, DMA-filled, and
-  owned by the driver; the stack borrows them and returns them via a release hook. TX
-  memory is stack-owned but drawn from a DMA allocator the driver provides at attach. This
-  is what makes the datapath zero-copy and DMA-correct on a platform where only the
-  driver knows which RAM its engine can reach.
+- **The stack never hands hardware memory it cannot reach.** On the netdev path the
+  stack never allocates packet memory at all: RX buffers are allocated, DMA-filled and
+  owned by the driver (the stack borrows them and returns them via a release hook), and
+  TX memory is stack-owned but drawn from a DMA allocator the driver provides at attach —
+  zero-copy and DMA-correct on a platform where only the driver knows which RAM its
+  engine can reach. The SANA-II backend is copy-based by the ABI's own design (the
+  driver copies every frame through client callbacks), so its packet memory is plain
+  stack-owned heap and no DMA-reachability contract applies.
 - **A single core semaphore serializes all lwIP access, and Exec signals do the blocking.**
   There is no lwIP worker thread; callers run stack code in their own context under the
   lock, and blocking sockets sleep on an Exec signal — no lost wakeups.
@@ -56,32 +63,81 @@ table included — so every opening task gets its own `errno`, fd table, wait si
   per-call deadline via the opener's `timer.device` request (`sb_wait_to`).
 - **The in-library stack task** (`sb_stack.c`) is a DOS process started under the root's
   open lock by the first `OpenLibrary()`. It reads `ENV:netstack.prefs` (`sb_config.c`:
-  driver selection from `DEVS:Networks/`, DHCP or a static address, DNS, hostname — flat
-  `KEY = VALUE`, every key optional, missing file = DHCP on `networks/genet.device`
-  unit 0), initializes `netstack`, attaches the configured driver over the netdev ABI,
-  brings the interface up, then ticks `sys_check_timeouts()` every 100 ms. It runs at
-  **priority 10** (above the dynamic-scheduler band, matching the driver's unit task) so
-  it is not starved by CPU-bound application tasks.
-- **A running stack is never expunged** (`main.c` `LibExpunge`). Once the stack task
-  exists the library refuses expunge and defers with `LIBF_DELEXP`, exactly as it does
-  while openers remain. `lib_OpenCnt` legitimately reaches zero all the time — apps that
-  open and close the library around each call do it every few seconds — and expunging
-  there would drop the DHCP lease, detach the driver, and unload code the driver's unit
-  task still calls through `nda_StackOps`. `sb_stack_stop()` therefore only runs for a stack that never started.
+  **stack-wide settings only** — hostname, search domain, explicit DNS servers, mDNS;
+  flat `KEY = VALUE`, every key optional), initializes `netstack`, publishes the
+  control port, and ticks `sys_check_timeouts()` every 100 ms. The boot state is
+  **loopback only** (the Roadshow model): network interfaces are added at runtime by
+  the `AddNetInterface` command from per-interface files in `DEVS:NetInterfaces/`
+  (the file name is the interface name), normally from `S:Network-Startup`. The task
+  runs at **priority 10** (above the dynamic-scheduler band, matching the driver's
+  unit task) so it is not starved by CPU-bound application tasks.
+- **A running stack is never expunged — except through the NetShutdown handshake**
+  (`main.c` `LibExpunge`). While the stack task exists the library refuses expunge and
+  defers with `LIBF_DELEXP`: `lib_OpenCnt` legitimately reaches zero all the time — apps
+  that open and close the library around each call do it every few seconds — and
+  expunging there would drop the DHCP lease, detach the driver, and unload code the
+  driver's unit task still calls through `nda_StackOps`. The one sanctioned way down is
+  the control port's SHUTDOWN op (the `NetShutdown` command): the stack asks every
+  registered opener to let go (each opener's `SBTC_BREAKMASK` signal), waits for the
+  last `CloseLibrary`, tears the interface down, and exits — its final act, under
+  `Forbid()`, is the OK reply, upon which `NetShutdown` calls `RemLibrary()` and the
+  now-taskless expunge path runs for real. A fresh `OpenLibrary` then reloads the
+  library from disk and starts anew (`LibOpen` refuses new clients while a shutdown is
+  pending).
 
 The API surface is grouped topically: lifecycle/control (`sb_api.c`), the data path
 (`sb_io.c`), options and events (`sb_sockopt.c`), `WaitSelect` (`sb_select.c`), errno
 plumbing (`sb_errno.c`), `SocketBaseTagList` (`sb_taglist.c`), address conversion
 (`sb_inet.c`), the resolver (`sb_resolver.c`), the netdb tables (`sb_netdb.c`), syslog
-(`sb_syslog.c`), socket handoff (`sb_sockpass.c`), DNS configuration
-(`sb_dnsconfig.c`) and getaddrinfo (`sb_gai.c`); the generated LVO jump table is
-`vectors.c` (139 slots emitted from the SFD by `scripts/gen-vectors.py`).
+and the runtime log behind it (`sb_log.c`), socket handoff
+(`sb_sockpass.c`), DNS configuration (`sb_dnsconfig.c`) and getaddrinfo (`sb_gai.c`);
+the generated LVO jump table is `vectors.c` (139 slots emitted from the SFD by
+`scripts/gen-vectors.py`).
 
 Interface **status** is read-only (`sb_ifquery.c`): the Roadshow interface-query LVOs
 (`ObtainInterfaceList` / `QueryInterfaceTagList`) report the live netif's address, mask,
-MTU, MAC, link state and DNS, which the bundled `netinfo` CLI prints ifconfig-style. The
-interface-*config* LVOs are declined (the stack is configured only from
-`ENVARC:netstack.prefs`); they refuse with `EINVAL`.
+MTU, MAC, link state and DNS, which the bundled `netinfo` CLI prints ifconfig-style.
+Interfaces answer to two names — the Roadshow-style identity from the config file
+("genet", stamped into `NetdevIf` at add time) and lwIP's short name ("nd0");
+`sb_if_find()` resolves both. The interface-*config* LVOs are declined with `EINVAL`:
+runtime configuration runs over the private control port instead (below).
+
+### Runtime control — the netstack control port (`include/netstack_ctl.h`, `sb_netctl.c`)
+
+The stack task owns a public MsgPort, `bsdsocket.netctl`, for its whole lifetime; the
+`AddNetInterface` / `RemoveNetInterface` / `NetShutdown` commands drive it with a
+versioned message protocol (private to this component — library and tools build
+together; the library rejects a version mismatch). Everything is serviced on the stack
+task, which serializes all lifecycle work by construction: `OpenDevice` needs a Process,
+and a netdev `DoIO` must never run under the core lock.
+
+The reply contract: every delivered message is answered — inline, or *parked* and
+answered later. `ADD_IF` executes the attach/configure (`sb_netdev_up`) and parks the
+reply until the interface is *operational*: link up for a static config, DHCP lease
+bound for a dynamic one (a lease implies link) — checked by the 100 ms tick
+(explicitly configured DNS servers are re-applied after a lease so config beats DHCP).
+The client owns the timeout: `CANCEL_ADD` recalls a parked add — after a final
+readiness check that resolves the cancel-vs-completion race in the add's favor — and
+the interface *stays up*, becoming usable when the link or lease arrives (late beats
+never). `REM_IF` refuses
+with a socket count when connections are still bound to the interface address
+(established/listening TCP and bound UDP; TIME_WAIT is stack-owned and ignored) unless
+forced. `SHUTDOWN`/`CANCEL_SHUTDOWN` implement the expunge handshake above. Teardown
+withdraws the port under `Forbid()` and drains stragglers with `ERR_INACTIVE`, so no
+client message is ever lost — which is what lets the commands keep messages on their
+own stacks.
+
+### The runtime log — the log hook (`sb_log.c`, `port/amiga/netstack_diag.c`)
+
+Operational events — interface bring-up and removal, link and address changes, DHCP
+leases, mDNS, configuration mistakes, failures — and every client `syslog()` line go
+through one facility that exists at every build tier (the `Kprintf` family stays the
+compile-time trace tool and is untouched). The stack's own sites call `SB_LOG(pri, ...)`
+(`netstack_log`, C format semantics, `<sys/syslog.h>` priorities, never per packet or
+per tick); the port layer formats with the component's one formatter and hands the
+finished line to the sink the library registered at init; the lwIP netif ext-callback
+observer in `sb_log.c` turns link and address events into lines so no emitter has to
+remember them.
 
 ## Layer 2 — lwIP core + Amiga port layer (`lwip/`, `port/amiga/`)
 
@@ -118,10 +174,14 @@ merging (not concatenating) the queues in `tcp_rexmit_rto_prepare`.
 - **Time / RNG** (`netstack.c`): `sys_now()` derives monotonic milliseconds from
   the `timer.device` EClock; `LWIP_RAND` is an xorshift.
 - **Heap** (`netstack_mem.c`): the lwIP heap
-  (`MEM_CUSTOM_*` → `netstack_malloc`/`free`) routes every `PBUF_RAM`/TX payload to the
-  active driver's DMA allocator — fronted by three slab size classes — with an 8-byte
-  origin header so frees route correctly across attach/detach (and an `AllocMem`
-  fallback when no NIC is attached).
+  (`MEM_CUSTOM_*` → `netstack_malloc`/`free`) serves every `PBUF_RAM`/TX payload from
+  three slab size classes in one of two disjoint worlds, selected by whether a netdev
+  is attached: the **DMA world** (arenas from the active driver's DMA allocator,
+  returned at detach) and the **exec world** (`AllocMem` arenas serving SANA-II
+  interfaces, the pre-attach window and loopback; they persist until the stack task's
+  final teardown). An 8-byte origin header routes every free back to the world that
+  allocated it, whichever interface is active by then; only oversize requests take a
+  one-off fallback path.
 
 ## Layer 3 — netif ↔ netdev glue (`port/amiga/netdev_*.c`)
 
@@ -144,6 +204,79 @@ knowledge the exec side doesn't have).
   a zero-copy `pbuf_custom` and feeds `ethernet_input`. Freeing the pbuf calls
   `ndo_RxRelease(cookie)`, recycling the buffer to the driver.
 - **Link**: `nso_LinkChange` drives `netif_set_link_up`/`down`.
+
+## Layer 3b — the SANA-II backend (`port/amiga/sana2_*.c`, `src/bsdsocket/sb_sana.c`)
+
+The compatibility backend: the same lwIP netif over a classic SANA-II driver.
+Both backends embed **`struct NetIfBase`** (`netif_base.h`) first in their
+interface struct — the lwIP netif, a kind tag, the identity block the query
+LVOs read, the in-band VLAN TCI and the refcounted joined-multicast MAC set —
+so everything backend-agnostic (`sb_ifquery`, the VLAN hooks, the IGMP hook,
+the control port) dereferences the base and never cares which driver ABI is
+behind it. The stack task resolves the backend per interface at add time:
+an explicit `TYPE=NETDEV|SANA2`, or `TYPE=AUTO` (the default) probing with
+`NSCMD_DEVICEQUERY` — `NSDEVTYPE_SANA2` means SANA-II, `NETDEV_CMD_ATTACH` in
+the command list means netdev, and a device without NSD support is assumed
+SANA-II (legacy drivers predate it).
+
+The backend runs the driver in **cooked mode** — lwIP keeps building and
+consuming full Ethernet frames, and the glue translates the 14-byte header at
+the boundary (RAW frame mode is unreliable across real drivers). SANA-II is
+copy-based by construction: the driver copies every frame through
+client-supplied callbacks (`S2_CopyToBuff`/`S2_CopyFromBuff`, register-
+convention, interrupt-callable — pure copy loops, no Exec calls, no locks).
+
+- **TX** (`sana2_tx.c`): linkoutput, under the core lock, parses the built
+  header into `ios2_DstAddr`/`ios2_PacketType` (`S2_BROADCAST`/`S2_MULTICAST`/
+  `CMD_WRITE` by destination), refs the pbuf as the `CopyFromBuff` cookie
+  (never edited — retransmit-aliased pbufs are cloned, the netdev idiom) and
+  stages the write request on a FIFO; the outermost `netstack_unlock` submits
+  the batch **quick** (`IOF_QUICK` + direct `BeginIO`, the standard quick-I/O
+  contract) — the `netdevif_tx_kick` idiom. A synchronous driver leaves the
+  flag set and the write retires in place: no `ReplyMsg`, no pump wakeup, no
+  per-frame task switch. A queuing driver clears the flag; only those writes
+  reply to the pump. BeginIO under the lock is deadlock-free: SANA-II
+  drivers never take `ns_Core`, and the only client code a synchronous
+  BeginIO calls back is the lock-free copy callback.
+- **RX** (`sana2_pump.c`): SANA-II has no upcall, so a per-interface **pump
+  task** (a Process at priority 10, the client-side analog of a netdev
+  driver's unit task) keeps typed `CMD_READ`s posted — IPv4 + ARP, plus the
+  0x8100 class under VLAN, each owning a heap pbuf with 14 bytes of headroom.
+  The read pool covers the **whole announced TCP window** (`TCP_WND/MSS` +
+  slack, the `netdevif_rx_hold_budget` rule): a SANA-II driver drops any
+  frame that finds no pending read, so anything less loses burst tails.
+  Completions are harvested FIFO (delivery order == wire order — TCP depends
+  on it) and processed in chunks of 64: one short hold, synthesizes
+  the Ethernet header into the headroom, moves the frame out and re-arms the
+  request with a fresh pbuf; the reposts then go back to the driver BEFORE
+  phase B runs, so the reads are never out of service for the duration of
+  TCP input. Between the phases, off the lock, the pump verifies TCP
+  checksums in software and classifies frames for the **shared GRO-lite
+  engine** (`rx_gro.c`, the same in-order-run merge + pure-ACK coalescing
+  the netdev backend uses); phase B then dispatches through the engine
+  under the lock (with the netdev fairness yield — every held merge run is
+  flushed before any lock release).
+- **Lifecycle** (`sb_sana.c`): `S2_DEVICEQUERY` (full-size first, legacy-30
+  retry — the two size conventions are mutually exclusive across driver
+  generations), Ethernet/48-bit gate, `S2_CONFIGINTERFACE` with the **factory**
+  station address (`ios2_DstAddr` — the current address is zeros until first
+  configure), `S2_ONLINE`, pump start **before** `netif_set_up` (a static
+  config's gratuitous ARP needs the TX reply ports stamped). Link state is
+  seeded up (SANA-II has no state query) and tracked thereafter via a
+  re-armed `S2_ONEVENT`; drivers without events keep the seeded state.
+  Multicast joins push as `S2_ADD/DELMULTICASTADDRESS` deltas against a
+  shadow of the last programmed set; stats map `S2_GETGLOBALSTATS` plus
+  exact glue-side byte counters into the same neutral cache netdev fills.
+  Teardown: netif down + TX gate under one hold, the unlock flushes the
+  staged tail, the pump aborts and drains until every request is home —
+  after which the driver holds no pointer of ours.
+
+Checksums are software in both directions (SANA-II has no offload): lwIP
+generates and verifies everything except inbound TCP, which the pump verifies
+off the lock so the GRO-merged headers escape re-verification. Packet memory
+comes from the heap's exec-slab world — netdev remains the zero-copy,
+offloaded performance path; this backend trades that for compatibility with
+every SANA-II driver ever shipped.
 
 ---
 
@@ -257,17 +390,19 @@ unblocked. What is already multi-ready:
   everywhere; multiple instances would coexist as-is.
 - **lwIP and the socket layer iterate**: the multi-netif list is compiled in
   (`NETIF_FOREACH` is already used), DHCP is per-netif, DNS is global by design.
-- **The config schema reserves the extension**: unprefixed `netstack.prefs` keys are
-  interface 0; a future `IFn_` prefix (`IF1_DEVICE`, `IF1_MODE`, ...) adds interfaces
-  without a format break (unknown keys are ignored today).
+- **The config model is per-interface already**: one `DEVS:NetInterfaces/<name>` file
+  per interface, added individually over the control port (`struct NetCtlIfConfig`
+  carries everything, and `NetdevIf` carries its own identity) — more interfaces are
+  more files plus more ADD messages, no format change anywhere.
 
 The blockers, in ascending difficulty:
 
 1. *Cosmetic*: the fixed netif name `"nd"` and the unconditional `netif_set_default` —
    index the name, make the default route config-driven.
-2. *Structural, small*: the single `NetdevIf` embedded in the stack task's context and
-   the one-shot up/down path — becomes an array of interface slots driven by an `IFn_`
-   config loop.
+2. *Structural, small*: the single `NetdevIf` embedded in the stack task's context —
+   becomes an array of interface slots; the up/down path is already per-add
+   (control-port driven), so only the one-slot assumption in `SbStackCtx`/`sb_netctl.c`
+   (`ERR_EXISTS` on a second ADD) needs lifting.
 3. *The hard one*: `netstack.ns_ActiveNetdev` routes the **entire** lwIP heap — every
    `PBUF_RAM`/TX allocation — to one driver's DMA allocator, and lwIP allocates TX pbufs
    *before* routing picks the egress netif. Preferred resolution: a shared stack-owned
@@ -276,7 +411,10 @@ The blockers, in ascending difficulty:
    at the cost of bending the "TX memory comes from the driver's allocator" doctrine
    (would need an attach-time compatible-allocator capability in the ABI). Fallbacks:
    copy at `linkoutput` when the egress unit differs from the allocating one, or forbid
-   heterogeneous DMA domains.
+   heterogeneous DMA domains. **One mix is already safe**: one netdev + one SANA-II
+   interface — with a netdev attached every allocation is DMA-reachable by
+   construction, and the copy-based SANA-II datapath does not care where its pbufs
+   live (frees route home by origin either way).
 
 The gating item is a second netdev driver existing at all (genet is hard-limited to
 unit 0), not the stack refactor — revisit when one is real.

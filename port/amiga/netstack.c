@@ -26,6 +26,7 @@
 
 #include "netstack.h"
 #include "netdev_if.h" /* netdevif_tx_kick / netdevif_tx_reclaim at outermost lock */
+#include "sana2_if.h"  /* sana2if_tx_flush at outermost unlock */
 #include "nsprof.h"
 
 struct NetStack netstack;
@@ -42,22 +43,41 @@ static const char *const ns_perf_names[NSP_SLOT_COUNT] = {
     "recv_lockwait", "recv_copy", "recv_ackflush", "recv_sleep",
     "send_lockwait", "send_write", "send_output", "send_sleep",
     "udp_send",
+    "s2_requeue",
 };
 struct perf ns_perf = { "nsprof", ns_perf_names, ns_perf_slots, NSP_SLOT_COUNT };
 
 void netstack_init(struct Device *timerBase)
 {
-    TimerBase = timerBase;
+    /* One-shot: lwIP state (memp pools, the loopback netif, timers) and the
+     * core lock live in library data space and survive a stack-task exit. A
+     * restarted task (stop via the control port, then a fresh OpenLibrary
+     * while the library stayed loaded) must only re-aim the time base —
+     * running lwip_init() again would add a second loopback netif and reset
+     * pools that parked sockets still reference, and re-InitSemaphore could
+     * wipe a semaphore other tasks know. */
+    static BOOL initialized;
 
-    InitSemaphore(&netstack.ns_Core);
-    lock_prof_init(&netstack.ns_LockProf, "netstack");
+    TimerBase = timerBase;
 
     struct EClockVal ev;
     ULONG freq = ReadEClock(&ev);
     netstack.ns_EClockPerMs = freq / 1000;
     if (netstack.ns_EClockPerMs == 0)
         netstack.ns_EClockPerMs = 1;
+    /* re-baseline the ms clock; ns_Ms keeps running so sys_now() stays
+     * monotonic for lwIP timers that survived a task restart */
     netstack.ns_LastEClockLo = ev.ev_lo;
+
+    if (initialized)
+    {
+        Kprintf("[netstack] re-initialized (stack task restart)\n");
+        return;
+    }
+    initialized = TRUE;
+
+    InitSemaphore(&netstack.ns_Core);
+    lock_prof_init(&netstack.ns_LockProf, "netstack");
     netstack.ns_RandState = ev.ev_lo | 1;
 
     netstack_lock();
@@ -129,10 +149,13 @@ void netstack_unlock(void)
             netif_poll_all();
         }
 
-        /* Publish any TX batch staged during this hold with a single doorbell.
-         * After the loopback drain so loopback-generated TX is included; still
-         * under the lock, so it cannot race the driver's own datapath. */
+        /* Publish any TX batch staged during this hold with a single doorbell
+         * (netdev) or one SendIO burst (SANA-II) — at most one of the typed
+         * pointers is non-NULL, and both calls are NULL-tolerant. After the
+         * loopback drain so loopback-generated TX is included; still under
+         * the lock, so it cannot race the driver's own datapath. */
         netdevif_tx_kick(netstack.ns_ActiveNetdev);
+        sana2if_tx_flush(netstack.ns_ActiveSana2);
     }
     lock_prof_release(&netstack.ns_LockProf, &netstack.ns_Core);
 }
@@ -213,9 +236,8 @@ unsigned int netstack_lwip_rand(void)
  * `return ERR_ARG`), so argument validation still recovers in every build. */
 void netstack_platform_diag(const char *msg)
 {
-    (void)msg; /* the only reader is Kprintf, which compiles out below debug */
-    Kprintf("[lwip] ASSERT: %s — task '%s' halted\n", (ULONG)msg,
-            (ULONG)FindTask(NULL)->tc_Node.ln_Name);
+    netstack_log(NS_LOG_CRIT, "lwIP assertion failed: %s, task '%s' halted", msg,
+                 FindTask(NULL)->tc_Node.ln_Name);
     for (;;)
         Wait(0UL);
 }

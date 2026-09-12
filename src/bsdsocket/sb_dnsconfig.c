@@ -16,6 +16,23 @@
 
 #include "netstack.h"
 
+/* The lwIP server slots are sparse, not packed: netstack.prefs fills them
+ * index-aligned from two independent keys (sb_config.c) and skips the empty
+ * ones, and RemoveDomainNameServer below clears a slot in place rather than
+ * compacting the rest down. So "is a resolver configured?" and "which server
+ * do we talk to?" must both scan, never just look at slot 0. Call under the
+ * core lock. */
+const ip_addr_t *sb_dns_first_server(void)
+{
+    for (u8_t i = 0; i < DNS_MAX_SERVERS; i++)
+    {
+        const ip_addr_t *cur = dns_getserver(i);
+        if (cur != NULL && !ip_addr_isany(cur))
+            return cur;
+    }
+    return NULL;
+}
+
 LONG bsd_AddDomainNameServer(STRPTR address asm("a0"), struct SocketBase *base asm("a6"))
 {
     KprintfT("[bsdsocket] %s: address=%s\n", __func__, address != NULL ? (ULONG)address : (ULONG)"(null)");
@@ -98,6 +115,7 @@ APTR bsd_ObtainDomainNameServerList(struct SocketBase *base asm("a6"))
     }
     _NewMinList(&l->list);
 
+    struct SbNetConfig *cfg = &SB_ROOT(base)->netCfg;
     netstack_lock();
     for (u8_t i = 0; i < DNS_MAX_SERVERS; i++)
     {
@@ -106,13 +124,19 @@ APTR bsd_ObtainDomainNameServerList(struct SocketBase *base asm("a6"))
             continue;
 
         struct sb_DomainNameServerNode *n =
-            AllocVec(sizeof(*n) + 20, MEMF_PUBLIC | MEMF_CLEAR);
+            AllocVec(sizeof(*n) + IP4ADDR_STRLEN_MAX, MEMF_PUBLIC | MEMF_CLEAR);
         if (n == NULL)
             break;
         n->dnsn_Size = sizeof(*n);
         n->dnsn_Address = (STRPTR)(n + 1);
-        n->dnsn_UseCount = 1;
-        ip4addr_ntoa_r(ip_2_ip4(cur), (char *)n->dnsn_Address, 20);
+        /* prefs-configured servers report as static (Roadshow convention:
+         * negative UseCount), DHCP/runtime ones as dynamic. Matched by
+         * address value — a DHCP re-apply can reorder the slots. */
+        n->dnsn_UseCount = (ip4_addr_eq(&cfg->cfg_Dns[0], ip_2_ip4(cur)) ||
+                            ip4_addr_eq(&cfg->cfg_Dns[1], ip_2_ip4(cur)))
+                               ? -1
+                               : 1;
+        ip4addr_ntoa_r(ip_2_ip4(cur), (char *)n->dnsn_Address, IP4ADDR_STRLEN_MAX);
         AddTailMinList(&l->list, &n->dnsn_MinNode);
     }
     netstack_unlock();

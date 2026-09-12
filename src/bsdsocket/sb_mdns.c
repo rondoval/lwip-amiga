@@ -149,8 +149,8 @@ static LONG sb_mdns_register(const char *type, const char *name, UWORD port,
     if (slotOut != NULL)
         *slotOut = (BYTE)slot;
 
-    Kprintf("[bsdsocket] mDNS: advertising %s %s port %lu (slot %ld)\n", rec->mcs_Name,
-            rec->mcs_Type, (ULONG)port, (LONG)slot);
+    SB_LOG(NS_LOG_INFO, "mDNS: advertising %s %s port %lu", rec->mcs_Name, rec->mcs_Type,
+           (ULONG)port);
     return MDNSCTL_OK;
 }
 
@@ -171,7 +171,7 @@ static LONG sb_mdns_unregister(BYTE slot)
         if (err != ERR_OK)
             return MDNSCTL_ERR_PARAM;
 
-        Kprintf("[bsdsocket] mDNS: withdrew %s (slot %ld)\n", rec->mcs_Type, (LONG)slot);
+        SB_LOG(NS_LOG_INFO, "mDNS: withdrew %s", rec->mcs_Type);
         rec->mcs_Type[0] = '\0';
         rec->mcs_Name[0] = '\0';
         rec->mcs_Port = 0;
@@ -200,24 +200,23 @@ void sb_mdns_start(struct netif *nif, const struct SbNetConfig *cfg)
     netstack_unlock();
     if (err != ERR_OK)
     {
-        Kprintf("[bsdsocket] mDNS: responder start failed (%ld)\n", (LONG)err);
+        SB_LOG(NS_LOG_ERR, "mDNS: responder start failed (%ld)", (LONG)err);
         return;
     }
     sbMdnsNetif = nif;
-    Kprintf("[bsdsocket] mDNS: advertising %s.local\n", sbMdnsHost);
+    SB_LOG(NS_LOG_INFO, "mDNS: advertising %s.local", sbMdnsHost);
 
     for (ULONG i = 0; i < cfg->cfg_NumMdnsServices; i++)
     {
         const struct SbCfgMdnsService *s = &cfg->cfg_MdnsServices[i];
         if (sb_mdns_register(s->type, s->name, s->port, NULL) != MDNSCTL_OK)
-            Kprintf("[bsdsocket] netstack.prefs: MDNS_SERVICE '%s' not advertised\n",
-                    s->type);
+            SB_LOG(NS_LOG_WARNING, "netstack.prefs: MDNS_SERVICE '%s' not advertised", s->type);
     }
 
     sbMdnsPort = CreateMsgPort();
     if (sbMdnsPort == NULL)
     {
-        Kprintf("[bsdsocket] mDNS: no control port (out of memory)\n");
+        SB_LOG(NS_LOG_WARNING, "mDNS: no control port (out of memory), the mdns command is unavailable");
         return;
     }
     sbMdnsPort->mp_Node.ln_Name = (char *)MDNSCTL_PORT_NAME;
@@ -252,6 +251,7 @@ void sb_mdns_stop(void)
         mdns_resp_remove_netif(sbMdnsNetif);
         netstack_unlock();
         sbMdnsNetif = NULL;
+        SB_LOG(NS_LOG_INFO, "mDNS: responder stopped");
     }
 }
 

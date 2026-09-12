@@ -7,15 +7,18 @@
 
 A fast, modern TCP/IP stack for classic AmigaOS 3.2.
 
-> **This is not a SANA-II stack.** Almost every Amiga network stack and driver —
-> Roadshow, AmiTCP, Miami, and virtually every network card driver ever written for
-> AmigaOS — speaks SANA-II. lwip-amiga does not. It's built on a new, purpose-built
-> driver interface called `netdev`, designed for speed rather than backward
-> compatibility. Today the only driver that supports it is
+> **Two driver interfaces: `netdev` for speed, SANA-II for everything else.**
+> lwip-amiga is built on a new, purpose-built driver interface called `netdev` —
+> zero-copy, batched, checksum-offloading — and that is where the headline numbers
+> come from. Today the only netdev driver is
 > [`genet.device`](https://github.com/rondoval/emu68-driver-stack), **version 4.x or
 > later** — the onboard Ethernet driver for a Raspberry Pi 4 or CM4 running under
-> PiStorm/Emu68. If your network card only has a SANA-II driver, lwip-amiga will not
-> work with it.
+> PiStorm/Emu68. Everything else — Poseidon USB Ethernet adapters, network cards, and
+> other Ethernet drivers written for AmigaOS — speaks classic SANA-II, and those work
+> too: the stack detects the driver type when an interface is added and drives SANA-II
+> hardware through a compatibility backend (Ethernet-type SANA-II only — no Token Ring,
+> ArcNet, or serial-line drivers). SANA-II is copy-based and offload-blind by design, so
+> expect a fraction of netdev throughput.
 
 > **Who this is for.** lwip-amiga is built for classic Amigas with an accelerator,
 > plenty of RAM, and a fast network connection — machines that can actually put a
@@ -36,9 +39,8 @@ A fast, modern TCP/IP stack for classic AmigaOS 3.2.
   the same API used by Roadshow and AmiTCP. Most existing networking software should
   just work, unless it depends on one of the handful of calls not yet implemented (see
   [Known limitations](#known-limitations)).
-- **Well tested.** Validated against the bsdsocktest conformance suite: 138 of 142 tests
-  pass, and the rest are skipped for advanced features that ordinary software never
-  touches. See [Test results](#test-results) below.
+- **Well tested.** Validated against the bsdsocktest conformance suite: all 142 tests
+  pass — including the TCP out-of-band data and asynchronous-notification corners. See [Test results](#test-results) below.
 
 ## Requirements
 
@@ -51,20 +53,38 @@ A fast, modern TCP/IP stack for classic AmigaOS 3.2.
 
 ## Installing / configuring
 
-lwip-amiga reads its settings from **`ENV:netstack.prefs`** once, the first time a
-program opens `bsdsocket.library`. Keep the master copy in `ENVARC:`, alongside a
-commented example, `ENVARC:netstack.prefs.default`. Every setting is optional — with no
-file at all, lwip-amiga runs DHCP on `networks/genet.device` unit 0.
+**Per-interface files in `DEVS:NetInterfaces/`** — one file per network interface; the
+*file name is the interface name*. Opening `bsdsocket.library` only starts the stack
+with the loopback interface; real interfaces are added by the **`AddNetInterface`**
+command, normally from `S:Network-Startup` at boot:
+
+    AddNetInterface DEVS:NetInterfaces/~(#?.info) QUIET
+
+The installer sets this up with a DHCP interface file named `genet` (a commented sample
+also ships in `SYS:Storage/NetInterfaces/`). One option per line; `#`/`;` start
+comments; an unknown option is an error:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `DEVICE` | *(required)* | which network driver to open (path form loads from `DEVS:`) |
+| `UNIT` | `0` | which unit/port on that driver |
+| `TYPE` | `AUTO` | driver interface: `AUTO` (probe the device), `NETDEV` or `SANA2` |
+| `ADDRESS` | `DHCP` | `DHCP`, or a fixed dotted-quad address |
+| `NETMASK` | — | subnet mask (required with a fixed `ADDRESS`) |
+| `GATEWAY` | — | your router's address (fixed address only, optional) |
+| `MTU` | driver's | lower the packet size limit (may only shrink it) |
+| `VLAN` | — | in-band 802.1Q tag: `vid[,pcp]` (vid 1..4094, pcp 0..7) |
+| `ID` | `HOSTNAME` | DHCP client hostname for this interface |
+
+**Stack-wide settings in `ENV:netstack.prefs`**, read once when the stack starts. Keep
+the master copy in `ENVARC:`, alongside a commented example,
+`ENVARC:netstack.prefs.default`. Every setting is optional:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `DEVICE` | `networks/genet.device` | which network driver to open (path form loads from `DEVS:`) |
-| `UNIT` | `0` | which unit/port on that driver |
-| `MODE` | `DHCP` | `DHCP` (automatic) or `STATIC` (fixed address) |
-| `ADDRESS`, `NETMASK` | — | your fixed IP address and subnet mask (`STATIC`; else the stack falls back to DHCP) |
-| `GATEWAY` | — | your router's address (`STATIC`, optional) |
-| `DNS1`, `DNS2` | — | DNS servers to use (`STATIC`; DHCP supplies its own automatically) |
 | `HOSTNAME` | `amiga` | the name your Amiga reports to the network |
+| `DOMAIN` | — | resolver search domain: dot-less names are retried as `name.DOMAIN` |
+| `DNS1`, `DNS2` | — | explicit DNS servers; they override whatever a DHCP lease supplies |
 | `MDNS` | `yes` | answer for `HOSTNAME.local` on the local network (Bonjour/Avahi), so other machines can reach the Amiga by name with no DNS server |
 | `MDNS_SERVICE` | — | advertise a service over DNS-SD: `_type._proto port [instance name]` (e.g. `_ftp._tcp 21`); repeatable up to 4 times, and services can also be registered while running with the `mdns` command |
 | `NETWORK` | — | adds an entry to the networks database (`getnetbyname`/`getnetbyaddr`); repeatable up to 8 times, `/etc/networks` notation — `name classful-network` (e.g. `homelan 192.168.0`) |
@@ -74,25 +94,8 @@ file at all, lwip-amiga runs DHCP on `networks/genet.device` unit 0.
 lwip-amiga has been run against bsdsocktest, a conformance test suite for
 `bsdsocket.library` implementations, on real Raspberry Pi 4/PiStorm hardware.
 
-**138 of 142 tests pass. 4 are skipped, and none fail.**
+**All 142 tests pass. Nothing is skipped, and none fail.**
 
-Three of the 4 skips cover advanced features that ordinary networking software (web
-browsers, FTP/mail clients, terminal programs, file transfer tools) doesn't use:
-
-- Sending "out-of-band" urgent TCP data (`MSG_OOB`) — 2 tests
-- Asynchronous socket notifications (`FIOASYNC`)
-
-The fourth is more a compliment than a gap: the test tries to force a non-blocking
-`send()` to return `EWOULDBLOCK` by writing 1 MB without ever reading it back, but
-lwip-amiga's TCP send buffer is deliberately sized to exactly 1 MiB (tuned for
-throughput on fast links), so the test's fixed 1 MB probe runs out just short of the
-wall it's trying to hit. The buffer-full/`EWOULDBLOCK` code path is real and
-byte-accurate — this test just wasn't big enough to reach it.
-
-(A fifth raw skip, `ReleaseCopyOfSocket`, is implemented and counted as passing above —
-the raw suite log can show it as skipped if the suite is re-run a second time without
-rebooting, a quirk in the test harness's socket-sharing state rather than a gap in the
-library.)
 
 ## Performance
 
@@ -127,6 +130,46 @@ See [RELEASE-NOTES.md](RELEASE-NOTES.md) for more on what's behind these numbers
 
 ## Tools
 
+- **`AddNetInterface`** — adds network interfaces from `DEVS:NetInterfaces/` files
+  (name, path, or wildcard; Roadshow-compatible template `INTERFACE/M,QUIET/S,
+  TIMEOUT/K/N`). The add blocks until the interface is operational — link up for a
+  static config, DHCP lease bound for a dynamic one (default timeout 30 s); on
+  timeout the interface stays up and keeps trying in the background (exit code 5).
+  Also works from Workbench as the Default Tool of an interface file (`QUIET`/`TIMEOUT`/
+  `PRI` icon tooltypes).
+- **`RemoveNetInterface`** — takes an interface down again (`INTERFACE/A,FORCE/S,
+  QUIET/S`). Refuses while sockets are still bound to the interface's address unless
+  `FORCE` is given.
+- **`NetShutdown`** — stops the whole stack (`TIMEOUT/N,QUIET/S`, default 5 s): asks
+  every network program to let go, waits for the last one, then removes
+  `bsdsocket.library` from memory. While programs hold out, the shutdown waits; on
+  timeout or Ctrl-C it is recalled and the network keeps running. Opening
+  `bsdsocket.library` afterwards starts a fresh stack. Note that `LibOpen` returns
+  failure while a shutdown is pending, so programs cannot sneak in mid-teardown.
+- **`arp`** — displays, sets and deletes ARP table entries, ported from 4.3BSD arp(8)
+  (template `-a=ALL/S,-d=DELETE/S,-s=SET/S,HOSTNAME,ADDRESS,TEMP/S,-f=FILE/K,
+  -n=NONAMES/S=NUMBERS/S`). `Arp ALL` lists the table (`NONAMES` skips the reverse-DNS
+  lookups, useful without a reachable resolver), `Arp SET <host> <mac>` pins an entry
+  (permanent unless `TEMP`), `Arp DELETE <host>` removes one, `FILE` loads a batch in
+  the Roadshow/BSD `hostname ether_addr [temp]` format. Entries live in the running
+  stack and are dropped with their interface. Roadshow's `PUBLISH`/`PROXY` (answering
+  ARP for other hosts) is not supported by this stack: the switches are omitted from
+  the template and a `pub` token in a batch file is rejected. Third-party software can
+  drive the same machinery through the classic `SIOCSARP`/`SIOCGARP`/`SIOCDARP` (plus
+  whole-table `SIOCGARPT`) `IoctlSocket()` requests — see `include/net/if_arp_ioctl.h`.
+- **`ping`** — the classic 4.4BSD ping with the Roadshow template (`-c=COUNT/K/N,
+  -d=DEBUG/S,-i=INTERVAL/K/N,-l=LOAD/K/N,-n=NUMERICONLY/S=NUMERIC/S,-o=ONEREPLY/S,
+  -q=QUIET/S,-R=RECORDROUTE/S,DONTROUTE/S,-s=SIZE/K/N,-t=TIMEOUT/K/N,-v=VERBOSE/S,
+  BELL/S,HOST/A`): ICMP echo with per-reply round-trip times and a
+  min/avg/max/loss summary on Ctrl-C or `COUNT` completion. `RECORDROUTE` is
+  refused (lwIP cannot send IP options); `DEBUG` and `DONTROUTE` are accepted but
+  inert.
+- **`traceroute`** — Van Jacobson's traceroute with the Roadshow template
+  (`-d=DEBUG/S,-m=MAXTTL/K/N,-n=NUMERIC/S,-p=PORT/K/N,-q=QUERIES/K/N,-r=DONTROUTE/S,
+  -s=SOURCE/K,-t=TOS/K/N,-v=VERBOSE/S,-w=WAIT/K/N,HOST/A,PACKETSIZE/N`): maps the
+  gateways toward a host with TTL-stepped UDP probes over the raw-socket
+  `IP_HDRINCL` path, `*` for hops that stay quiet and `!H`/`!N`/`!P` annotations
+  for unreachables.
 - **`netinfo`** — shows your current network status at a glance: address, netmask,
   broadcast, MTU, MAC address, link state, DHCP/static, and DNS servers.
 - **`netdev-stats`** — shows live driver statistics (packet/error counters, link state)
@@ -139,9 +182,23 @@ See [RELEASE-NOTES.md](RELEASE-NOTES.md) for more on what's behind these numbers
   STATUS` shows what this Amiga advertises. Services can be advertised as they start —
   `mdns ADD _ftp._tcp PORT 21` — and withdrawn again with `mdns DEL <slot>`; anything
   listed under `MDNS_SERVICE` in `netstack.prefs` is advertised from boot.
+- **`NetLogViewer`** — a Commodity that captures every message the stack and its
+  clients log and shows it with time, origin and severity. The stack reports
+  interface bring-up and removal, link changes, DHCP leases and addresses, mDNS,
+  configuration mistakes and errors; programs that call `syslog()` appear under
+  their own name. The window keeps the last 1000 lines and saves them to a file
+  (`Project » Save message list as...`). Start it before `AddNetInterface` to see
+  the whole bring-up — the stack keeps the last 16 lines of its own boot and
+  replays them to a viewer that starts late — for example from `S:Network-Startup`:
+  `Run >NIL: C:NetLogViewer CX_POPUP NO`.
 
-`netinfo` and `netdev-stats` are read-only status tools; apart from `mdns`'s service
-list, the stack is configured entirely through `netstack.prefs`, above.
+`netinfo`, `netdev-stats` and `NetLogViewer` are read-only status tools; the stack is
+configured through the interface files and `netstack.prefs` above, plus the
+`AddNetInterface`/`RemoveNetInterface`/`NetShutdown`/`Arp` commands at runtime.
+
+Scripts can test the outcome Roadshow-style: with `QUIET`, the commands demote every
+failure to exit code 5 (`IF WARN` in a script), and `AddNetInterface` returns 5 when
+the interface is up but the DHCP lease has not arrived yet.
 
 ## Known limitations
 
@@ -153,8 +210,13 @@ list, the stack is configured entirely through `netstack.prefs`, above.
   wire on gigabit.
 - **A handful of advanced or legacy `bsdsocket.library` calls aren't implemented**:
   Roadshow's interface-configuration, routing, and monitoring calls (the read-only
-  interface *query* calls used by `netinfo` above do work), the low-level
-  `mbuf_*`/`bpf_*` families, and (by design) the private `ipf_*` packet filter.
+  interface *query* calls used by `netinfo` above do work — interface add/remove is
+  done with the bundled `AddNetInterface`/`RemoveNetInterface` commands instead, so
+  genuine Roadshow configuration binaries won't), the low-level `mbuf_*`/`bpf_*`
+  families, and (by design) the private `ipf_*` packet filter.
+- **No log file.** Roadshow can write its log to a file or console (`SBTC_LOG_FILE_NAME`);
+  lwip-amiga delivers the log only to a viewer that installs the log hook, such as the
+  bundled `NetLogViewer`, which can save the list to disk itself.
 
 ## For developers
 
@@ -175,6 +237,10 @@ layers, built bottom-up:
   contract — any driver or stack may implement it. First implementation:
   `genet.device` (BCM GENET on Pi4/CM4 under PiStorm/Emu68, in
   [emu68-driver-stack](https://github.com/rondoval/emu68-driver-stack)).
+- **A SANA-II compatibility backend** (`port/amiga/sana2_*.c`) drives classic drivers
+  through the same lwIP glue — cooked-mode translation and a client-side RX pump task —
+  with the driver type resolved per interface (`TYPE=AUTO|NETDEV|SANA2`); netdev remains
+  the performance path.
 - **A TCP/IP core** — lwIP (git submodule) plus an AmigaOS port layer, running in
   **core-locking direct-path** mode: application tasks execute stack code in their own
   context under a single core semaphore, with Exec signals as the blocking primitive.
@@ -200,6 +266,9 @@ See [docs/architecture.md](docs/architecture.md) for how the stack works.
   `pbuf_custom` recycle + GRO-lite, zero-copy TX scatter-gather + L4 checksum
   offsets), `netdev_if.c` (netif lifecycle, link events).
 - `src/bsdsocket/` — `bsdsocket.library` (socket layer, LVO table, stack task).
+- `src/netlogviewer/` — the `NetLogViewer` commodity (ReAction window, log hook client).
+- `dist/` — committed Workbench icons; `dist/icons/` holds their source art and the
+  generator (see its README).
 - `src/sockbench/` — LAN TCP/UDP throughput benchmark over `bsdsocket.library`
   (developer tool; built but not shipped).
 - `sfd/`, `scripts/gen-vectors.py` — the NDK `bsdsocket` SFD and the generator that

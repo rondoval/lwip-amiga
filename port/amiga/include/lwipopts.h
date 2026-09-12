@@ -41,6 +41,8 @@
 
 /* --- protocols, v1 scope --- */
 #define LWIP_ARP                        1
+#define ETHARP_SUPPORT_STATIC_ENTRIES   1   /* Arp command: permanent entries */
+#define ARP_TABLE_SIZE                  32  /* default 10; static entries pin slots */
 #define LWIP_ICMP                       1
 #define LWIP_RAW                        1   /* SOCK_RAW (ping) via bsdsocket */
 #define LWIP_UDP                        1
@@ -181,6 +183,10 @@
  * connection's TCP_SND_BUF, not by this count. */
 #define MEMP_NUM_TCP_SEG                (4 * TCP_SND_QUEUELEN)
 #define LWIP_TCP_SACK_OUT               1
+/* TCP urgent data (fork addition): sb_io.c's MSG_OOB paths arm the TX mark
+ * and consume the RX mark; all policy (excision, SO_OOBINLINE, SIOCATMARK)
+ * lives in the bsdsocket layer. */
+#define LWIP_TCP_URG                    1
 /* init.c's sanity check requires PBUF_POOL to cover TCP_WND, assuming RX
  * allocates from it. Our RX buffers are driver-owned custom pbufs — the
  * pool only serves loopback — so that premise doesn't hold here. */

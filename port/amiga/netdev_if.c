@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * netdev interface lifecycle: attach glue between the driver ABI and lwIP —
- * netif creation/teardown, the stack-ops callback table, link events and
- * the in-band VLAN hooks. The datapaths live in netdev_rx.c / netdev_tx.c.
+ * netif creation/teardown, the stack-ops callback table and link events.
+ * The datapaths live in netdev_rx.c / netdev_tx.c; the backend-agnostic
+ * parts (identity, VLAN hooks, the IGMP multicast set) in netif_base.c.
  */
 
 #include "netstack_sys.h"
@@ -14,9 +15,21 @@
 
 #include "netdev_priv.h"
 #include "netstack.h"
-#include "netstack_lwiphooks.h"
+#include "netstack_diag.h"
 
 #define NDIF_MIN_WRAPS 64
+
+/* ---------------------------------------------------- L2 header cache --- */
+
+void netdevif_hh_invalidate(struct NetdevIf *ndi)
+{
+    for (ULONG i = 0; i < NDIF_HH_ENTRIES; i++)
+    {
+        ndi->ndi_Hh[i].nhh_DstIp = 0;
+        ndi->ndi_Hh[i].nhh_Left = 0;
+    }
+    ndi->ndi_HhPrimeDst = 0;
+}
 
 /* -------------------------------------------------------- link events --- */
 
@@ -27,135 +40,12 @@ static void ndif_link_change(APTR stackctx, const struct NetDevLinkState *state)
 
     netstack_lock();
     /* a link transition may mean a new peer/port: drop the L2 header cache */
-    for (ULONG i = 0; i < NDIF_HH_ENTRIES; i++)
-    {
-        ndi->ndi_Hh[i].nhh_DstIp = 0;
-        ndi->ndi_Hh[i].nhh_Left = 0;
-    }
+    netdevif_hh_invalidate(ndi);
     if (state->ndls_Flags & NDLF_UP)
-        netif_set_link_up(&ndi->ndi_Netif);
+        netif_set_link_up(&ndi->ndi_Base.nib_Netif);
     else
-        netif_set_link_down(&ndi->ndi_Netif);
+        netif_set_link_down(&ndi->ndi_Base.nib_Netif);
     netstack_unlock();
-}
-
-/* ---------------------------------------------------------- VLAN hooks --- */
-/* In-band 802.1Q (lwIP LWIP_HOOK_VLAN_SET/CHECK, wired in netstack_lwiphooks.h).
- * The per-interface TCI is ndi_VlanTci (-1 = untagged), set from
- * netstack.prefs before the netif comes up. GENET has no hardware VLAN
- * offload, so the tag rides inside the frame both ways; the checksum
- * offloads stay on because ndif_l4_offsets/ndif_rx_csum_ok are tag-aware. */
-
-s32_t netdevif_vlan_set(struct netif *nif, struct pbuf *p,
-                        const struct eth_addr *src, const struct eth_addr *dst,
-                        u16_t eth_type)
-{
-    (void)p;
-    (void)src;
-    (void)dst;
-    (void)eth_type;
-    return (s32_t)((struct NetdevIf *)nif->state)->ndi_VlanTci; /* <0 = no tag */
-}
-
-int netdevif_vlan_check(struct netif *nif, struct eth_hdr *eth,
-                        struct eth_vlan_hdr *vlan)
-{
-    (void)eth;
-    LONG tci = ((struct NetdevIf *)nif->state)->ndi_VlanTci;
-    if (tci < 0)
-        return 0; /* not on a VLAN: drop tagged frames */
-    return VLAN_ID(vlan) == (UWORD)(tci & 0xFFF);
-}
-
-/* ------------------------------------------------------- IGMP RX filter --- */
-/* lwIP calls igmp_mac_filter under the core lock on the first join / last
- * leave of every multicast group (the all-systems group included, added at
- * igmp_start). We keep the exact set of joined multicast MACs here and let the
- * stack task push it to the driver; see the ndi_Mcast* comment in netdev_if.h. */
-
-/* IPv4 multicast group -> Ethernet MAC: 01:00:5e | low 23 bits of the group. */
-static void ndif_mcast_mac(const ip4_addr_t *group, UBYTE mac[6])
-{
-    ULONG g = lwip_ntohl(ip4_addr_get_u32(group));
-    mac[0] = 0x01;
-    mac[1] = 0x00;
-    mac[2] = 0x5e;
-    mac[3] = (UBYTE)((g >> 16) & 0x7f);
-    mac[4] = (UBYTE)((g >> 8) & 0xff);
-    mac[5] = (UBYTE)(g & 0xff);
-}
-
-static BOOL ndif_mac_eq(const UBYTE *a, const UBYTE *b)
-{
-    for (int i = 0; i < 6; i++)
-        if (a[i] != b[i])
-            return FALSE;
-    return TRUE;
-}
-
-static err_t ndif_igmp_mac_filter(struct netif *nif, const ip4_addr_t *group,
-                                  enum netif_mac_filter_action action)
-{
-    struct NetdevIf *ndi = nif->state;
-    UBYTE mac[6];
-    ndif_mcast_mac(group, mac);
-
-    LONG idx = -1;
-    for (UWORD i = 0; i < ndi->ndi_McastCount; i++)
-    {
-        if (ndif_mac_eq(ndi->ndi_McastList[i], mac))
-        {
-            idx = (LONG)i;
-            break;
-        }
-    }
-
-    UWORD oldWant = ndi->ndi_RxFilterWant;
-    BOOL listChanged = FALSE;
-
-    if (action == NETIF_ADD_MAC_FILTER)
-    {
-        if (idx >= 0)
-        {
-            ndi->ndi_McastRefs[idx]++; /* another group aliases this MAC */
-        }
-        else if (ndi->ndi_McastCount < NDIF_MCAST_MAX)
-        {
-            UWORD n = ndi->ndi_McastCount++;
-            for (int i = 0; i < 6; i++)
-                ndi->ndi_McastList[n][i] = mac[i];
-            ndi->ndi_McastRefs[n] = 1;
-            listChanged = TRUE;
-        }
-        else
-        {
-            ndi->ndi_McastOverflow++; /* no slot: covered by the all-multi fallback */
-        }
-    }
-    else /* NETIF_DEL_MAC_FILTER */
-    {
-        if (idx >= 0)
-        {
-            if (--ndi->ndi_McastRefs[idx] == 0)
-            {
-                UWORD last = --ndi->ndi_McastCount; /* swap-remove */
-                for (int i = 0; i < 6; i++)
-                    ndi->ndi_McastList[idx][i] = ndi->ndi_McastList[last][i];
-                ndi->ndi_McastRefs[idx] = ndi->ndi_McastRefs[last];
-                listChanged = TRUE;
-            }
-        }
-        else if (ndi->ndi_McastOverflow > 0)
-        {
-            ndi->ndi_McastOverflow--;
-        }
-    }
-
-    UWORD want = ndi->ndi_McastOverflow > 0 ? NDFF_ALLMULTI : 0;
-    ndi->ndi_RxFilterWant = want;
-    if (listChanged || want != oldWant)
-        ndi->ndi_RxFilterDirty = TRUE;
-    return ERR_OK;
 }
 
 /* ------------------------------------------------------------ plumbing --- */
@@ -221,7 +111,7 @@ static err_t ndif_netif_init(struct netif *nif)
     nif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_IGMP;
 #if LWIP_IGMP
     /* exact multicast filtering: joins land as driver RX-filter updates */
-    netif_set_igmp_mac_filter(nif, ndif_igmp_mac_filter);
+    netif_set_igmp_mac_filter(nif, netifbase_igmp_mac_filter);
 #endif
 
     /* Checksum policy from the capabilities:
@@ -247,6 +137,10 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
                      const struct NetDevDrvOps *drvOps,
                      const struct NetDevCaps *caps)
 {
+    netifbase_init(&ndi->ndi_Base, NIF_KIND_NETDEV);
+    ndi->ndi_Base.nib_HwMtu = caps->ndc_Mtu;
+    ndi->ndi_Base.nib_NumRead = caps->ndc_RxRingSlots;
+    ndi->ndi_Base.nib_NumWrite = caps->ndc_TxRingSlots;
     ndi->ndi_Drv = drvCtx;
     ndi->ndi_Ops = drvOps;
     ndi->ndi_Caps = *caps;
@@ -254,19 +148,8 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
     ndi->ndi_TxOversize = 0;
     ndi->ndi_RxCsumBad = 0;
     ndi->ndi_TxKickPending = FALSE;
-    ndi->ndi_McastCount = 0;
-    ndi->ndi_McastOverflow = 0;
-    ndi->ndi_RxFilterWant = 0;
-    ndi->ndi_RxFilterDirty = FALSE;
-    ndi->ndi_VlanTci = -1; /* untagged by default; the opener overrides from prefs */
-    for (ULONG i = 0; i < NDIF_HH_ENTRIES; i++)
-    {
-        ndi->ndi_Hh[i].nhh_DstIp = 0;
-        ndi->ndi_Hh[i].nhh_Left = 0;
-    }
-    ndi->ndi_HhPrimeDst = 0;
-    for (ULONG i = 0; i < NDIF_GRO_FLOWS; i++)
-        ndi->ndi_Gro[i].ngc_Head = NULL; /* contexts idle outside lock holds */
+    netdevif_hh_invalidate(ndi);
+    rxgro_init(&ndi->ndi_Gro, &ndi->ndi_Base.nib_Netif);
 
     /* RX wrappers: one per buffer the stack can possibly hold. The driver
      * advertises its pool size; a wrap count below it silently re-imposes
@@ -284,6 +167,7 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
 
     struct NdRxWrap *w = ndi->ndi_WrapStorage;
     ndi->ndi_FreeWraps = NULL;
+    ndi->ndi_WrapsOut = 0;
     for (ULONG i = 0; i < count; i++, w++)
     {
         w->nrw_If = ndi;
@@ -316,10 +200,13 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
     ndi->ndi_TxFreeOverflow = 0;
 
     netstack_lock();
-    struct netif *added = netif_add_noaddr(&ndi->ndi_Netif, ndi,
+    struct netif *added = netif_add_noaddr(&ndi->ndi_Base.nib_Netif, ndi,
                                            ndif_netif_init, ethernet_input);
     if (added != NULL)
+    {
         netstack.ns_ActiveNetdev = ndi;
+        netstack.ns_ActiveIf = &ndi->ndi_Base;
+    }
     netstack_unlock();
 
     if (added == NULL)
@@ -343,18 +230,41 @@ void netdevif_destroy(struct NetdevIf *ndi)
      * did this while ns_ActiveNetdev == ndi; the explicit call keeps the ordering
      * vs. netstack_slab_detach self-evident and is a no-op if already drained.) */
     netdevif_tx_reclaim(ndi);
-    netif_remove(&ndi->ndi_Netif);
+    netif_remove(&ndi->ndi_Base.nib_Netif);
     if (netstack.ns_ActiveNetdev == ndi)
     {
         /* return the slab arenas while the ABI pointer is still valid */
         netstack_slab_detach(ndi);
         netstack.ns_ActiveNetdev = NULL;
+        netstack.ns_ActiveIf = NULL;
+    }
+
+    /* Wrap-pool disposition, decided under the lock (wrap frees run under it
+     * too, so ndi_WrapsOut is exact). Sockets may still hold RX wraps — their
+     * pbufs sit in receive queues across a forced RemoveNetInterface and are
+     * freed only when the app drains or closes, possibly after a successor
+     * interface reuses this NetdevIf. The pool must then outlive this
+     * interface: mark every wrap dead (nrw_If = NULL turns its free into a
+     * no-op — the driver reclaims the buffers itself at forced detach) and
+     * leak the storage. */
+    BOOL leakWraps = ndi->ndi_WrapsOut != 0;
+    if (leakWraps)
+    {
+        netstack_log(NS_LOG_WARNING,
+                     "%s: %lu RX buffers still held by sockets, wrap pool leaked until they close",
+                     ndi->ndi_Base.nib_Name, ndi->ndi_WrapsOut);
+        struct NdRxWrap *w = ndi->ndi_WrapStorage;
+        for (ULONG i = 0; i < ndi->ndi_WrapStorageSize / sizeof(struct NdRxWrap); i++)
+            w[i].nrw_If = NULL;
     }
     netstack_unlock();
 
-    FreeMem(ndi->ndi_WrapStorage, ndi->ndi_WrapStorageSize);
+    if (!leakWraps)
+        FreeMem(ndi->ndi_WrapStorage, ndi->ndi_WrapStorageSize);
     ndi->ndi_WrapStorage = NULL;
+    ndi->ndi_WrapStorageSize = 0;
     ndi->ndi_FreeWraps = NULL;
+    ndi->ndi_WrapsOut = 0;
     FreeMem(ndi->ndi_TxFree, (ndi->ndi_TxFreeMask + 1) * sizeof(APTR));
     ndi->ndi_TxFree = NULL;
 }

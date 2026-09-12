@@ -36,7 +36,6 @@ static LONG sb_select_scan(struct SocketBase *base, LONG nfds,
 {
     KprintfT("[bsdsocket] %s: nfds %ld\n", __func__, nfds);
     LONG hits = 0;
-    (void)e_out; /* no exceptional conditions defined (no OOB) */
 
     for (LONG fd = 0; fd < nfds; fd++)
     {
@@ -60,7 +59,11 @@ static LONG sb_select_scan(struct SocketBase *base, LONG nfds,
             sb_fd_setbit(w_out, fd);
             hits++;
         }
-        /* exceptions: none defined (no OOB support) */
+        if (we && sb_sock_exceptable(s))
+        {
+            sb_fd_setbit(e_out, fd);
+            hits++;
+        }
     }
     return hits;
 }

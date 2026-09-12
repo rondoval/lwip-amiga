@@ -1,0 +1,7 @@
+TYPE  = TOOL
+STACK = 16384
+# DONOTWAIT: a copy in WBStartup must not stall the boot
+TOOLTYPES = DONOTWAIT
+TOOLTYPE = CX_POPKEY=shift alt f8
+TOOLTYPE = CX_PRIORITY=0
+TOOLTYPE = CX_POPUP=YES

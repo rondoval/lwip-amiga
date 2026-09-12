@@ -1,3 +1,143 @@
+# Release notes — lwip-amiga 1.4
+
+Changes since v1.3.
+
+---
+
+## Breaking changes
+
+### Network interfaces are now started explicitly
+
+Opening `bsdsocket.library` now brings the stack up with only the loopback
+interface. Real interfaces are added by the new `AddNetInterface` command,
+normally from `S:Network-Startup` at boot — the installer sets this up for
+you. If you update by copying files instead of running the installer, add
+this line to `S:Network-Startup` (or run it once after boot):
+
+    AddNetInterface DEVS:NetInterfaces/~(#?.info) QUIET
+
+Interface settings moved with it: each interface is now described by its own
+file in `DEVS:NetInterfaces/` (see the README for the format), and
+`ENV:netstack.prefs` keeps only the stack-wide settings such as hostname,
+DNS servers and mDNS.
+
+---
+
+## New features
+
+### SANA-II driver support
+
+The stack now drives classic SANA-II network drivers — Poseidon USB Ethernet
+adapters, network cards, and other Ethernet-type SANA-II drivers — beside its
+native `netdev` interface (non-Ethernet SANA-II, such as Token Ring, ArcNet or
+serial-line drivers, isn't supported). `AddNetInterface` detects the driver
+type automatically (the new optional `TYPE` interface-file option forces
+`NETDEV` or `SANA2` when needed), and everything works the same either way:
+DHCP, mDNS, multicast, VLAN, the interface query functions.
+
+SANA-II is a copy-based driver interface without checksum offload, so
+throughput is a fraction of the netdev path — measured at ~290 Mb/s in and
+~300 Mb/s out on a gigabit LAN against the SANA-II build of `genet.device`.
+
+### Interface management commands
+
+Roadshow-style control over the running stack: `AddNetInterface` brings up
+interfaces from `DEVS:NetInterfaces/` files and waits until they are usable
+(link up, DHCP lease bound); `RemoveNetInterface` takes one down again; and
+`NetShutdown` stops the whole stack, waiting for network programs to quit
+and then unloading the library from memory. Interface files can also be
+started from Workbench by double-clicking them.
+
+### `ping` and `traceroute` commands
+
+The classic network diagnostics, with Roadshow-compatible templates and
+output. `ping` reports round-trip times, packet loss and duplicates;
+`traceroute` shows the gateways a packet crosses on its way to a host.
+`ping RECORDROUTE` is not supported by this stack and says so; `DEBUG` and
+`DONTROUTE` are accepted but have no effect.
+
+For raw-socket programs, `setsockopt(IP_HDRINCL)` now works: the library
+completes the IP header the same way a BSD kernel would (checksum and
+length always; source address and packet id when left zero).
+
+### `arp` command
+
+Displays, sets and deletes entries in the stack's ARP table, with a
+Roadshow-compatible template: `arp ALL` lists the table, `arp SET <host>
+<mac>` pins an entry, `arp DELETE <host>` removes one, and `FILE` loads a
+batch of entries from a file. Published/proxy ARP entries are not supported
+by this stack. Programs can drive the same machinery through the classic
+`SIOCSARP`/`SIOCGARP`/`SIOCDARP` `IoctlSocket()` requests, which are now
+implemented.
+
+### TCP out-of-band data (MSG_OOB)
+
+TCP urgent data now works end to end: `MSG_OOB` on send and receive,
+`SO_OOBINLINE`, `SIOCATMARK`, exception reporting in `WaitSelect()` and the
+`SetSocketSignals()` urgent-data signal all behave as on 4.4BSD. Programs
+that use urgent data — telnet clients sending interrupts, mainly — now work
+as intended. This takes the bsdsocktest conformance score from 138/142 to a
+clean **142/142**.
+
+### FIOASYNC
+
+`IoctlSocket(FIOASYNC)` is now a real per-socket toggle for SIGIO delivery.
+It defaults on — on the Amiga, arming the signal mask with
+`SetSocketSignals()` is itself the opt-in, and AmiTCP-era programs rely on
+that; `FIOASYNC(0)` opts a socket back out.
+
+### NetLogViewer
+
+`NetLogViewer` is a Commodity (`CX_POPKEY/K,CX_PRIORITY/K/N,CX_POPUP/K`,
+default hotkey `shift alt f8`, Exchange Show/Hide, the same names as icon
+tooltypes from Workbench) that captures every message the stack and its
+clients log and shows it in a window with time, origin and severity.
+The list keeps the last 1000 lines and can be saved to a file.
+`NetShutdown` makes the viewer exit, like every other network program.
+It ships with a Workbench icon.
+
+Start it before `AddNetInterface` to see the whole bring-up, for example
+from `S:Network-Startup`:
+
+    Run >NIL: C:NetLogViewer CX_POPUP NO
+
+The stack keeps the last 16 lines of its own boot and replays them to a
+viewer that starts late, so even the configuration warnings from the first
+`OpenLibrary` reach the window.
+
+### The stack keeps a log
+
+`bsdsocket.library` now reports what it does in every build, not only in
+debug builds: interface bring-up and removal, driver selection, link up and
+down, DHCP leases and addresses, DNS in effect, mDNS announcements,
+`netstack.prefs` mistakes, shutdown progress, and failures. Delivery is
+public `SBTC_LOG_HOOK` tag, so any program can subscribe to the same stream,
+and `syslog()` from applications reaches it too — with the program's name as
+the origin and `%m` expanded to the current error text.
+There is no log file or console sink (`SBTC_LOG_FILE_NAME` stays
+unsupported); the viewer saves the list itself.
+
+### Error texts
+
+`SBTC_ERRNOSTRPTR` and `SBTC_HERRNOSTRPTR` now return the BSD text for an
+`errno` or `h_errno` code. `SBTC_LOGFACILITY` defaults to `LOG_USER` as
+documented.
+
+---
+
+## Bug fixes / Improvements
+
+### UDP connect now commits the local address
+
+Connecting a UDP socket now fixes the local address the same way BSD does,
+so `getsockname()` afterwards reports the address the sends will actually
+use instead of `0.0.0.0` — the classic way for a program to find out which
+of its addresses routes to a given destination. Connecting toward a
+destination with no route now fails with `ENETUNREACH` instead of appearing
+to succeed.
+
+---
+
 # Release notes — lwip-amiga 1.3
 
 Changes since v1.2.

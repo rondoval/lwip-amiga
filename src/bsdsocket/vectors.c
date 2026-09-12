@@ -84,8 +84,8 @@ const APTR bsdsocket_functable[] = {
     (APTR)LibStub, /* -414  AddRouteTagList */
     (APTR)LibStub, /* -420  DeleteRouteTagList */
     (APTR)LibStub, /* -426  ChangeRouteTagList */
-    (APTR)LibStub, /* -432  FreeRouteInfo */
-    (APTR)LibStubNull, /* -438  GetRouteInfo */
+    (APTR)bsd_FreeRouteInfo, /* -432  FreeRouteInfo */
+    (APTR)bsd_GetRouteInfo, /* -438  GetRouteInfo */
     (APTR)bsd_InterfaceConfigUnsupported, /* -444  AddInterfaceTagList */
     (APTR)bsd_InterfaceConfigUnsupported, /* -450  ConfigureInterfaceTagList */
     (APTR)bsd_ReleaseInterfaceList, /* -456  ReleaseInterfaceList */
