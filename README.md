@@ -217,6 +217,7 @@ the interface is up but the DHCP lease has not arrived yet.
 - **No log file.** Roadshow can write its log to a file or console (`SBTC_LOG_FILE_NAME`);
   lwip-amiga delivers the log only to a viewer that installs the log hook, such as the
   bundled `NetLogViewer`, which can save the list to disk itself.
+- **One interface** lwip-amiga supports only one network interface, for the time being. 
 
 ## For developers
 
