@@ -39,6 +39,10 @@ SANA-II is a copy-based driver interface without checksum offload, so
 throughput is a fraction of the netdev path — measured at ~290 Mb/s in and
 ~300 Mb/s out on a gigabit LAN against the SANA-II build of `genet.device`.
 
+This makes the driver you use an open choice rather than a fixed one, so
+`genet.device` 4.x is no longer the only network driver the stack can work
+with. It stays **one interface at a time**, though — see *Known limitations*.
+
 ### Interface management commands
 
 Roadshow-style control over the running stack: `AddNetInterface` brings up
@@ -135,6 +139,25 @@ use instead of `0.0.0.0` — the classic way for a program to find out which
 of its addresses routes to a given destination. Connecting toward a
 destination with no route now fails with `ENETUNREACH` instead of appearing
 to succeed.
+
+---
+
+## Known limitations
+
+### One network interface at a time
+
+Besides loopback the stack carries a single interface: a second
+`AddNetInterface` is refused with *"an interface is already installed
+(RemoveNetInterface first)"*. Swapping interfaces means `RemoveNetInterface`
+followed by `AddNetInterface`.
+
+This matters at boot, where the line in `S:Network-Startup` globs the whole
+drawer. If `DEVS:NetInterfaces/` holds more than one file, the
+highest-priority one is added and the rest are refused — and because that
+line passes `QUIET`, the refusals are silent. Order the candidates with a
+`PRI=<n>` tooltype on the interface files' icons (higher wins, ties
+alphabetically), or keep one file in the drawer and the others in
+`SYS:Storage/NetInterfaces/`.
 
 ---
 

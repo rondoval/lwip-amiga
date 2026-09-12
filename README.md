@@ -45,9 +45,12 @@ A fast, modern TCP/IP stack for classic AmigaOS 3.2.
 ## Requirements
 
 - AmigaOS 3.2.
-- [`genet.device`](https://github.com/rondoval/emu68-driver-stack) version 4.x or
-  later — currently the only supported network driver, for the onboard Ethernet on a
-  Raspberry Pi 4/CM4 running PiStorm or Emu68.
+- A network driver — one of:
+  [`genet.device`](https://github.com/rondoval/emu68-driver-stack) 4.x or later, the
+  native `netdev` driver for the onboard Ethernet on a Raspberry Pi 4/CM4 running
+  PiStorm or Emu68 (the fastest option); or any Ethernet-type SANA-II driver, such as
+  a Zorro or PCMCIA card, a USB Ethernet adapter, or the SANA-II `genet.device` 3.x.
+  Only one interface can be up at a time — see [Known limitations](#known-limitations).
 - An accelerated CPU and plenty of RAM are strongly recommended to make full use of the
   available network speed.
 
@@ -202,6 +205,15 @@ the interface is up but the DHCP lease has not arrived yet.
 
 ## Known limitations
 
+- **One network interface at a time.** Besides loopback, the stack carries a single
+  interface: a second `AddNetInterface` is refused with *"an interface is already
+  installed (RemoveNetInterface first)"*. Swap interfaces with `RemoveNetInterface`
+  followed by `AddNetInterface`. This matters at boot, where the line in
+  `S:Network-Startup` globs the whole drawer: if `DEVS:NetInterfaces/` holds more than
+  one file, the highest-priority one is added and the rest are refused — and because
+  that line passes `QUIET`, the refusals are silent. Order the candidates with a `PRI=<n>`
+  tooltype on the interface files' icons (higher wins, ties alphabetically), or keep
+  just one file in the drawer and the others in `SYS:Storage/NetInterfaces/`.
 - **Lossy connections recover slowly.** If a connection drops several packets in a row
   (for example, over a flaky link or a long-distance internet path), lwip-amiga's TCP
   falls back to a slow, full timeout before resending, rather than a fast selective
@@ -217,7 +229,6 @@ the interface is up but the DHCP lease has not arrived yet.
 - **No log file.** Roadshow can write its log to a file or console (`SBTC_LOG_FILE_NAME`);
   lwip-amiga delivers the log only to a viewer that installs the log hook, such as the
   bundled `NetLogViewer`, which can save the list to disk itself.
-- **One interface** lwip-amiga supports only one network interface, for the time being. 
 
 ## For developers
 
