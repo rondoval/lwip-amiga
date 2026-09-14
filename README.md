@@ -64,20 +64,40 @@ command, normally from `S:Network-Startup` at boot:
     AddNetInterface DEVS:NetInterfaces/~(#?.info) QUIET
 
 The installer sets this up with a DHCP interface file named `genet` (a commented sample
-also ships in `SYS:Storage/NetInterfaces/`). One option per line; `#`/`;` start
-comments; an unknown option is an error:
+also ships in `SYS:Storage/NetInterfaces/`). One option per line — the option name, then
+`=` or blanks, then the value; lines starting with `#` or `;` are comments (a comment
+*after* an option on the same line would become part of its value). An unknown option
+is reported as a warning and skipped; a known option with a bad value is an error.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `DEVICE` | *(required)* | which network driver to open (path form loads from `DEVS:`) |
+| `DEVICE` | *(required)* | which network driver to open; a bare name such as `3c589.device` is looked up in `DEVS:Networks/` first |
 | `UNIT` | `0` | which unit/port on that driver |
 | `TYPE` | `AUTO` | driver interface: `AUTO` (probe the device), `NETDEV` or `SANA2` |
 | `ADDRESS` | `DHCP` | `DHCP`, or a fixed dotted-quad address |
 | `NETMASK` | — | subnet mask (required with a fixed `ADDRESS`) |
-| `GATEWAY` | — | your router's address (fixed address only, optional) |
+| `GATEWAY` | — | your router's address (fixed address only; without it there is no default route) |
+| `CONFIGURE` | — | `DHCP` — the same as `ADDRESS=DHCP` |
 | `MTU` | driver's | lower the packet size limit (may only shrink it) |
 | `VLAN` | — | in-band 802.1Q tag: `vid[,pcp]` (vid 1..4094, pcp 0..7) |
-| `ID` | `HOSTNAME` | DHCP client hostname for this interface |
+| `ID` | `HOSTNAME` | DHCP client hostname for this interface (2 to 63 characters) |
+| `HARDWAREADDRESS` | the card's | use this MAC address instead, e.g. `02:00:00:12:34:56` |
+| `STATE` | `UP` | `DOWN` (or `OFFLINE`) keeps the file but does not add the interface |
+
+**Roadshow interface files work unchanged.** Files a Roadshow installation left in
+`DEVS:NetInterfaces/`, or copied from one, are used as they are. Roadshow options that only tune Roadshow
+itself — `IPREQUESTS`, `WRITEREQUESTS`, `ARPREQUESTS`, `REQUIRESINITDELAY`,
+`COPYMODE`, `FILTER`, `DEBUG`, `DHCPUNICAST`, `DOWNGOESOFFLINE`, `REPORTOFFLINE`,
+`METRIC`, `HARDWARETYPE`, and the default `IPTYPE`/`ARPTYPE`/`MULTICAST`/`POINTTOPOINT`
+values — are accepted and have no effect: this stack sizes its buffers itself and only
+drives Ethernet. Options asking for something this stack does not do — `ALIAS`,
+`BROADCASTADDRESS`, `DESTINATION`, `LEASE`, `LINKSTATUSCOMMAND` — are accepted with a
+warning. `CONFIGURE=AUTO` and
+`CONFIGURE=FASTAUTO` (ZeroConf addresses) are not supported and stop the file with an
+error. Two things Roadshow keeps elsewhere have to be added by hand for a fixed
+address: the default route (`DEVS:Internet/routes` in Roadshow) goes into the interface
+file as `GATEWAY=`, and the DNS servers (`DEVS:Internet/name_resolution`) go into
+`ENV:netstack.prefs` as `DNS1`/`DNS2`. DHCP setups need neither.
 
 **Stack-wide settings in `ENV:netstack.prefs`**, read once when the stack starts. Keep
 the master copy in `ENVARC:`, alongside a commented example,

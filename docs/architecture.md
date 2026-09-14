@@ -68,7 +68,10 @@ table included — so every opening task gets its own `errno`, fd table, wait si
   control port, and ticks `sys_check_timeouts()` every 100 ms. The boot state is
   **loopback only** (the Roadshow model): network interfaces are added at runtime by
   the `AddNetInterface` command from per-interface files in `DEVS:NetInterfaces/`
-  (the file name is the interface name), normally from `S:Network-Startup`. The task
+  (the file name is the interface name), normally from `S:Network-Startup`. The file
+  format is a superset of Roadshow's and is parsed entirely by the command
+  (`src/netctl/addnetinterface.c`, on dos.library `FindArg`/`StrToLong`) — the stack
+  only ever sees the compact `struct NetCtlIfConfig`. The task
   runs at **priority 10** (above the dynamic-scheduler band, matching the driver's
   unit task) so it is not starved by CPU-bound application tasks.
 - **A running stack is never expunged — except through the NetShutdown handshake**
@@ -110,6 +113,13 @@ versioned message protocol (private to this component — library and tools buil
 together; the library rejects a version mismatch). Everything is serviced on the stack
 task, which serializes all lifecycle work by construction: `OpenDevice` needs a Process,
 and a netdev `DoIO` must never run under the core lock.
+
+The device is opened by `sb_if_open` under one of two names: a bare driver name
+(`3c589.device`, as Roadshow files carry them) tries `networks/<name>` — i.e.
+`DEVS:Networks/` — then the bare name (already loaded, resident, or in `DEVS:` proper); a
+path form tries the path, then its basename (resident modules register under it). When
+both fail, the error from a driver that was found and refused beats a plain
+`IOERR_OPENFAIL`.
 
 The reply contract: every delivered message is answered — inline, or *parked* and
 answered later. `ADD_IF` executes the attach/configure (`sb_netdev_up`) and parks the
@@ -260,7 +270,10 @@ convention, interrupt-callable — pure copy loops, no Exec calls, no locks).
   retry — the two size conventions are mutually exclusive across driver
   generations), Ethernet/48-bit gate, `S2_CONFIGINTERFACE` with the **factory**
   station address (`ios2_DstAddr` — the current address is zeros until first
-  configure), `S2_ONLINE`, pump start **before** `netif_set_up` (a static
+  configure) or the config file's `HARDWAREADDRESS`; a unit that is already configured
+  (`S2ERR_BAD_STATE` — SANA-II configures once per unit lifetime) keeps its address, so
+  the stack adopts the *current* one from `S2_GETSTATIONADDRESS` rather than framing with
+  an address the driver does not filter for. Then `S2_ONLINE`, pump start **before** `netif_set_up` (a static
   config's gratuitous ARP needs the TX reply ports stamped). Link state is
   seeded up (SANA-II has no state query) and tracked thereafter via a
   re-armed `S2_ONEVENT`; drivers without events keep the seeded state.
@@ -291,6 +304,10 @@ first argument.
 - **Control ops are synchronous `IOStdReq` commands** (`NETDEV_CMD_*`, base `0x8900`):
   ATTACH, START, STOP, DETACH, GET_LINK, GET_STATS, GET_COUNTERS, SET_COALESCE, SET_MAC,
   and the declarative RX filter. They are serialized by the driver's unit task.
+  SET_MAC belongs between ATTACH and START: ATTACH reports `ndc_Mac` (and a driver may
+  load the factory address when ATTACH first configures the unit), and START programs
+  the MAC — so the stack issues SET_MAC after ATTACH and patches its own copy of
+  `ndc_Mac` when the driver accepts it.
   GET_STATS and GET_COUNTERS split the two kinds of statistic and are independent of one
   another: `NetDevStats` is the fixed portable summary (what every NIC has, and what the
   stack cannot work out for itself), while GET_COUNTERS returns a self-describing list of
