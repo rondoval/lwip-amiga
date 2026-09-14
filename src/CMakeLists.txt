@@ -281,8 +281,9 @@ install(
 # AddNetInterface / RemoveNetInterface / NetShutdown: runtime interface
 # management and stack shutdown over the stack's control port
 # (include/netstack_ctl.h, shared with sb_netctl.c). Roadshow-compatible CLI
-# templates; the interface config-file format (DEVS:NetInterfaces/) is
-# lwip-amiga's own. Installed under their canonical mixed-case names.
+# templates; the interface config-file format (DEVS:NetInterfaces/, parsed in
+# addnetinterface.c) reads Roadshow interface files and extends them. Installed
+# under their canonical mixed-case names.
 add_executable(addnetinterface
     netctl/addnetinterface.c
     netctl/netctl_client.c

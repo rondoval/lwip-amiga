@@ -30,7 +30,7 @@
 #include <exec/types.h>
 
 #define NETCTL_PORT_NAME "bsdsocket.netctl"
-#define NETCTL_VERSION   2
+#define NETCTL_VERSION   3
 
 #define NETCTL_IFNAME_MAX 16 /* Roadshow-compatible: 15 chars + NUL */
 #define NETCTL_DEV_MAX    64 /* OpenDevice name, path form included */
@@ -80,6 +80,7 @@
 #define NETCTL_IFF_HAS_MASK (1UL << 1)
 #define NETCTL_IFF_HAS_GW   (1UL << 2)
 #define NETCTL_IFF_HAS_MTU  (1UL << 3)
+#define NETCTL_IFF_HAS_HWADDR (1UL << 4) /* nif_HwAddr replaces the factory MAC */
 
 /* nif_Type — which driver ABI the device speaks. AUTO (the default, and 0 so
  * an old-style config parses to it) probes with NSCMD_DEVICEQUERY:
@@ -96,8 +97,10 @@
 struct NetCtlIfConfig
 {
     char  nif_Name[NETCTL_IFNAME_MAX]; /* = FilePart(config file), <= 15 chars */
-    char  nif_Device[NETCTL_DEV_MAX];  /* as written; the stack retries the
-                                          bare basename for resident modules */
+    char  nif_Device[NETCTL_DEV_MAX];  /* as written; a bare name is looked up
+                                          in DEVS:Networks/ first, a path form
+                                          falls back to its basename (resident
+                                          modules) */
     LONG  nif_Unit;
     LONG  nif_Type;                    /* NETCTL_TYPE_* driver-ABI selection */
     ULONG nif_Flags;                   /* NETCTL_IFF_* */
@@ -108,7 +111,23 @@ struct NetCtlIfConfig
     LONG  nif_VlanTci;                 /* -1 = untagged; else (pcp<<13)|vid */
     char  nif_Id[NETCTL_ID_MAX];       /* DHCP client hostname (option 12);
                                           "" = the global HOSTNAME pref */
+    UBYTE nif_HwAddr[6];               /* NETCTL_IFF_HAS_HWADDR: station address
+                                          to program instead of the factory one */
 };
+
+/* A usable Ethernet station address: not all-zero, group bit clear. Shared
+ * by the command's parser, the control-port validation and the backends. */
+static inline BOOL netctl_mac_usable(const UBYTE *mac)
+{
+    if (mac[0] & 1)
+        return FALSE;
+    for (int i = 0; i < 6; i++)
+    {
+        if (mac[i] != 0)
+            return TRUE;
+    }
+    return FALSE;
+}
 
 struct NetCtlMsg
 {

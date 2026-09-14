@@ -22,6 +22,7 @@
 
 #include <dos/dos.h>
 #include <dos/dostags.h>
+#include <exec/errors.h>
 #include <exec/io.h>
 
 #ifdef __INTELLISENSE__
@@ -65,6 +66,8 @@ static const char *sb_dev_basename(const char *name)
     return base;
 }
 
+#define SB_DEV_NETWORKS "networks/" /* OpenDevice-relative = DEVS:Networks/ */
+
 /* Common exec-side open: the reply port, one IOSana2Req-sized request (the
  * superset — netdev commands and the NSD probe use its IOStdReq view, the
  * SANA-II backend the full struct), and the device itself. A SANA-II driver
@@ -82,27 +85,40 @@ static LONG sb_if_open(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
         return NETCTL_ERR_NOMEM;
     struct IOSana2Req *s2io = (struct IOSana2Req *)ctx->devIO;
 
-    /* the path form loads from DEVS: by convention (DEVS:Networks/...);
-     * a resident/expansion module registers under the bare node name, so
-     * retry with the basename before giving up */
-    s2io->ios2_BufferManagement = (APTR)sana2if_buffer_tags();
-    if (OpenDevice((CONST_STRPTR)nif->nif_Device, nif->nif_Unit,
-                   (struct IORequest *)ctx->devIO, 0) != 0)
+    /* Two candidates. A bare name ("3c589.device") means DEVS:Networks/
+     * first, then the name itself (an already-loaded or resident module, or
+     * a driver in DEVS: proper). A path form loads as written, then retries
+     * the basename, under which a resident/expansion module registers. */
+    char networks[sizeof(SB_DEV_NETWORKS) - 1 + NETCTL_DEV_MAX];
+    const char *base = sb_dev_basename(nif->nif_Device);
+    const char *cand[2] = { nif->nif_Device, base };
+    if (base == nif->nif_Device)
     {
-        const char *base = sb_dev_basename(nif->nif_Device);
-        s2io->ios2_BufferManagement = (APTR)sana2if_buffer_tags();
-        if (base == nif->nif_Device ||
-            OpenDevice((CONST_STRPTR)base, nif->nif_Unit,
-                       (struct IORequest *)ctx->devIO, 0) != 0)
-        {
-            *aux = ctx->devIO->io_Error;
-            SB_LOG(NS_LOG_ERR, "%s: cannot open %s unit %ld (error %ld)", nif->nif_Name,
-                   nif->nif_Device, nif->nif_Unit, *aux);
-            return NETCTL_ERR_DEVICE;
-        }
+        strlcpy(networks, SB_DEV_NETWORKS, sizeof(networks));
+        strlcpy(networks + sizeof(SB_DEV_NETWORKS) - 1, nif->nif_Device,
+                sizeof(networks) - (sizeof(SB_DEV_NETWORKS) - 1));
+        cand[0] = networks;
     }
-    ctx->devOpen = TRUE;
-    return NETCTL_OK;
+
+    /* report the more telling failure: a driver that was found and refused
+     * beats a candidate that simply does not exist (IOERR_OPENFAIL) */
+    LONG err = IOERR_OPENFAIL;
+    for (ULONG i = 0; i < 2; i++)
+    {
+        s2io->ios2_BufferManagement = (APTR)sana2if_buffer_tags();
+        if (OpenDevice((CONST_STRPTR)cand[i], nif->nif_Unit,
+                       (struct IORequest *)ctx->devIO, 0) == 0)
+        {
+            ctx->devOpen = TRUE;
+            return NETCTL_OK;
+        }
+        if (err == IOERR_OPENFAIL)
+            err = ctx->devIO->io_Error;
+    }
+    *aux = err;
+    SB_LOG(NS_LOG_ERR, "%s: cannot open %s unit %ld (error %ld)", nif->nif_Name,
+           nif->nif_Device, nif->nif_Unit, *aux);
+    return NETCTL_ERR_DEVICE;
 }
 
 /* AUTO driver-ABI probe over NSD. A netdev driver answers NSCMD_DEVICEQUERY

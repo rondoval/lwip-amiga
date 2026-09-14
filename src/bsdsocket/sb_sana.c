@@ -43,19 +43,6 @@ static BYTE sb_sana_cmd(struct IOSana2Req *io, UWORD cmd)
     return io->ios2_Req.io_Error;
 }
 
-/* a usable station address: non-zero, group bit clear */
-static BOOL sb_sana_mac_usable(const UBYTE *mac)
-{
-    if (mac[0] & 1)
-        return FALSE;
-    for (int i = 0; i < 6; i++)
-    {
-        if (mac[i] != 0)
-            return TRUE;
-    }
-    return FALSE;
-}
-
 LONG sb_sana_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
                 LONG *aux)
 {
@@ -108,25 +95,29 @@ LONG sb_sana_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
         sb_if_down(ctx);
         return NETCTL_ERR_DEVICE;
     }
-    /* Always configure with the FACTORY address (ios2_DstAddr).
-     * ios2_SrcAddr is the current address — all zeros until somebody
-     * configures the unit, so feeding it back would program a
-     * 00:00:00:00:00:00 MAC. */
-    UBYTE mac[6];
+    /* Configure with the FACTORY address (ios2_DstAddr), or the config
+     * file's HARDWAREADDRESS when it names one. ios2_SrcAddr is the current
+     * address — all zeros until somebody configures the unit, so feeding it
+     * back would program a 00:00:00:00:00:00 MAC. */
+    UBYTE mac[6], cur[6];
+    BOOL override = (nif->nif_Flags & NETCTL_IFF_HAS_HWADDR) != 0;
     for (int i = 0; i < 6; i++)
-        mac[i] = io->ios2_DstAddr[i];
-    if (!sb_sana_mac_usable(mac))
+    {
+        mac[i] = override ? nif->nif_HwAddr[i] : io->ios2_DstAddr[i];
+        cur[i] = io->ios2_SrcAddr[i];
+    }
+    if (!netctl_mac_usable(mac))
     {
         SB_LOG(NS_LOG_ERR, "%s: driver reports no usable station address", nif->nif_Name);
         sb_if_down(ctx);
         return NETCTL_ERR_DEVICE;
     }
-    SB_LOG(NS_LOG_INFO, "%s: station address %02lx:%02lx:%02lx:%02lx:%02lx:%02lx",
-           nif->nif_Name, (ULONG)mac[0], (ULONG)mac[1], (ULONG)mac[2], (ULONG)mac[3],
-           (ULONG)mac[4], (ULONG)mac[5]);
 
-    /* Configure with the current station address. Already-configured (a
-     * previous stack instance, or a driver that auto-configures) is fine. */
+    /* Already-configured (a previous stack instance, another opener, or a
+     * driver that auto-configures) is fine, but the unit then keeps the
+     * address it was configured with — SANA-II configures once per unit
+     * lifetime — so adopt that one, or the netif would frame with an address
+     * the driver does not filter for. */
     for (int i = 0; i < 6; i++)
         io->ios2_SrcAddr[i] = mac[i];
     err = sb_sana_cmd(io, S2_CONFIGINTERFACE);
@@ -138,6 +129,13 @@ LONG sb_sana_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
     else if (err == S2ERR_BAD_STATE)
     {
         Kprintf("[bsdsocket] S2_CONFIGINTERFACE: already configured\n");
+        if (netctl_mac_usable(cur))
+        {
+            if (override && memcmp(cur, mac, 6) != 0)
+                SB_LOG(NS_LOG_WARNING, "%s: HARDWAREADDRESS not applied, the unit was "
+                       "already configured with another address", nif->nif_Name);
+            memcpy(mac, cur, 6);
+        }
     }
     else
     {
@@ -147,6 +145,10 @@ LONG sb_sana_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
         sb_if_down(ctx);
         return NETCTL_ERR_DEVICE;
     }
+    SB_LOG(NS_LOG_INFO, "%s: station address %02lx:%02lx:%02lx:%02lx:%02lx:%02lx%s",
+           nif->nif_Name, (ULONG)mac[0], (ULONG)mac[1], (ULONG)mac[2], (ULONG)mac[3],
+           (ULONG)mac[4], (ULONG)mac[5],
+           (override && memcmp(mac, nif->nif_HwAddr, 6) == 0) ? " (HARDWAREADDRESS)" : "");
 
     /* BAD_STATE = already online (many drivers auto-online at configure);
      * IOERR_NOCMD tolerated for odd drivers whose configure is the switch */
