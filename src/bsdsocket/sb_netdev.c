@@ -85,6 +85,7 @@ LONG sb_netdev_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
         return NETCTL_ERR_NOMEM;
     }
     ctx->created = TRUE;
+    sb_if_identify(ctx, nif); /* the driver may report link from here on */
 
     sb_if_configure(ctx, nif);
 

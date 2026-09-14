@@ -185,6 +185,7 @@ LONG sb_sana_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
         return NETCTL_ERR_NOMEM;
     }
     ctx->created = TRUE;
+    sb_if_identify(ctx, nif); /* before the pump: its link tracker fires at once */
 
     /* The pump comes up BEFORE netif_set_up: a static config's set_up emits
      * a gratuitous ARP — staged write — whose SendIO needs the pump's reply

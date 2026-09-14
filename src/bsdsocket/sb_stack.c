@@ -204,18 +204,25 @@ void sb_if_down(struct SbStackCtx *ctx)
     ctx->ifKind = NIF_KIND_NETDEV; /* back to the zero state */
 }
 
-/* Shared bring-up, part 1 — the backend created its netif (still down):
- * stamp the identity and configure the lwIP side. Called by the backend at
- * the point its datapath is ready to carry the frames set_up may emit (a
- * static config issues a gratuitous ARP from netif_set_up). */
+/* Shared bring-up, part 0 — the backend's create just added the netif:
+ * stamp the identity (what the log, the query LVOs and the control port know
+ * this interface as; lwIP's own short name stays with the backend). Called
+ * before anything that can raise netif events — a SANA-II pump's link
+ * tracker, a netdev driver's link change — or they are logged nameless. */
+void sb_if_identify(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif)
+{
+    netifbase_stamp(sb_ctx_base(ctx), nif, ctx->root->netCfg.cfg_Hostname);
+}
+
+/* Shared bring-up, part 1 — the netif is identified (still down): configure
+ * the lwIP side. Called by the backend at the point its datapath is ready to
+ * carry the frames set_up may emit (a static config issues a gratuitous ARP
+ * from netif_set_up). */
 void sb_if_configure(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif)
 {
     struct NetIfBase *nib = sb_ctx_base(ctx);
     struct netif *nf = &nib->nib_Netif;
 
-    /* identity: what the query LVOs and the control port know this interface
-     * as; lwIP's own short name stays with the backend */
-    netifbase_stamp(nib, nif, ctx->root->netCfg.cfg_Hostname);
     if (nif->nif_VlanTci >= 0)
         SB_LOG(NS_LOG_INFO, "%s: VLAN %ld (pcp %ld)", nib->nib_Name,
                (LONG)(nif->nif_VlanTci & 0xFFF), (LONG)((nif->nif_VlanTci >> 13) & 7));
