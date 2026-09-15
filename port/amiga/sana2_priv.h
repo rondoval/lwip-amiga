@@ -64,6 +64,7 @@ struct S2TxReq
 {
     struct IOSana2Req stx_Io;
     struct S2TxReq *stx_Next; /* free list / staged FIFO / harvest batch */
+    BOOL stx_InFlight;        /* queued in the driver, reply pending (core lock) */
 };
 
 /* One read request: ios2_Data points at this struct (the CopyToBuff

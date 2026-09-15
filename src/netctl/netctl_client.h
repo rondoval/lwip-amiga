@@ -30,9 +30,6 @@ BOOL netctl_send(struct NetCtlMsg *msg);
  * back before their stack frames may be reused. */
 void netctl_drain(struct MsgPort *reply, ULONG count);
 
-/* Dotted quad -> network-byte-order ULONG (strict: exactly 4 octets). */
-BOOL netctl_aton(const char *s, ULONG *out);
-
 /* Network-byte-order ULONG -> dotted quad; @buf holds >= 16 bytes. */
 void netctl_ntoa(ULONG addr, char *buf);
 

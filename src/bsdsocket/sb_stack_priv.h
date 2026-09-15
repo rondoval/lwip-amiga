@@ -88,10 +88,12 @@ LONG sb_if_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
  * caller must run sb_stats_drain first if the stats cycle may be live. */
 void sb_if_down(struct SbStackCtx *ctx);
 
-/* Shared bring-up halves for the backends (sb_stack.c): configure = identity
- * stamp + netif default/hostname/address/up (call once the datapath can carry
- * the frames set_up emits); services = DHCP + mDNS (call once the driver is
- * started). */
+/* Shared bring-up steps for the backends (sb_stack.c): identify = identity
+ * stamp (call right after the backend's create added the netif, before
+ * anything can raise netif events); configure = netif default/hostname/
+ * address/up (call once the datapath can carry the frames set_up emits);
+ * services = DHCP + mDNS (call once the driver is started). */
+void sb_if_identify(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif);
 void sb_if_configure(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif);
 void sb_if_services(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif);
 

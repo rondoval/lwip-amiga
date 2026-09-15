@@ -21,19 +21,22 @@
  * interface stays up and keeps trying in the background (exit code 5,
  * "warn").
  *
- * The config file format is lwip-amiga's own — one option per line, '#'/';'
- * comment lines, and an unknown option is an error:
- *   DEVICE/K (required), UNIT/K/N, TYPE/K (AUTO | NETDEV | SANA2; omitted =
- *   AUTO, which probes the device), ADDRESS/K (dotted quad | DHCP; omitted =
- *   DHCP), NETMASK/K + GATEWAY/K (static), MTU/K/N, VLAN/K (vid[,pcp]),
- *   ID/K (per-interface DHCP hostname). DNS is stack-wide: netstack.prefs.
+ * The config file format reads Roadshow interface files unchanged: one
+ * option per line — the option name, '=' and/or blanks, the value — with
+ * '#'/';' comment lines. An unknown option is a warning and is skipped; a
+ * bad value for an option that matters here is an error. Roadshow options
+ * the stack has no use for are accepted and ignored (FILE_TEMPLATE). Added
+ * beyond Roadshow's: TYPE, GATEWAY, VLAN. A bare DEVICE name is found in
+ * DEVS:Networks/. A file with STATE=DOWN is parsed but not added. DNS is
+ * stack-wide: netstack.prefs.
  *
  * Workbench: set AddNetInterface as the Default Tool of an interface file;
- * QUIET / TIMEOUT / PRI come from the project icon's tooltypes and errors
- * show as requesters. Opening bsdsocket.library here is what boots the
+ * QUIET / TIMEOUT / PRI come from the project icon's tooltypes and every
+ * message is a requester. Opening bsdsocket.library here is what boots the
  * (loopback-only) stack when it is not running yet.
  */
 
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -69,34 +72,49 @@ enum
     ARG_COUNT
 };
 
+/* Config file options, looked up with FindArg(): the index is the enum
+ * position. Everything from K_IGNORED on is a Roadshow option that has no
+ * effect here (its value is not even looked at); from K_WARNED on it asks
+ * for something this stack does not do, which is worth a warning. */
 #define FILE_TEMPLATE \
-    "DEVICE/K,UNIT/K/N,TYPE/K,ADDRESS/K,NETMASK/K,GATEWAY/K,MTU/K/N,VLAN/K,ID/K"
+    "DEVICE,UNIT,TYPE,ADDRESS,NETMASK,GATEWAY,CONFIGURE,MTU,VLAN,ID,STATE,HARDWAREADDRESS," \
+    "IPREQUESTS,WRITEREQUESTS,ARPREQUESTS,METRIC,IPTYPE,ARPTYPE,DEBUG,DOWNGOESOFFLINE," \
+    "REPORTOFFLINE,REQUIRESINITDELAY,DHCPUNICAST,POINTTOPOINT,MULTICAST,COPYMODE,FILTER," \
+    "HARDWARETYPE," \
+    "ALIAS,BROADCASTADDRESS,DESTINATION=DESTINATIONADDRESS,LEASE,LINKSTATUSCOMMAND"
 enum
 {
-    FA_DEVICE,
-    FA_UNIT,
-    FA_TYPE,
-    FA_ADDRESS,
-    FA_NETMASK,
-    FA_GATEWAY,
-    FA_MTU,
-    FA_VLAN,
-    FA_ID,
-    FA_COUNT
+    K_DEVICE,
+    K_UNIT,
+    K_TYPE,
+    K_ADDRESS,
+    K_NETMASK,
+    K_GATEWAY,
+    K_CONFIGURE,
+    K_MTU,
+    K_VLAN,
+    K_ID,
+    K_STATE,
+    K_HWADDR,
+    K_IGNORED,                 /* IPREQUESTS: 16 options that only tune Roadshow */
+    K_WARNED = K_IGNORED + 16  /* ALIAS: features the stack lacks */
 };
 
 #define MAX_IFS       16
 #define TIMEOUT_MIN   30
 #define PATH_MAX_LEN  256
+#define LINE_MAX_LEN  512
 
 struct IfEntry
 {
     char path[PATH_MAX_LEN];
-    LONG pri; /* icon PRI/PRIORITY tooltype; higher runs first */
+    LONG pri;  /* icon PRI/PRIORITY tooltype; higher runs first */
+    BOOL skip; /* parsed fine, but STATE=DOWN: not added */
     struct NetCtlIfConfig cfg;
 };
 
 static struct IfEntry ifs[MAX_IFS];
+static struct IfEntry *order[MAX_IFS]; /* ifs[] in run order */
 static ULONG numIfs;
 
 static BOOL fromWb; /* started from Workbench: report through requesters */
@@ -112,7 +130,7 @@ static void report(BOOL error, const char *fmt, ...)
         return;
     va_list ap;
     va_start(ap, fmt);
-    vsprintf(msgbuf, fmt, ap);
+    vsnprintf(msgbuf, sizeof(msgbuf), fmt, ap);
     va_end(ap);
 
     if (fromWb)
@@ -163,42 +181,250 @@ static LONG icon_pri(const char *path)
     return pri;
 }
 
-/* VLAN = <vid>[,<pcp>]  (vid 1..4094, pcp 0..7) -> (pcp<<13)|vid */
-static BOOL parse_vlan(const char *val, LONG *tci)
-{
-    char buf[32];
-    strncpy(buf, val, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
+/* ------------------------------------------------------------------------ */
+/* Config file parser                                                       */
 
-    LONG pcp = 0;
-    char *comma = strchr(buf, ',');
-    if (comma != NULL)
+struct Parse
+{
+    struct NetCtlIfConfig *cfg;
+    const char *path;
+    LONG line;        /* current line; 0 = a message about the whole file */
+    const char *opt;  /* option name of the current line (points into it) */
+    ULONG staticAddr; /* a dotted-quad ADDRESS; 0 = none seen */
+    BOOL dhcp;        /* ADDRESS=DHCP, NETMASK=DHCP or CONFIGURE=DHCP seen */
+    BOOL down;        /* STATE=DOWN or OFFLINE */
+};
+
+/* One diagnostic about the current line (or the file when line == 0). An
+ * error stops the file, a warning does not: the result is "go on". */
+static BOOL say(struct Parse *ps, BOOL error, const char *msg)
+{
+    const char *pfx = error ? "" : "warning: ";
+    if (ps->line > 0)
+        report(error, "%s'%s' line %ld: %s: %s", pfx, ps->path, (long)ps->line, ps->opt, msg);
+    else
+        report(error, "%s'%s': %s", pfx, ps->path, msg);
+    return !error;
+}
+
+/* the whole of @s is one decimal number */
+static BOOL num(const char *s, LONG *out)
+{
+    LONG n = StrToLong((CONST_STRPTR)s, out);
+    return n > 0 && s[n] == '\0';
+}
+
+/* dotted quad -> network-byte-order word (68k is big-endian) */
+static BOOL aton(const char *s, ULONG *out)
+{
+    ULONG v = 0;
+    for (int i = 0; i < 4; i++)
     {
-        *comma = '\0';
-        if (StrToLong((STRPTR)(comma + 1), &pcp) <= 0 || pcp < 0 || pcp > 7)
+        LONG octet;
+        LONG n = StrToLong((CONST_STRPTR)s, &octet);
+        if (n <= 0 || octet < 0 || octet > 255 || s[n] != (i < 3 ? '.' : '\0'))
             return FALSE;
+        v = (v << 8) | (ULONG)octet;
+        s += n + 1;
     }
-    LONG vid;
-    if (StrToLong((STRPTR)buf, &vid) <= 0 || vid < 1 || vid > 4094)
-        return FALSE;
-    *tci = ((pcp & 7) << 13) | (vid & 0xFFF);
+    *out = v;
     return TRUE;
 }
 
-/* Parse one interface file into @cfg. Strict: any unknown or malformed
- * option is an error with file and line number — a typo must not silently
- * come up misconfigured. */
-static BOOL parse_file(const char *path, struct NetCtlIfConfig *cfg)
+/* six hex octets separated by ':' or '-' */
+static BOOL mac(const char *s, UBYTE *out)
 {
+    for (int i = 0; i < 6; i++)
+    {
+        char *end;
+        ULONG v = strtoul(s, &end, 16);
+        if (end - s < 1 || end - s > 2)
+            return FALSE;
+        if (i < 5 ? (*end != ':' && *end != '-') : *end != '\0')
+            return FALSE;
+        out[i] = (UBYTE)v;
+        s = end + 1;
+    }
+    return TRUE;
+}
+
+/* One line as read (newline included; modified in place). FALSE = stop. */
+static BOOL parse_line(struct Parse *ps, char *line)
+{
+    size_t len = strlen(line);
+    while (len > 0 && isspace((unsigned char)line[len - 1]))
+        line[--len] = '\0';
+
+    char *p = line;
+    while (isspace((unsigned char)*p))
+        p++;
+    if (*p == '\0' || *p == '#' || *p == ';')
+        return TRUE;
+
+    /* option name up to a blank or '='; any run of both separates the value */
+    char *key = p;
+    while (*p != '\0' && *p != '=' && !isspace((unsigned char)*p))
+        p++;
+    char *val = p;
+    while (*val == '=' || isspace((unsigned char)*val))
+        val++;
+    *p = '\0';
+    ps->opt = key;
+
+    LONG k = FindArg((CONST_STRPTR)FILE_TEMPLATE, (CONST_STRPTR)key);
+    if (k < 0)
+        return say(ps, FALSE, "unknown option, ignored");
+    if (k >= K_WARNED)
+        return say(ps, FALSE, "not supported, ignored");
+    if (k >= K_IGNORED)
+        return TRUE;
+    if (*val == '\0')
+        return say(ps, TRUE, "needs a value");
+
+    struct NetCtlIfConfig *cfg = ps->cfg;
+    LONG n;
+    switch (k)
+    {
+    case K_DEVICE:
+        if (strlen(val) > NETCTL_DEV_MAX - 1)
+            return say(ps, TRUE, "longer than 63 characters");
+        strcpy(cfg->nif_Device, val);
+        return TRUE;
+    case K_UNIT:
+        if (num(val, &cfg->nif_Unit))
+            return TRUE;
+        break;
+    case K_TYPE:
+        n = FindArg((CONST_STRPTR) "AUTO,NETDEV,SANA2", (CONST_STRPTR)val); /* = NETCTL_TYPE_* */
+        if (n >= 0)
+        {
+            cfg->nif_Type = n;
+            return TRUE;
+        }
+        break;
+    case K_ADDRESS:
+        if (stricmp(val, "DHCP") == 0)
+        {
+            ps->dhcp = TRUE;
+            return TRUE;
+        }
+        if (aton(val, &ps->staticAddr))
+            return TRUE;
+        break;
+    case K_NETMASK:
+        if (stricmp(val, "DHCP") == 0)
+        {
+            ps->dhcp = TRUE;
+            return TRUE;
+        }
+        if (aton(val, &cfg->nif_Mask))
+        {
+            cfg->nif_Flags |= NETCTL_IFF_HAS_MASK;
+            return TRUE;
+        }
+        break;
+    case K_GATEWAY:
+        if (aton(val, &cfg->nif_Gateway))
+        {
+            cfg->nif_Flags |= NETCTL_IFF_HAS_GW;
+            return TRUE;
+        }
+        break;
+    case K_CONFIGURE:
+        n = FindArg((CONST_STRPTR) "DHCP,AUTO=SLOWAUTO,FASTAUTO", (CONST_STRPTR)val);
+        if (n > 0)
+            return say(ps, TRUE, "ZeroConf is not supported - use DHCP or a fixed ADDRESS");
+        if (n == 0)
+        {
+            ps->dhcp = TRUE;
+            return TRUE;
+        }
+        break;
+    case K_MTU: /* 0 = the driver's own */
+        if (num(val, &cfg->nif_Mtu) && cfg->nif_Mtu >= 0)
+        {
+            if (cfg->nif_Mtu > 0)
+                cfg->nif_Flags |= NETCTL_IFF_HAS_MTU;
+            else
+                cfg->nif_Flags &= ~NETCTL_IFF_HAS_MTU;
+            return TRUE;
+        }
+        break;
+    case K_VLAN: /* <vid>[,<pcp>]: vid 1..4094, pcp 0..7 -> TCI (pcp<<13)|vid */
+    {
+        char *pcpStr = strchr(val, ',');
+        if (pcpStr != NULL)
+            *pcpStr++ = '\0';
+        LONG vid, pcp = 0;
+        if (!num(val, &vid) || vid < 1 || vid > 4094)
+            break;
+        if (pcpStr != NULL && (!num(pcpStr, &pcp) || pcp < 0 || pcp > 7))
+            break;
+        cfg->nif_VlanTci = (pcp << 13) | vid;
+        return TRUE;
+    }
+    case K_ID:
+        n = (LONG)strlen(val);
+        if (n < 2 || n > NETCTL_ID_MAX - 1)
+            return say(ps, TRUE, "must be 2 to 63 characters long");
+        strcpy(cfg->nif_Id, val);
+        return TRUE;
+    case K_STATE:
+        n = FindArg((CONST_STRPTR) "UP=ONLINE,DOWN=OFFLINE", (CONST_STRPTR)val);
+        if (n >= 0)
+        {
+            ps->down = n == 1;
+            return TRUE;
+        }
+        break;
+    case K_HWADDR:
+        if (mac(val, cfg->nif_HwAddr) && netctl_mac_usable(cfg->nif_HwAddr))
+        {
+            cfg->nif_Flags |= NETCTL_IFF_HAS_HWADDR;
+            return TRUE;
+        }
+        break;
+    }
+    return say(ps, TRUE, "bad value");
+}
+
+/* Whole-file checks after the last line. FALSE = the file is unusable. */
+static BOOL parse_end(struct Parse *ps)
+{
+    struct NetCtlIfConfig *cfg = ps->cfg;
+    if (cfg->nif_Device[0] == '\0')
+        return say(ps, TRUE, "DEVICE is required");
+
+    /* no address at all is DHCP too — the one thing an address-less
+     * interface can usefully do here */
+    BOOL dhcp = ps->dhcp || ps->staticAddr == 0;
+    if (!dhcp && !(cfg->nif_Flags & NETCTL_IFF_HAS_MASK))
+        return say(ps, TRUE, "a fixed ADDRESS needs a NETMASK");
+    if (!dhcp)
+    {
+        cfg->nif_Addr = ps->staticAddr;
+        return TRUE;
+    }
+    cfg->nif_Flags |= NETCTL_IFF_DHCP;
+    if (ps->staticAddr != 0)
+        return say(ps, FALSE, "ADDRESS ignored, DHCP assigns the address");
+    return TRUE;
+}
+
+/* Parse one interface file into @cfg; the FILE NAME is the interface name.
+ * FALSE = an error was reported. *skip is set for a STATE=DOWN file. */
+static BOOL parse_file(const char *path, struct NetCtlIfConfig *cfg, BOOL *skip)
+{
+    static char line[LINE_MAX_LEN]; /* one file at a time */
+
     const char *name = (const char *)FilePart((CONST_STRPTR)path);
-    ULONG nameLen = strlen(name);
+    size_t nameLen = strlen(name);
     if (nameLen == 0 || nameLen > NETCTL_IFNAME_MAX - 1)
     {
-        report(TRUE, "'%s': interface name '%s' is longer than %d characters",
-               path, name, NETCTL_IFNAME_MAX - 1);
+        report(TRUE, "'%s': the file name is the interface name and must be 1 to %d "
+                     "characters long", path, NETCTL_IFNAME_MAX - 1);
         return FALSE;
     }
-
     memset(cfg, 0, sizeof(*cfg));
     strcpy(cfg->nif_Name, name);
     cfg->nif_VlanTci = -1;
@@ -209,156 +435,27 @@ static BOOL parse_file(const char *path, struct NetCtlIfConfig *cfg)
         report(TRUE, "cannot open '%s'", path);
         return FALSE;
     }
-    struct RDArgs *rda = AllocDosObject(DOS_RDARGS, NULL);
-    if (rda == NULL)
-    {
-        Close(fh);
-        report(TRUE, "out of memory");
-        return FALSE;
-    }
 
+    struct Parse ps = { .cfg = cfg, .path = path };
     BOOL ok = TRUE;
-    BOOL dhcp = FALSE, haveAddr = FALSE;
-    LONG lineNo = 0;
-    char line[258];
-    while (ok && FGets(fh, (STRPTR)line, sizeof(line) - 2) != NULL)
+    while (ok && FGets(fh, (STRPTR)line, sizeof(line) - 1) != NULL)
     {
-        lineNo++;
-        char *p = line;
-        while (*p == ' ' || *p == '\t')
-            p++;
-        if (*p == '\0' || *p == '\n' || *p == '#' || *p == ';')
-            continue;
-
-        /* ReadArgs needs the buffer newline-terminated */
-        ULONG len = strlen(p);
-        if (p[len - 1] != '\n')
-        {
-            p[len] = '\n';
-            p[++len] = '\0';
-        }
-
-        LONG vals[FA_COUNT];
-        memset(vals, 0, sizeof(vals));
-        rda->RDA_Source.CS_Buffer = (UBYTE *)p;
-        rda->RDA_Source.CS_Length = (LONG)len;
-        rda->RDA_Source.CS_CurChr = 0;
-        rda->RDA_DAList = 0;
-        rda->RDA_Flags = RDAF_NOPROMPT;
-
-        if (ReadArgs((CONST_STRPTR)FILE_TEMPLATE, vals, rda) == NULL)
-        {
-            report(TRUE, "'%s' line %ld: unknown or malformed option", path, lineNo);
-            ok = FALSE;
-            break;
-        }
-
-        if (vals[FA_DEVICE] != 0)
-            strncpy(cfg->nif_Device, (char *)vals[FA_DEVICE], NETCTL_DEV_MAX - 1);
-        if (vals[FA_UNIT] != 0)
-            cfg->nif_Unit = *(LONG *)vals[FA_UNIT];
-        if (vals[FA_TYPE] != 0)
-        {
-            const char *v = (char *)vals[FA_TYPE];
-            if (stricmp(v, "AUTO") == 0)
-                cfg->nif_Type = NETCTL_TYPE_AUTO;
-            else if (stricmp(v, "NETDEV") == 0)
-                cfg->nif_Type = NETCTL_TYPE_NETDEV;
-            else if (stricmp(v, "SANA2") == 0)
-                cfg->nif_Type = NETCTL_TYPE_SANA2;
-            else
-            {
-                report(TRUE, "'%s' line %ld: bad TYPE '%s' (AUTO | NETDEV | SANA2)",
-                       path, lineNo, v);
-                ok = FALSE;
-            }
-        }
-        if (ok && vals[FA_ADDRESS] != 0)
-        {
-            const char *v = (char *)vals[FA_ADDRESS];
-            if (stricmp(v, "DHCP") == 0)
-            {
-                dhcp = TRUE;
-                haveAddr = TRUE;
-            }
-            else if (netctl_aton(v, &cfg->nif_Addr))
-            {
-                dhcp = FALSE;
-                haveAddr = TRUE;
-            }
-            else
-            {
-                report(TRUE, "'%s' line %ld: bad ADDRESS '%s'", path, lineNo, v);
-                ok = FALSE;
-            }
-        }
-        if (ok && vals[FA_NETMASK] != 0)
-        {
-            if (netctl_aton((char *)vals[FA_NETMASK], &cfg->nif_Mask))
-                cfg->nif_Flags |= NETCTL_IFF_HAS_MASK;
-            else
-            {
-                report(TRUE, "'%s' line %ld: bad NETMASK", path, lineNo);
-                ok = FALSE;
-            }
-        }
-        if (ok && vals[FA_GATEWAY] != 0)
-        {
-            if (netctl_aton((char *)vals[FA_GATEWAY], &cfg->nif_Gateway))
-                cfg->nif_Flags |= NETCTL_IFF_HAS_GW;
-            else
-            {
-                report(TRUE, "'%s' line %ld: bad GATEWAY", path, lineNo);
-                ok = FALSE;
-            }
-        }
-        if (ok && vals[FA_MTU] != 0)
-        {
-            LONG mtu = *(LONG *)vals[FA_MTU];
-            if (mtu > 0)
-            {
-                cfg->nif_Mtu = mtu;
-                cfg->nif_Flags |= NETCTL_IFF_HAS_MTU;
-            }
-            else
-            {
-                report(TRUE, "'%s' line %ld: bad MTU", path, lineNo);
-                ok = FALSE;
-            }
-        }
-        if (ok && vals[FA_VLAN] != 0)
-        {
-            if (!parse_vlan((char *)vals[FA_VLAN], &cfg->nif_VlanTci))
-            {
-                report(TRUE, "'%s' line %ld: bad VLAN (vid[,pcp])", path, lineNo);
-                ok = FALSE;
-            }
-        }
-        if (ok && vals[FA_ID] != 0)
-            strncpy(cfg->nif_Id, (char *)vals[FA_ID], NETCTL_ID_MAX - 1);
-
-        FreeArgs(rda);
+        ps.line++;
+        ok = parse_line(&ps, line);
     }
-
-    FreeDosObject(DOS_RDARGS, rda);
     Close(fh);
-    if (!ok)
+
+    ps.line = 0;
+    if (!ok || !parse_end(&ps))
         return FALSE;
 
-    if (cfg->nif_Device[0] == '\0')
-    {
-        report(TRUE, "'%s': DEVICE is required", path);
-        return FALSE;
-    }
-    if (!haveAddr || dhcp)
-        cfg->nif_Flags |= NETCTL_IFF_DHCP;
-    else if (!(cfg->nif_Flags & NETCTL_IFF_HAS_MASK))
-    {
-        report(TRUE, "'%s': a static ADDRESS needs a NETMASK", path);
-        return FALSE;
-    }
+    *skip = ps.down;
+    if (ps.down)
+        report(FALSE, "'%s': STATE=DOWN, interface not added", path);
     return TRUE;
 }
+
+/* ------------------------------------------------------------------------ */
 
 static BOOL add_entry(const char *path)
 {
@@ -370,7 +467,7 @@ static BOOL add_entry(const char *path)
     struct IfEntry *e = &ifs[numIfs];
     strncpy(e->path, path, sizeof(e->path) - 1);
     e->pri = icon_pri(path);
-    if (!parse_file(path, &e->cfg))
+    if (!parse_file(path, &e->cfg, &e->skip))
         return FALSE;
     numIfs++;
     return TRUE;
@@ -380,7 +477,9 @@ static BOOL add_entry(const char *path)
  * against the standard drawers */
 static BOOL collect_arg(const char *arg)
 {
-    char patbuf[PATH_MAX_LEN * 2];
+    static char patbuf[PATH_MAX_LEN * 2];
+    static char path[PATH_MAX_LEN];
+
     LONG isPat = ParsePatternNoCase((CONST_STRPTR)arg, (STRPTR)patbuf, sizeof(patbuf));
     if (isPat < 0)
     {
@@ -424,45 +523,49 @@ static BOOL collect_arg(const char *arg)
         return ok;
     }
 
-    if (file_exists(arg))
-        return add_entry(arg);
-
-    /* bare name: only the ACTIVE drawer — a config parked in
+    /* bare name: only the ACTIVE drawer - a config parked in
      * SYS:Storage/NetInterfaces is deliberately not resolvable by name
-     * (activate it by moving it to DEVS:NetInterfaces, AmigaOS-style;
+     * (activate it by moving it to DEVS:NetInterfaces;
      * an explicit path still works) */
     if (FilePart((CONST_STRPTR)arg) == (STRPTR)arg)
     {
-        char path[PATH_MAX_LEN];
         strcpy(path, "DEVS:NetInterfaces");
         if (AddPart((STRPTR)path, (CONST_STRPTR)arg, sizeof(path)) && file_exists(path))
             return add_entry(path);
+        report(TRUE, "interface '%s' not found (looked in DEVS:NetInterfaces)", arg);
+        return FALSE;
     }
-    report(TRUE, "interface '%s' not found (looked in DEVS:NetInterfaces)", arg);
+
+    if (file_exists(arg))
+        return add_entry(arg);
+
+    report(TRUE, "interface file '%s' not found", arg);
     return FALSE;
 }
 
-/* higher PRI first, ties alphabetically (insertion sort; the list is tiny) */
+/* order[]: higher PRI first, ties alphabetically (insertion sort; tiny list) */
 static void sort_entries(void)
 {
-    for (ULONG i = 1; i < numIfs; i++)
+    for (ULONG i = 0; i < numIfs; i++)
     {
-        struct IfEntry tmp = ifs[i];
+        struct IfEntry *e = &ifs[i];
         ULONG j = i;
         while (j > 0 &&
-               (ifs[j - 1].pri < tmp.pri ||
-                (ifs[j - 1].pri == tmp.pri &&
-                 strcmp(ifs[j - 1].cfg.nif_Name, tmp.cfg.nif_Name) > 0)))
+               (order[j - 1]->pri < e->pri ||
+                (order[j - 1]->pri == e->pri &&
+                 strcmp(order[j - 1]->cfg.nif_Name, e->cfg.nif_Name) > 0)))
         {
-            ifs[j] = ifs[j - 1];
+            order[j] = order[j - 1];
             j--;
         }
-        ifs[j] = tmp;
+        order[j] = e;
     }
 }
 
 static BOOL wb_collect(struct WBStartup *wbs)
 {
+    static char wbPath[PATH_MAX_LEN];
+
     IntuitionBase = (struct IntuitionBase *)OpenLibrary((CONST_STRPTR) "intuition.library", 36);
 
     if (wbs->sm_NumArgs < 2)
@@ -501,11 +604,10 @@ static BOOL wb_collect(struct WBStartup *wbs)
             }
         }
 
-        char path[PATH_MAX_LEN];
-        BOOL ok = NameFromLock(wa->wa_Lock, (STRPTR)path, sizeof(path)) &&
-                  AddPart((STRPTR)path, wa->wa_Name, sizeof(path));
+        BOOL ok = NameFromLock(wa->wa_Lock, (STRPTR)wbPath, sizeof(wbPath)) &&
+                  AddPart((STRPTR)wbPath, wa->wa_Name, sizeof(wbPath));
         CurrentDir(old);
-        if (!ok || !collect_arg(path))
+        if (!ok || !collect_arg(wbPath))
             return FALSE;
     }
     return numIfs > 0;
@@ -530,7 +632,8 @@ static void flush_dead_library(void)
 static int run_add(struct IfEntry *e, struct MsgPort *reply,
                    struct timerequest *treq, struct MsgPort *timerPort, BOOL *broke)
 {
-    struct NetCtlMsg msg, cancel;
+    static struct NetCtlMsg msg, cancel; /* one add in flight at a time */
+
     netctl_msg_init(&msg, reply, NETCTL_OP_ADD_IF);
     msg.ncm_Config = e->cfg;
 
@@ -664,7 +767,12 @@ int main(int argc, char **argv)
         }
     }
 
-    if (rc == RETURN_OK && numIfs > 0)
+    ULONG numActive = 0;
+    for (ULONG i = 0; rc == RETURN_OK && i < numIfs; i++)
+        numActive += ifs[i].skip ? 0 : 1;
+
+    /* STATE=DOWN files only: nothing to add, and no reason to boot the stack */
+    if (rc == RETURN_OK && numActive > 0)
     {
         sort_entries();
         flush_dead_library();
@@ -696,7 +804,9 @@ int main(int argc, char **argv)
                 BOOL broke = FALSE;
                 for (ULONG i = 0; i < numIfs && !broke; i++)
                 {
-                    int r = run_add(&ifs[i], reply, treq, timerPort, &broke);
+                    if (order[i]->skip)
+                        continue;
+                    int r = run_add(order[i], reply, treq, timerPort, &broke);
                     if (r > rc)
                         rc = r;
                 }

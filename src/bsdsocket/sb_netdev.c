@@ -56,6 +56,28 @@ LONG sb_netdev_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
     }
     ctx->attached = TRUE;
 
+    /* HARDWAREADDRESS:
+     * ndc_Mac was reported at ATTACH, so the netif's copy is patched here.
+     * A driver without SET_MAC keeps its own address: that is a warning,
+     * not a failed interface. */
+    if (nif->nif_Flags & NETCTL_IFF_HAS_HWADDR)
+    {
+        UBYTE mac[6];
+        memcpy(mac, nif->nif_HwAddr, sizeof(mac));
+        err = sb_netdev_cmd(ctx->devIO, NETDEV_CMD_SET_MAC, mac, sizeof(mac));
+        if (err == 0)
+            memcpy(att.nda_Caps.ndc_Mac, mac, sizeof(mac));
+        else
+            SB_LOG(NS_LOG_WARNING, "%s: HARDWAREADDRESS not applied (driver error %ld)",
+                   nif->nif_Name, (LONG)err);
+    }
+    const UBYTE *mac = att.nda_Caps.ndc_Mac;
+    SB_LOG(NS_LOG_INFO, "%s: station address %02lx:%02lx:%02lx:%02lx:%02lx:%02lx%s",
+           nif->nif_Name, (ULONG)mac[0], (ULONG)mac[1], (ULONG)mac[2], (ULONG)mac[3],
+           (ULONG)mac[4], (ULONG)mac[5],
+           ((nif->nif_Flags & NETCTL_IFF_HAS_HWADDR) &&
+            memcmp(mac, nif->nif_HwAddr, 6) == 0) ? " (HARDWAREADDRESS)" : "");
+
     if (netdevif_create(&ctx->ndi, att.nda_DrvCtx, att.nda_DrvOps, &att.nda_Caps) != 0)
     {
         SB_LOG(NS_LOG_ERR, "%s: out of memory creating the interface", nif->nif_Name);
@@ -63,6 +85,7 @@ LONG sb_netdev_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
         return NETCTL_ERR_NOMEM;
     }
     ctx->created = TRUE;
+    sb_if_identify(ctx, nif); /* the driver may report link from here on */
 
     sb_if_configure(ctx, nif);
 

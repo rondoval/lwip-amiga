@@ -107,8 +107,9 @@ static void s2if_begin_io(struct IORequest *ior)
  * harvest. Under the core lock either way. */
 static void s2if_tx_retire(struct Sana2If *s2i, struct S2TxReq *req)
 {
-    if (req->stx_Io.ios2_Req.io_Error != 0)
-        s2i->s2i_TxErrors++;
+    if (req->stx_Io.ios2_Req.io_Error != 0 && !s2i->s2i_TxDown)
+        s2i->s2i_TxErrors++; /* teardown aborts are not link errors */
+    req->stx_InFlight = FALSE;
     pbuf_free((struct pbuf *)req->stx_Io.ios2_Data);
     req->stx_Io.ios2_Data = NULL;
     req->stx_Next = s2i->s2i_TxFree;
@@ -148,7 +149,10 @@ void sana2if_tx_flush(struct Sana2If *s2i)
         if (req->stx_Io.ios2_Req.io_Flags & IOF_QUICK)
             s2if_tx_retire(s2i, req); /* completed in place */
         else
-            s2i->s2i_TxInFlight++; /* queued; replies to the pump */
+        {
+            req->stx_InFlight = TRUE; /* queued; replies to the pump */
+            s2i->s2i_TxInFlight++;
+        }
         req = next;
     }
     PERF_ADD(&ns_perf, NSP_TX_SUBMIT, t_sub);

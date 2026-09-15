@@ -17,14 +17,16 @@
  *
  * Lifecycle: started before netif_set_up (the TX pool's reply ports must be
  * stamped before anything can stage a write) with a ready handshake;
- * stopped with CTRL_C — the pump AbortIO()s its reads and the event
- * request, then drains until every read is home AND every in-flight write
- * has completed, frees its pbufs/port and signals back. After stop the
- * driver holds no pointer of ours.
+ * stopped with CTRL_C — the pump AbortIO()s its reads, the event request
+ * and every write still queued in the driver, then drains until all of
+ * them are home, logging once a second whatever the driver holds on to,
+ * frees its pbufs/port and signals back. After stop the driver holds no
+ * pointer of ours.
  */
 
 #include "netstack_sys.h"
 
+#include <devices/timer.h>
 #include <dos/dosextens.h>
 #include <dos/dostags.h>
 
@@ -76,6 +78,11 @@ struct S2Pump
     ULONG s2p_Flight;
     struct S2RxReq *s2p_Parked;
     BOOL s2p_Draining;
+    /* teardown tick, replies to s2p_Port like everything else: once a
+     * second it reports what the driver still holds, so a driver that never
+     * replies shows up in the log instead of as a silent hang */
+    struct timerequest s2p_Timer;
+    BOOL s2p_TimerOpen, s2p_TimerPending, s2p_TimerFired;
     /* per-wake harvest batches: s2if_pump_harvest fills, txev/rx consume */
     struct S2TxReq *s2p_TxDone;
     struct S2RxReq *s2p_RxDone;
@@ -267,8 +274,24 @@ static void s2if_pump_free(struct S2Pump *pp)
         DeleteMsgPort(pp->s2p_Port);
 }
 
+static void s2if_pump_drain_arm(struct S2Pump *pp)
+{
+    if (!pp->s2p_TimerOpen)
+        return;
+    pp->s2p_Timer.tr_node.io_Command = TR_ADDREQUEST;
+    pp->s2p_Timer.tr_time.tv_secs = 1;
+    pp->s2p_Timer.tr_time.tv_micro = 0;
+    SendIO(&pp->s2p_Timer.tr_node);
+    pp->s2p_TimerPending = TRUE;
+}
+
+/* Recall everything the driver holds: the reads, the link tracker and every
+ * write still queued there. Aborted requests reply like completed ones and
+ * drain through the normal harvest. */
 static void s2if_pump_abort(struct S2Pump *pp)
 {
+    struct Sana2If *s2i = pp->s2p_If;
+
     pp->s2p_Draining = TRUE;
     for (ULONG i = 0; i < pp->s2p_NumReads; i++)
     {
@@ -277,6 +300,51 @@ static void s2if_pump_abort(struct S2Pump *pp)
     }
     if (!pp->s2p_EvHome && !pp->s2p_EvDead)
         AbortIO(&pp->s2p_Ev.ios2_Req);
+
+    /* staging stopped before the stop was requested (s2i_TxDown), so the
+     * in-flight set is final under this hold; a write already replied but
+     * not yet harvested is a no-op for the driver's AbortIO */
+    netstack_lock();
+    ULONG writes = s2i->s2i_TxInFlight;
+    struct S2TxReq *t = s2i->s2i_TxStorage;
+    for (ULONG i = 0; i < S2IF_TX_REQS; i++, t++)
+    {
+        if (t->stx_InFlight)
+            AbortIO(&t->stx_Io.ios2_Req);
+    }
+    netstack_unlock();
+    if (writes != 0)
+        netstack_log(NS_LOG_WARNING, "%s: teardown with %lu writes in the driver, aborting them",
+                     s2i->s2i_Base.nib_Name, writes);
+
+    /* the drain tick is only needed from here on; without it the drain still
+     * works, it just cannot report a driver that holds on */
+    struct timerequest *tr = &pp->s2p_Timer;
+    tr->tr_node.io_Message.mn_Node.ln_Type = NT_REPLYMSG;
+    tr->tr_node.io_Message.mn_ReplyPort = pp->s2p_Port;
+    tr->tr_node.io_Message.mn_Length = sizeof(*tr);
+    if (OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_VBLANK, &tr->tr_node, 0) == 0)
+    {
+        pp->s2p_TimerOpen = TRUE;
+        s2if_pump_drain_arm(pp);
+    }
+}
+
+/* Once a second while draining: what the driver still holds. */
+static void s2if_pump_drain_tick(struct S2Pump *pp)
+{
+    if (!pp->s2p_TimerFired)
+        return;
+    pp->s2p_TimerFired = FALSE;
+
+    struct Sana2If *s2i = pp->s2p_If;
+    netstack_lock();
+    ULONG writes = s2i->s2i_TxInFlight;
+    netstack_unlock();
+    netstack_log(NS_LOG_WARNING, "%s: draining, the driver still holds %lu reads, %lu writes%s",
+                 s2i->s2i_Base.nib_Name, pp->s2p_Flight, writes,
+                 (pp->s2p_EvHome || pp->s2p_EvDead) ? "" : " and the event request");
+    s2if_pump_drain_arm(pp);
 }
 
 /* Harvest the port into the per-wake batches. Reads are chained FIFO (the
@@ -291,6 +359,12 @@ static void s2if_pump_harvest(struct S2Pump *pp)
     struct Message *m;
     while ((m = GetMsg(pp->s2p_Port)) != NULL)
     {
+        if (m == &pp->s2p_Timer.tr_node.io_Message)
+        {
+            pp->s2p_TimerPending = FALSE;
+            pp->s2p_TimerFired = TRUE;
+            continue;
+        }
         struct IOSana2Req *io = (struct IOSana2Req *)m;
         if (io == &pp->s2p_Ev)
         {
@@ -558,8 +632,22 @@ static void s2if_pump_task(void)
         s2if_pump_txev(&pump);
         s2if_pump_rx(&pump);
 
-        if (pump.s2p_Draining && s2if_pump_drained(&pump))
-            break;
+        if (pump.s2p_Draining)
+        {
+            if (s2if_pump_drained(&pump))
+                break;
+            s2if_pump_drain_tick(&pump);
+        }
+    }
+
+    if (pump.s2p_TimerOpen)
+    {
+        if (pump.s2p_TimerPending)
+        {
+            AbortIO(&pump.s2p_Timer.tr_node);
+            WaitIO(&pump.s2p_Timer.tr_node);
+        }
+        CloseDevice(&pump.s2p_Timer.tr_node);
     }
 
     netstack_lock();

@@ -45,36 +45,6 @@ void netctl_drain(struct MsgPort *reply, ULONG count)
     }
 }
 
-BOOL netctl_aton(const char *s, ULONG *out)
-{
-    ULONG v = 0;
-    for (int i = 0; i < 4; i++)
-    {
-        ULONG octet = 0;
-        int digits = 0;
-        while (*s >= '0' && *s <= '9')
-        {
-            octet = octet * 10 + (ULONG)(*s - '0');
-            if (octet > 255 || ++digits > 3)
-                return FALSE;
-            s++;
-        }
-        if (digits == 0)
-            return FALSE;
-        v = (v << 8) | octet;
-        if (i < 3)
-        {
-            if (*s != '.')
-                return FALSE;
-            s++;
-        }
-    }
-    if (*s != '\0')
-        return FALSE;
-    *out = v; /* 68k is big-endian: this IS network byte order */
-    return TRUE;
-}
-
 void netctl_ntoa(ULONG addr, char *buf)
 {
     sprintf(buf, "%lu.%lu.%lu.%lu", (addr >> 24) & 0xFF, (addr >> 16) & 0xFF,

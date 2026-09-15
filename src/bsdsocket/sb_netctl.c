@@ -179,6 +179,8 @@ static LONG sb_netctl_add(struct SbStackCtx *ctx, struct NetCtlMsg *msg)
         return NETCTL_ERR_PARAM;
     if ((nif->nif_Flags & NETCTL_IFF_HAS_MTU) && nif->nif_Mtu <= 0)
         return NETCTL_ERR_PARAM;
+    if ((nif->nif_Flags & NETCTL_IFF_HAS_HWADDR) && !netctl_mac_usable(nif->nif_HwAddr))
+        return NETCTL_ERR_PARAM;
     if (!(nif->nif_Flags & NETCTL_IFF_DHCP) &&
         (nif->nif_Addr == 0 || !(nif->nif_Flags & NETCTL_IFF_HAS_MASK)))
         return NETCTL_ERR_PARAM; /* static needs at least ADDRESS + NETMASK */
