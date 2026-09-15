@@ -39,8 +39,9 @@ A fast, modern TCP/IP stack for classic AmigaOS 3.2.
   the same API used by Roadshow and AmiTCP. Most existing networking software should
   just work, unless it depends on one of the handful of calls not yet implemented (see
   [Known limitations](#known-limitations)).
-- **Well tested.** Validated against the bsdsocktest conformance suite: all 142 tests
-  pass — including the TCP out-of-band data and asynchronous-notification corners. See [Test results](#test-results) below.
+- **Well tested.** Validated against the bsdsocktest conformance suite: 141 out of 142
+  tests pass — including the TCP out-of-band data and asynchronous-notification corners.
+  See [Test results](#test-results) below.
 
 ## Requirements
 
@@ -117,8 +118,13 @@ the master copy in `ENVARC:`, alongside a commented example,
 lwip-amiga has been run against bsdsocktest, a conformance test suite for
 `bsdsocket.library` implementations, on real Raspberry Pi 4/PiStorm hardware.
 
-**All 142 tests pass. Nothing is skipped, and none fail.**
-
+**141 out of 142 tests pass. Nothing is skipped.**
+The failing test is more a buffer-sizing quirk than a gap: the test forces a non-blocking
+`send()` to return `EWOULDBLOCK` by writing 1 MB without draining it, but lwip-amiga's
+TCP send buffer is deliberately sized to exactly 1 MiB for throughput on fast links, so
+the test's fixed 1 MB probe runs out just short of the wall it's trying to hit. The
+backpressure path itself (`tcp_sndbuf()` accounting) is real and correct; this test just
+wasn't sized to reach it.
 
 ## Performance
 

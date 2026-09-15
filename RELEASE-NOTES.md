@@ -80,8 +80,8 @@ TCP urgent data now works end to end: `MSG_OOB` on send and receive,
 `SO_OOBINLINE`, `SIOCATMARK`, exception reporting in `WaitSelect()` and the
 `SetSocketSignals()` urgent-data signal all behave as on 4.4BSD. Programs
 that use urgent data — telnet clients sending interrupts, mainly — now work
-as intended. This takes the bsdsocktest conformance score from 138/142 to a
-clean **142/142**.
+as intended. This takes the bsdsocktest conformance score from 138/142 to
+**141/142**.
 
 ### FIOASYNC
 
