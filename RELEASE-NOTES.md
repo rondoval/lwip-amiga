@@ -1,4 +1,4 @@
-# Release notes — lwip-amiga 1.4
+# Release notes — lwip-amiga 1.5
 
 Changes since v1.3.
 
