@@ -523,10 +523,7 @@ static BOOL collect_arg(const char *arg)
         return ok;
     }
 
-    if (file_exists(arg))
-        return add_entry(arg);
-
-    /* bare name: only the ACTIVE drawer — a config parked in
+    /* bare name: only the ACTIVE drawer - a config parked in
      * SYS:Storage/NetInterfaces is deliberately not resolvable by name
      * (activate it by moving it to DEVS:NetInterfaces;
      * an explicit path still works) */
@@ -535,8 +532,14 @@ static BOOL collect_arg(const char *arg)
         strcpy(path, "DEVS:NetInterfaces");
         if (AddPart((STRPTR)path, (CONST_STRPTR)arg, sizeof(path)) && file_exists(path))
             return add_entry(path);
+        report(TRUE, "interface '%s' not found (looked in DEVS:NetInterfaces)", arg);
+        return FALSE;
     }
-    report(TRUE, "interface '%s' not found (looked in DEVS:NetInterfaces)", arg);
+
+    if (file_exists(arg))
+        return add_entry(arg);
+
+    report(TRUE, "interface file '%s' not found", arg);
     return FALSE;
 }
 
