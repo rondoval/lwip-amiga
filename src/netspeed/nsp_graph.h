@@ -32,10 +32,14 @@ struct NspGraph
     ULONG scale;   /* bytes/s at full half height */
 
     BOOL needsRedraw; /* on-screen plot is stale against the ring */
-    BOOL pending;     /* newest sample not drawn yet */
+    BOOL pending;     /* exactly one sample not drawn yet (else needsRedraw) */
 
-    BOOL haveArea;   /* the hook has run: area and pens are valid */
+    BOOL haveArea;    /* the hook has run: area, pens and geometry are valid */
     struct IBox area; /* SPACE_AreaBox, window coordinates */
+    WORD mid;         /* midline row */
+    WORD halfUp;      /* rows above the midline (received) */
+    WORD halfDown;    /* rows below the midline (sent) */
+    ULONG perPixel;   /* bytes/s per row, from scale and halfUp */
     UBYTE penBg, penRx, penTx, penMid;
 
     struct Hook hook; /* SPACE_RenderHook; h_Data = this */
