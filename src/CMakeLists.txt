@@ -428,6 +428,32 @@ install(
     DESTINATION C
 )
 
+# --- NetSpeed: throughput monitor window ---------------------------------------
+add_executable(netspeed
+    netspeed/netspeed.c
+    netspeed/nsp_graph.c
+    netspeed/nsp_prefs.c
+    netspeed/nsp_sample.c
+    netspeed/nsp_window.c
+)
+target_compile_options(netspeed PRIVATE -Os ${LWIP_WARN})
+target_compile_definitions(netspeed PRIVATE
+    TOOL_VERSION="${TOOL_VERSION}"
+    TOOL_DATE="${CURRENT_DATE}"
+)
+target_link_libraries(netspeed PRIVATE amiga)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/netspeed
+    DESTINATION C
+    RENAME NetSpeed
+)
+# Workbench icon (committed static asset; see dist/icons/README.md), also the
+# window's AppIcon while iconified. No tooltypes: NetSpeed takes no arguments.
+install(
+    FILES ${CMAKE_SOURCE_DIR}/dist/NetSpeed.info
+    DESTINATION C
+)
+
 # Sample interface config. Staged under Storage/NetInterfaces (the inactive
 # drawer, AmigaOS-style) so a dev-loop upload can never feed the
 # DEVS:NetInterfaces boot wildcard a stray file; the Installer copies it to
