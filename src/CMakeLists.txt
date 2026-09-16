@@ -441,7 +441,10 @@ target_compile_definitions(netspeed PRIVATE
     TOOL_VERSION="${TOOL_VERSION}"
     TOOL_DATE="${CURRENT_DATE}"
 )
-target_link_libraries(netspeed PRIVATE amiga)
+# Emu68Common::common for prefs_split() (the ENV: file reader), as emu68check
+# does for a hosted tool. Its memcpy/memset are CopyMem wrappers like libnix's,
+# so whichever the link order picks behaves the same.
+target_link_libraries(netspeed PRIVATE amiga Emu68Common::common)
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/netspeed
     DESTINATION C

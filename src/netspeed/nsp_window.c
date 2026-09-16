@@ -69,7 +69,8 @@ enum
     MID_ABOUT = 1,
     MID_RESET,
     MID_ICONIFY,
-    MID_QUIT
+    MID_QUIT,
+    MID_SAVE
 };
 
 static struct NewMenu nspMenu[] = {
@@ -79,6 +80,8 @@ static struct NewMenu nspMenu[] = {
     {NM_ITEM, (STRPTR) "Iconify", (STRPTR) "I", 0, 0, (APTR)MID_ICONIFY},
     {NM_ITEM, NM_BARLABEL, NULL, 0, 0, NULL},
     {NM_ITEM, (STRPTR) "Quit", (STRPTR) "Q", 0, 0, (APTR)MID_QUIT},
+    {NM_TITLE, (STRPTR) "Settings", NULL, 0, 0, NULL},
+    {NM_ITEM, (STRPTR) "Save", (STRPTR) "S", 0, 0, (APTR)MID_SAVE},
     {NM_END, NULL, NULL, 0, 0, NULL},
 };
 
@@ -411,6 +414,27 @@ static Object *nsp_root(struct NspBuild *b, struct NspWindow *w, const struct Ns
 
 /* --- lifecycle ------------------------------------------------------------ */
 
+/* clamp a window box to the default public screen */
+static void nsp_fit_box(struct IBox *box)
+{
+    struct Screen *scr = LockPubScreen(NULL);
+    if (scr == NULL)
+        return;
+    if (box->Width > scr->Width)
+        box->Width = scr->Width;
+    if (box->Height > scr->Height)
+        box->Height = scr->Height;
+    if (box->Left < 0)
+        box->Left = 0;
+    if (box->Top < 0)
+        box->Top = 0;
+    if (box->Left > scr->Width - box->Width)
+        box->Left = (WORD)(scr->Width - box->Width);
+    if (box->Top > scr->Height - box->Height)
+        box->Top = (WORD)(scr->Height - box->Height);
+    UnlockPubScreen(NULL, scr);
+}
+
 BOOL nsp_window_init(struct NspWindow *w, const struct NspSettings *s,
                      const struct NspIfaceSet *ifaces, struct Hook *renderHook)
 {
@@ -454,6 +478,12 @@ BOOL nsp_window_init(struct NspWindow *w, const struct NspSettings *s,
         return FALSE;
     }
 
+    /* a saved box may come from a larger screen: fit it to this one, or
+     * OpenWindow would refuse the window */
+    struct IBox box = s->box;
+    if (s->haveBox)
+        nsp_fit_box(&box);
+
     /* the tool's own icon for the AppIcon; window.class disposes it */
     struct DiskObject *dobj =
         IconBase != NULL ? GetDiskObject((CONST_STRPTR) "PROGDIR:" NSP_NAME) : NULL;
@@ -466,10 +496,10 @@ BOOL nsp_window_init(struct NspWindow *w, const struct NspSettings *s,
         WA_Activate, TRUE,
         WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_MENUPICK | IDCMP_NEWSIZE | IDCMP_REFRESHWINDOW |
                       IDCMP_GADGETUP,
-        s->haveBox ? WA_Left : TAG_IGNORE, (ULONG)s->box.Left,
-        s->haveBox ? WA_Top : TAG_IGNORE, (ULONG)s->box.Top,
-        WA_Width, (ULONG)(s->haveBox ? s->box.Width : NSP_DEFAULT_WIDTH),
-        WA_Height, (ULONG)(s->haveBox ? s->box.Height : NSP_DEFAULT_HEIGHT),
+        s->haveBox ? WA_Left : TAG_IGNORE, (ULONG)box.Left,
+        s->haveBox ? WA_Top : TAG_IGNORE, (ULONG)box.Top,
+        WA_Width, (ULONG)(s->haveBox ? box.Width : NSP_DEFAULT_WIDTH),
+        WA_Height, (ULONG)(s->haveBox ? box.Height : NSP_DEFAULT_HEIGHT),
         s->haveBox ? TAG_IGNORE : WINDOW_Position, WPOS_CENTERSCREEN,
         WINDOW_IconifyGadget, TRUE,
         WINDOW_AppPort, (ULONG)w->appPort,
@@ -634,6 +664,9 @@ static ULONG nsp_menu_pick(struct NspWindow *w, UWORD code)
             break;
         case MID_QUIT:
             return NSP_EV_QUIT;
+        case MID_SAVE:
+            ev |= NSP_EV_SAVE;
+            break;
         default:
             break;
         }

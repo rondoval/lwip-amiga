@@ -188,6 +188,26 @@ static void nsp_select_source(struct NspContext *c, const char *name)
     nsp_graph_draw(&c->graph, c->window.win);
 }
 
+/* Settings » Save: the current settings plus the window box, to ENV: and
+ * ENVARC:. Nothing is written at any other time. */
+static void nsp_save(struct NspContext *c)
+{
+    struct IBox box;
+    if (nsp_window_get_box(&c->window, &box))
+    {
+        c->settings.box = box;
+        c->settings.haveBox = TRUE;
+    }
+    const char *path = NULL;
+    LONG err = 0;
+    if (!nsp_prefs_save(&c->settings, &path, &err))
+    {
+        char fault[80];
+        Fault(err, NULL, (STRPTR)fault, sizeof(fault));
+        nsp_request(c->window.win, "OK", "Could not save the settings to\n%s\n%s", path, fault);
+    }
+}
+
 static void nsp_reset_stats(struct NspContext *c)
 {
     nsp_sample_reset(&c->sampler, FALSE);
@@ -294,7 +314,7 @@ int main(int argc, char **argv)
         goto out;
     }
 
-    nsp_prefs_defaults(&ctx.settings);
+    nsp_prefs_load(&ctx.settings);
 
     nsp_sample_init(&ctx.sampler, eclockFreq);
     nsp_sample_set_interval(&ctx.sampler, ctx.settings.interval);
@@ -350,6 +370,8 @@ int main(int argc, char **argv)
             }
             if (evs & NSP_EV_RESET)
                 nsp_reset_stats(&ctx);
+            if (evs & NSP_EV_SAVE)
+                nsp_save(&ctx);
             if (evs & (NSP_EV_UNITS | NSP_EV_REOPENED))
                 nsp_window_refresh(&ctx.window, &ctx.sampler, &ctx.settings);
         }
