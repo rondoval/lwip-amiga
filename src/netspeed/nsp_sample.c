@@ -16,49 +16,45 @@
 #include <proto/socket.h>
 #include <proto/timer.h>
 
-static unsigned long long nsp_now(void)
+/* --- arithmetic ----------------------------------------------------------- */
+
+/* The monotonic EClock as one 64-bit count. */
+static unsigned long long nsp_sample_now(void)
 {
     struct EClockVal ev;
     ReadEClock(&ev);
     return ((unsigned long long)ev.ev_hi << 32) | ev.ev_lo;
 }
 
-static unsigned long long nsp_quad(const SBQUAD_T *q)
+/* A bsdsocket 64-bit counter as one value. */
+static unsigned long long nsp_sample_quad(const SBQUAD_T *q)
 {
     return ((unsigned long long)q->sbq_High << 32) | q->sbq_Low;
 }
 
-/* bytes per second over a span of EClock ticks (> 0), saturated */
-static ULONG nsp_rate(unsigned long long bytes, unsigned long long ticks, ULONG freq)
+/* Saturate to 32 bits (a 1 Gb/s link cannot overflow in one tick, a
+ * counter jump after a stack restart could). */
+static ULONG nsp_sample_clamp(unsigned long long v)
 {
-    unsigned long long r = bytes * freq / ticks;
-    return r > 0xFFFFFFFFULL ? 0xFFFFFFFFUL : (ULONG)r;
+    return v > 0xFFFFFFFFULL ? 0xFFFFFFFFUL : (ULONG)v;
 }
 
-void nsp_sample_init(struct NspSampler *s, ULONG eclockFreq)
+/* Bytes per second over a span of EClock ticks (> 0), saturated. */
+static ULONG nsp_sample_rate(unsigned long long bytes, unsigned long long ticks, ULONG freq)
 {
-    s->ifaces.count = 0;
-    s->eclockFreq = eclockFreq;
-    s->rescanEvery = 1;
-    s->rescanIn = 0;
-    s->haveLink = FALSE;
-    s->bps = 0;
-    s->state = 0;
-    nsp_sample_reset(s, TRUE);
+    return nsp_sample_clamp(bytes * freq / ticks);
 }
 
-void nsp_sample_set_interval(struct NspSampler *s, LONG secs)
-{
-    s->rescanEvery = (NSP_RESCAN_SECS + secs - 1) / secs;
-    if (s->rescanIn > s->rescanEvery)
-        s->rescanIn = s->rescanEvery;
-}
+/* --- the interface set ---------------------------------------------------- */
 
-BOOL nsp_sample_rescan(struct NspSampler *s)
+/* Poll the stack's interface list and restart the poll countdown; TRUE when
+ * the set of names changed. */
+static BOOL nsp_sample_rescan(struct NspSampler *s)
 {
+    s->rescanIn = NSP_RESCAN_SECS / NSP_TICK_SECS;
+
     struct NspIfaceSet fresh;
     fresh.count = 0;
-
     struct List *list = ObtainInterfaceList();
     if (list != NULL)
     {
@@ -80,43 +76,108 @@ BOOL nsp_sample_rescan(struct NspSampler *s)
     return changed;
 }
 
-LONG nsp_sample_find(const struct NspSampler *s, const char *name)
-{
-    if (name[0] == '\0')
-        return -1;
-    for (ULONG i = 0; i < s->ifaces.count; i++)
-        if (strcmp(s->ifaces.names[i], name) == 0)
-            return (LONG)i;
-    return -1;
-}
+/* --- statistics ----------------------------------------------------------- */
 
-void nsp_sample_reset(struct NspSampler *s, BOOL dropCounters)
+/* No rate shown, no history for the moving average. */
+static void nsp_sample_clear_stats(struct NspSampler *s)
 {
     s->valid = FALSE;
     s->curRx = s->curTx = s->avgRx = s->avgTx = s->maxRx = s->maxTx = 0;
-    if (dropCounters)
-        s->haveLast = FALSE;
-    else
-    {
-        s->baseRx = s->lastRx;
-        s->baseTx = s->lastTx;
-        s->baseTicks = s->lastTicks;
-    }
+    s->histHead = 0;
+    s->histCount = 0;
 }
 
-static void nsp_seed(struct NspSampler *s, unsigned long long rx, unsigned long long tx,
-                     unsigned long long now)
+/* The first sample of a source: both the last sample and the "since Reset"
+ * base start here, and there is nothing to show yet. */
+static void nsp_sample_seed(struct NspSampler *s, unsigned long long rx, unsigned long long tx,
+                            unsigned long long now)
 {
     s->lastRx = s->baseRx = rx;
     s->lastTx = s->baseTx = tx;
     s->lastTicks = s->baseTicks = now;
     s->haveLast = TRUE;
-    s->valid = FALSE;
-    s->curRx = s->curTx = s->avgRx = s->avgTx = s->maxRx = s->maxTx = 0;
+    nsp_sample_clear_stats(s);
 }
 
-LONG nsp_sample_tick(struct NspSampler *s, const char *name)
+/* The average: bytes over time since the base, or across the newest
+ * avgSamples samples of the history. */
+static void nsp_sample_average(struct NspSampler *s, unsigned long long rxNow,
+                               unsigned long long txNow, unsigned long long now)
 {
+    if (s->avgSamples == 0)
+    {
+        unsigned long long sinceBase = now - s->baseTicks; /* >= one sample > 0 */
+        s->avgRx = nsp_sample_rate(rxNow - s->baseRx, sinceBase, s->eclockFreq);
+        s->avgTx = nsp_sample_rate(txNow - s->baseTx, sinceBase, s->eclockFreq);
+        return;
+    }
+    ULONG n = s->histCount < s->avgSamples ? s->histCount : s->avgSamples;
+    unsigned long long rx = 0, tx = 0, ticks = 0;
+    ULONG idx = s->histHead;
+    for (ULONG i = 0; i < n; i++)
+    {
+        idx = (idx == 0 ? NSP_AVG_MAX : idx) - 1;
+        rx += s->hist[idx].rx;
+        tx += s->hist[idx].tx;
+        ticks += s->hist[idx].ticks;
+    }
+    if (ticks == 0)
+        return;
+    s->avgRx = nsp_sample_rate(rx, ticks, s->eclockFreq);
+    s->avgTx = nsp_sample_rate(tx, ticks, s->eclockFreq);
+}
+
+/* --- the public API ------------------------------------------------------- */
+
+/* No source yet; the interface list is polled once so the menu can be built. */
+void nsp_sample_init(struct NspSampler *s, ULONG eclockFreq)
+{
+    s->ifaces.count = 0;
+    s->eclockFreq = eclockFreq;
+    s->avgSamples = 0;
+    s->haveLast = FALSE;
+    s->haveLink = FALSE;
+    s->bps = 0;
+    s->state = 0;
+    s->linkBytes = 0;
+    nsp_sample_clear_stats(s);
+    nsp_sample_rescan(s);
+}
+
+/* The window in samples, capped by the history. */
+void nsp_sample_set_average(struct NspSampler *s, LONG secs)
+{
+    ULONG samples = secs > 0 ? (ULONG)secs / NSP_TICK_SECS : 0;
+    s->avgSamples = samples < NSP_AVG_MAX ? samples : NSP_AVG_MAX;
+}
+
+/* Dropping the last sample makes the tick seed; the statistics are cleared
+ * whether or not the source exists. */
+BOOL nsp_sample_select(struct NspSampler *s, const char *name)
+{
+    s->haveLast = FALSE;
+    nsp_sample_clear_stats(s);
+    return (nsp_sample_tick(s, name) & NSP_TICK_FAILED) == 0;
+}
+
+/* The last sample becomes the base, so the next tick yields a rate. */
+void nsp_sample_reset(struct NspSampler *s)
+{
+    nsp_sample_clear_stats(s);
+    s->baseRx = s->lastRx;
+    s->baseTx = s->lastTx;
+    s->baseTicks = s->lastTicks;
+}
+
+/* Query the source, then turn the counter deltas into rates. The interface
+ * list is polled when due; a failed query polls it right away, since the
+ * interface is most likely gone. */
+ULONG nsp_sample_tick(struct NspSampler *s, const char *name)
+{
+    ULONG r = 0;
+    if (--s->rescanIn <= 0 && nsp_sample_rescan(s))
+        r |= NSP_TICK_IFACES;
+
     /* unanswered tags leave their storage untouched: pre-zero everything */
     SBQUAD_T rx, tx;
     rx.sbq_High = rx.sbq_Low = 0;
@@ -139,42 +200,52 @@ LONG nsp_sample_tick(struct NspSampler *s, const char *name)
             haveLink = QueryInterfaceTags((STRPTR)s->ifaces.names[0], IFQ_BPS, (Tag)&bps,
                                           IFQ_State, (Tag)&state, TAG_END) == 0;
     }
-    else
+    else if (QueryInterfaceTags((STRPTR)name, IFQ_GetBytesIn, (Tag)&rx, IFQ_GetBytesOut, (Tag)&tx,
+                                IFQ_BPS, (Tag)&bps, IFQ_State, (Tag)&state, TAG_END) != 0)
     {
-        if (QueryInterfaceTags((STRPTR)name, IFQ_GetBytesIn, (Tag)&rx, IFQ_GetBytesOut, (Tag)&tx,
-                               IFQ_BPS, (Tag)&bps, IFQ_State, (Tag)&state, TAG_END) != 0)
-            return NSP_TICK_FAILED;
-        haveLink = TRUE;
+        if (nsp_sample_rescan(s))
+            r |= NSP_TICK_IFACES;
+        return r | NSP_TICK_FAILED;
     }
+    else
+        haveLink = TRUE;
     s->haveLink = haveLink;
     s->bps = bps;
     s->state = state;
+    s->linkBytes = haveLink && state == SM_Up && bps > 0 ? (ULONG)bps / 8 : 0;
 
-    unsigned long long now = nsp_now();
-    unsigned long long rxNow = nsp_quad(&rx);
-    unsigned long long txNow = nsp_quad(&tx);
+    unsigned long long now = nsp_sample_now();
+    unsigned long long rxNow = nsp_sample_quad(&rx);
+    unsigned long long txNow = nsp_sample_quad(&tx);
     unsigned long long ticks = now - s->lastTicks;
 
     /* first sample, restarted counters (interface re-added) or no time
      * passed: nothing to divide yet */
     if (!s->haveLast || rxNow < s->lastRx || txNow < s->lastTx || ticks == 0)
     {
-        nsp_seed(s, rxNow, txNow, now);
-        return NSP_TICK_SEED;
+        nsp_sample_seed(s, rxNow, txNow, now);
+        return r;
     }
 
-    s->curRx = nsp_rate(rxNow - s->lastRx, ticks, s->eclockFreq);
-    s->curTx = nsp_rate(txNow - s->lastTx, ticks, s->eclockFreq);
+    struct NspSample *d = &s->hist[s->histHead];
+    d->rx = nsp_sample_clamp(rxNow - s->lastRx);
+    d->tx = nsp_sample_clamp(txNow - s->lastTx);
+    d->ticks = nsp_sample_clamp(ticks);
+    s->histHead = (s->histHead + 1) % NSP_AVG_MAX;
+    if (s->histCount < NSP_AVG_MAX)
+        s->histCount++;
+
+    s->curRx = nsp_sample_rate(d->rx, ticks, s->eclockFreq);
+    s->curTx = nsp_sample_rate(d->tx, ticks, s->eclockFreq);
     if (s->curRx > s->maxRx)
         s->maxRx = s->curRx;
     if (s->curTx > s->maxTx)
         s->maxTx = s->curTx;
-    unsigned long long sinceBase = now - s->baseTicks; /* >= ticks > 0 */
-    s->avgRx = nsp_rate(rxNow - s->baseRx, sinceBase, s->eclockFreq);
-    s->avgTx = nsp_rate(txNow - s->baseTx, sinceBase, s->eclockFreq);
+    nsp_sample_average(s, rxNow, txNow, now);
+
     s->lastRx = rxNow;
     s->lastTx = txNow;
     s->lastTicks = now;
     s->valid = TRUE;
-    return NSP_TICK_RATE;
+    return r | NSP_TICK_RATE;
 }

@@ -432,6 +432,7 @@ install(
 add_executable(netspeed
     netspeed/netspeed.c
     netspeed/nsp_graph.c
+    netspeed/nsp_menu.c
     netspeed/nsp_prefs.c
     netspeed/nsp_sample.c
     netspeed/nsp_window.c

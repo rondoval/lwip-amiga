@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 /*
- * NetSpeed plot: a ring of samples (one per pixel column) rendered into the
+ * NetSpeed graph: a ring of columns (one per pixel) rendered into the
  * window's space.gadget.
  *
  * Received bars grow up from the midline, sent bars down, both against one
- * scale: the highest rate seen since Reset (automatic) or the link speed.
- * The gadget's render hook (refresh, resize, uniconify) repaints everything
- * from the ring; a tick scrolls the plot one column and draws the new sample.
+ * scale: the highest column since Reset (automatic) or the link speed. A
+ * column is the mean of samplesPerColumn samples. The gadget's render hook
+ * (refresh, resize, uniconify) repaints everything from the ring; a draw
+ * after N new columns scrolls the graph by N and paints just those.
  */
 
 #ifndef NSP_GRAPH_H
@@ -16,23 +17,28 @@
 
 #include <utility/hooks.h>
 
-struct NspSample
+struct NspColumn
 {
     ULONG rx, tx; /* bytes/s */
 };
 
 struct NspGraph
 {
-    struct NspSample *ring;
+    struct NspColumn *ring;
     ULONG capacity; /* screen width at startup */
     ULONG head;     /* next write; newest = head - 1 */
     ULONG count;
 
-    ULONG maxSeen; /* highest rate since Reset: the automatic scale */
+    /* a column is the mean of samplesPerColumn samples, gathered here */
+    ULONG samplesPerColumn;
+    ULONG accCount;
+    unsigned long long accRx, accTx;
+
+    ULONG maxSeen; /* highest column since Reset: the automatic scale */
     ULONG scale;   /* bytes/s at full half height */
 
-    BOOL needsRedraw; /* on-screen plot is stale against the ring */
-    BOOL pending;     /* exactly one sample not drawn yet (else needsRedraw) */
+    BOOL needsRedraw; /* on-screen graph is stale beyond its newest columns */
+    ULONG undrawn;    /* columns pushed since the last draw, at most capacity */
 
     BOOL haveArea;    /* the hook has run: area, pens and geometry are valid */
     struct IBox area; /* SPACE_AreaBox, window coordinates */
@@ -49,11 +55,15 @@ BOOL nsp_graph_init(struct NspGraph *g, ULONG capacity);
 void nsp_graph_exit(struct NspGraph *g);
 /* Forget the history and the automatic scale. */
 void nsp_graph_reset(struct NspGraph *g);
+/* Seconds per column; a change clears the graph (its time base is gone). */
+void nsp_graph_set_column(struct NspGraph *g, LONG secs);
+/* One sample (bytes/s); every samplesPerColumn of them make a column. */
 void nsp_graph_push(struct NspGraph *g, ULONG rx, ULONG tx);
 /* linkBytesPerSec = 0 when the link speed is unknown or the link is down. */
 void nsp_graph_set_scale(struct NspGraph *g, BOOL linkScale, ULONG linkBytesPerSec);
-/* Bring the plot up to date. FALSE when the window is closed or its layer is
- * busy (drag, resize): the samples stay in the ring, the next call catches up. */
+/* Bring the graph up to date. FALSE when the window is closed or its layer
+ * is busy (drag, resize): the columns stay in the ring, the next call
+ * catches up. */
 BOOL nsp_graph_draw(struct NspGraph *g, struct Window *win);
 
 #endif
