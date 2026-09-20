@@ -45,7 +45,7 @@ struct SbStackCtx
     struct NetCtlMsg *pendingAdd;
     struct NetCtlMsg *pendingShutdown;
 
-    /* async NIC-stats poll: devIO cycles via SendIO so the 100 ms tick
+    /* async NIC-stats poll: devIO cycles via SendIO so the stack tick
      * never blocks on the driver; results publish into the root cache
      * (NetDevStats/NetDevLinkState — the neutral shape BOTH backends fill).
      * netdev: GET_STATS -> GET_LINK, two phases; SANA-II: one

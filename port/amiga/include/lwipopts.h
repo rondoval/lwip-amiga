@@ -183,6 +183,23 @@
  * connection's TCP_SND_BUF, not by this count. */
 #define MEMP_NUM_TCP_SEG                (4 * TCP_SND_QUEUELEN)
 #define LWIP_TCP_SACK_OUT               1
+/* ACK a GRO aggregate at once (fork addition). rx_gro hands tcp_input up to
+ * RXGRO_MAX_FRAMES wire segments as ONE segment, and lwIP's every-second-
+ * segment rule counts segments: a whole flight from the peer produced no ACK
+ * at all until the application had drained it (the window update in
+ * tcp_recved) — seen on the wire as 1.2-2.2 ms per ACK round against a
+ * window-limited Samba. The other half of the fix is the delayed-ACK bound,
+ * NETSTACK_TICK_MS in netstack.h. */
+#define LWIP_TCP_ACK_AGGREGATES         1
+/* With aggregates acknowledged from tcp_input, tcp_recved()'s explicit window
+ * update has one job left: window management. lwIP's default threshold,
+ * min(TCP_WND/4, 4*MSS) = 5840 bytes, fired it on every application read — a
+ * second pure ACK per aggregate, and on this platform an ACK is not cheap: a
+ * lone frame drains the TX ring, so each one also costs a TX-done interrupt
+ * and a unit-task wakeup (measured: +1000 ACKs/s = -6 % bulk RX). A quarter of
+ * the window keeps the peer's view within 25 % of the truth; smaller changes
+ * ride on the next segment we send, which now leaves with every aggregate. */
+#define TCP_WND_UPDATE_THRESHOLD        (TCP_WND / 4)
 /* TCP urgent data (fork addition): sb_io.c's MSG_OOB paths arm the TX mark
  * and consume the RX mark; all policy (excision, SO_OOBINLINE, SIOCATMARK)
  * lives in the bsdsocket layer. */

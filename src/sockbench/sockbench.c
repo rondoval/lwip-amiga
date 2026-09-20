@@ -21,6 +21,21 @@
  * hit the mid-write lock break that re-enters lwIP with a half-built unsent
  * tail.
  *
+ *   sockbench rr|rrsel <host> [respBytes] [seconds] [reqBytes]
+ *
+ * rr/rrsel measure LATENCY, which the streaming modes cannot see: a strict
+ * request/response ping-pong on one blocking TCP_NODELAY socket against the
+ * peer's port 5003 — send a small request, read the whole reply, repeat. That
+ * is the shape of SMB2, NFS, HTTP keep-alive: throughput = reply size / time
+ * per exchange, so a fixed per-exchange delay (interrupt coalescing, delayed
+ * ACKs, wakeup latency) that a saturated stream amortises to nothing becomes
+ * the whole result. respBytes takes a K/M suffix; 0 or omitted sweeps 1 byte
+ * to 1 MB on one connection. Defaults: 5 s per point, 128-byte requests.
+ *   rr     the ideal client: one send(), then recv() straight into the buffer.
+ *   rrsel  libsmb2's call sequence: WaitSelect + send, WaitSelect, then the
+ *          reply as separate 4 / 64 / 16-byte recv()s before the payload.
+ *          rrsel minus rr prices that pattern on this stack.
+ *
  * A developer tool, so it just uses the NDK bsdsocket headers (BSD sockets +
  * the library's inline glue) rather than open-coding LVO stubs.
  */
@@ -36,6 +51,7 @@
 #include <sys/socket.h>  /* AF_INET, SOCK_STREAM, fd_set, FD_* */
 #include <sys/filio.h>   /* FIONBIO */
 #include <netinet/in.h>  /* struct sockaddr_in, INADDR_NONE, htons */
+#include <netinet/tcp.h> /* TCP_NODELAY */
 #include <netdb.h>       /* struct hostent */
 
 #include <proto/exec.h>
@@ -52,8 +68,16 @@ struct Device *TimerBase;
 
 #define BENCH_SINK_PORT 5001   /* peer discards what we send (tx test) */
 #define BENCH_SOURCE_PORT 5002 /* peer blasts at us (rx test) */
+#define BENCH_RR_PORT 5003     /* peer answers each request with N bytes (rr test) */
 #define BENCH_MAX_STREAMS 8
 #define BENCH_UDP_DGRAM 1472   /* default UDP payload: one 1500-MTU frame */
+
+#define BENCH_RR_HDR 8                   /* {u32 resp_len, u32 req_len}, network order */
+#define BENCH_RR_REQ 128                 /* default request: an SMB2 READ request is ~120 bytes */
+#define BENCH_RR_REQ_MAX 65536
+#define BENCH_RR_MAX (8UL * 1024 * 1024) /* largest reply; the peer clamps to the same */
+#define BENCH_RR_WARMUP 2                /* untimed exchanges per point: the peer's cwnd ramp is not the subject */
+#define BENCH_RR_HIST_N 240              /* rr_bucket() range for a 32-bit tick count */
 
 static ULONG bench_resolve(const char *host)
 {
@@ -95,16 +119,258 @@ static void bench_report(const char *tag, unsigned long long bytes,
            (unsigned long)(mbit_x10 / 10), (unsigned long)(mbit_x10 % 10));
 }
 
+/* "65536", "64K" or "1M" -> bytes */
+static BOOL bench_parse_size(const char *s, ULONG *out)
+{
+    char *end;
+    ULONG v = strtoul(s, &end, 10);
+    if (end == s)
+        return FALSE;
+    if (*end == 'K' || *end == 'k')
+    {
+        v <<= 10;
+        end++;
+    }
+    else if (*end == 'M' || *end == 'm')
+    {
+        v <<= 20;
+        end++;
+    }
+    *out = v;
+    return (BOOL)(*end == '\0');
+}
+
+/* Latency histogram over EClock ticks: exact below 8, then 8 sub-buckets per
+ * octave (12.5 % resolution) — fine enough to tell 150 us from 650 us, and
+ * small enough to keep every sample of a run without allocating. Bucketing
+ * ticks rather than microseconds keeps the 64-bit divide out of the loop. */
+static ULONG rr_bucket(ULONG ticks)
+{
+    if (ticks < 8)
+        return ticks;
+    ULONG top = 31;
+    while ((ticks >> top) == 0)
+        top--;
+    return 8 + (top - 3) * 8 + ((ticks >> (top - 3)) & 7);
+}
+
+static ULONG rr_bucket_floor(ULONG idx)
+{
+    if (idx < 8)
+        return idx;
+    ULONG top = (idx - 8) / 8 + 3;
+    return (8 + (idx - 8) % 8) << (top - 3);
+}
+
+static ULONG rr_percentile(const ULONG *hist, ULONG count, ULONG pct)
+{
+    ULONG want = (ULONG)(((unsigned long long)count * pct + 99) / 100);
+    ULONG seen = 0;
+    for (ULONG i = 0; i < BENCH_RR_HIST_N; i++)
+    {
+        seen += hist[i];
+        if (seen >= want)
+            return rr_bucket_floor(i);
+    }
+    return 0;
+}
+
+static ULONG rr_us(unsigned long long ticks, ULONG freq)
+{
+    return (ULONG)(ticks * 1000000ULL / freq);
+}
+
+/* rrsel: one readiness wait shaped like libsmb2's poll() shim — the fd in the
+ * read OR the write set, always in the except set, 1 s timeout, retried on
+ * expiry. Blocking here arms and cancels a timer request inside the stack,
+ * which is part of what rrsel is pricing. */
+static BOOL rr_wait(LONG s, BOOL forwrite)
+{
+    for (;;)
+    {
+        fd_set set, eset;
+        FD_ZERO(&set);
+        FD_ZERO(&eset);
+        FD_SET(s, &set);
+        FD_SET(s, &eset);
+        struct timeval tv;
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        LONG n = WaitSelect(s + 1, forwrite ? NULL : &set, forwrite ? &set : NULL, &eset, &tv, NULL);
+        if (n != 0)
+            return (BOOL)(n > 0);
+    }
+}
+
+/* Receive phases, 0 = the rest of the reply. rr reads like an ideal client;
+ * rrsel replays libsmb2's receive state machine — NetBIOS length, SMB2 header,
+ * fixed part, then the payload — each phase its own recv(). */
+static const ULONG rr_phases_plain[] = {0};
+static const ULONG rr_phases_smb2[] = {4, 64, 16, 0};
+
+/* One exchange. Request and reply share buf: the header is rewritten every
+ * time because the previous reply overwrote it; the filler is don't-care. */
+static BOOL rr_exchange(LONG s, BOOL sel, UBYTE *buf, ULONG req, ULONG resp)
+{
+    ULONG *hdr = (ULONG *)(void *)buf;
+    hdr[0] = htonl(resp);
+    hdr[1] = htonl(req);
+
+    if (sel && !rr_wait(s, TRUE))
+        return FALSE;
+    for (ULONG done = 0; done < req;)
+    {
+        LONG r = send(s, buf + done, (LONG)(req - done), 0);
+        if (r <= 0)
+            return FALSE;
+        done += (ULONG)r;
+    }
+
+    if (sel && !rr_wait(s, FALSE))
+        return FALSE;
+    const ULONG *phase = sel ? rr_phases_smb2 : rr_phases_plain;
+    for (ULONG got = 0; got < resp;)
+    {
+        ULONG want = resp - got;
+        if (*phase != 0)
+        {
+            if (*phase < want)
+                want = *phase;
+            phase++;
+        }
+        /* a blocking recv() returns what is queued, not what was asked for */
+        for (ULONG end = got + want; got < end;)
+        {
+            LONG r = recv(s, buf + got, (LONG)(end - got), 0);
+            if (r <= 0)
+                return FALSE;
+            got += (ULONG)r;
+        }
+    }
+    return TRUE;
+}
+
+/* One sweep point: exchanges back to back until the deadline, one report line. */
+static BOOL bench_rr_point(LONG s, BOOL sel, UBYTE *buf, ULONG req, ULONG resp,
+                           LONG seconds, ULONG freq)
+{
+    static ULONG hist[BENCH_RR_HIST_N];
+    memset(hist, 0, sizeof(hist));
+
+    for (LONG i = 0; i < BENCH_RR_WARMUP; i++)
+        if (!rr_exchange(s, sel, buf, req, resp))
+            return FALSE;
+
+    ULONG count = 0, dt_min = ~0UL, dt_max = 0;
+    unsigned long long sum = 0;
+    unsigned long long start = bench_now();
+    unsigned long long deadline = start + (unsigned long long)seconds * freq;
+    unsigned long long t1;
+    do
+    {
+        /* a fresh t0 per exchange keeps the bookkeeping below out of the sample */
+        unsigned long long t0 = bench_now();
+        if (!rr_exchange(s, sel, buf, req, resp))
+            return FALSE;
+        t1 = bench_now();
+
+        ULONG dt = (ULONG)(t1 - t0);
+        hist[rr_bucket(dt)]++;
+        sum += dt;
+        if (dt < dt_min)
+            dt_min = dt;
+        if (dt > dt_max)
+            dt_max = dt;
+        count++;
+    } while (t1 < deadline);
+
+    unsigned long long ticks = t1 - start;
+    ULONG tps = (ULONG)((unsigned long long)count * freq / ticks);
+    /* MB/s x10 of reply payload; bytes*10*freq stays far below 2^63 */
+    unsigned long long mb_x10 = (unsigned long long)count * resp * 10ULL * freq / ticks / 1048576ULL;
+    printf("%s resp=%lu req=%lu: %lu trans/s  lat us avg/min/p50/p90/p99/max "
+           "%lu/%lu/%lu/%lu/%lu/%lu  %lu.%lu MB/s\n",
+           sel ? "rrsel" : "rr", (unsigned long)resp, (unsigned long)req, (unsigned long)tps,
+           (unsigned long)rr_us(sum / count, freq), (unsigned long)rr_us(dt_min, freq),
+           (unsigned long)rr_us(rr_percentile(hist, count, 50), freq),
+           (unsigned long)rr_us(rr_percentile(hist, count, 90), freq),
+           (unsigned long)rr_us(rr_percentile(hist, count, 99), freq),
+           (unsigned long)rr_us(dt_max, freq),
+           (unsigned long)(mb_x10 / 10), (unsigned long)(mb_x10 % 10));
+    return TRUE;
+}
+
+static int bench_rr(ULONG addr, BOOL sel, ULONG resp, ULONG req, LONG seconds)
+{
+    static const ULONG sweep[] = {1, 1460, 4096, 16384, 32768, 65536, 262144, 1048576};
+    const ULONG nsweep = sizeof(sweep) / sizeof(sweep[0]);
+
+    ULONG biggest = (resp != 0) ? resp : sweep[nsweep - 1];
+    if (req > biggest)
+        biggest = req;
+    UBYTE *buf = AllocVec(biggest, MEMF_PUBLIC);
+    if (buf == NULL)
+    {
+        printf("sockbench: no memory for %lu byte buffer\n", (unsigned long)biggest);
+        return 10;
+    }
+    memset(buf, 'x', req);
+
+    int rc = 10;
+    struct sockaddr_in sin;
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_len = sizeof(sin);
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons(BENCH_RR_PORT);
+    sin.sin_addr.s_addr = addr;
+
+    LONG s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0 || connect(s, (struct sockaddr *)&sin, sizeof(sin)) != 0)
+    {
+        printf("sockbench: connect failed, errno %ld\n", (long)Errno());
+        goto rr_out;
+    }
+    /* Without it the request itself would wait on Nagle; say so rather than
+     * publish numbers that measure the peer's delayed-ACK timer. */
+    LONG one = 1;
+    if (setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0)
+        printf("sockbench: WARNING TCP_NODELAY refused, errno %ld\n", (long)Errno());
+
+    printf("bench tcp %s: port %u, %ld s per point, %lu byte requests\n",
+           sel ? "rrsel" : "rr", BENCH_RR_PORT, (long)seconds, (unsigned long)req);
+
+    struct EClockVal ev;
+    ULONG freq = ReadEClock(&ev);
+    BOOL ok = TRUE;
+    if (resp != 0)
+        ok = bench_rr_point(s, sel, buf, req, resp, seconds, freq);
+    for (ULONG i = 0; resp == 0 && ok && i < nsweep; i++)
+        ok = bench_rr_point(s, sel, buf, req, sweep[i], seconds, freq);
+    if (ok)
+        rc = 0;
+    else
+        printf("sockbench: exchange failed, errno %ld\n", (long)Errno());
+
+rr_out:
+    if (s >= 0)
+        CloseSocket(s);
+    FreeVec(buf);
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
-    /* argv: [0]=sockbench [1]=rx|tx|udprx|udptx [2]=host [3]=streams [4]=secs [5]=sizeKB */
+    /* argv: [0]=sockbench [1]=rx|tx|udprx|udptx [2]=host [3]=streams [4]=secs [5]=sizeKB
+     *       rr|rrsel reuse the slots as     [2]=host [3]=respBytes [4]=secs [5]=reqBytes */
     const char *dir = (argc > 1) ? argv[1] : "";
-    BOOL rx = FALSE, udp = FALSE, blocking = FALSE, dir_ok = TRUE;
+    BOOL rx = FALSE, udp = FALSE, blocking = FALSE, rr = FALSE, rrsel = FALSE, dir_ok = TRUE;
     if (strcmp(dir, "rx") == 0)         rx = TRUE;
     else if (strcmp(dir, "tx") == 0)    rx = FALSE;
     else if (strcmp(dir, "txblock") == 0) { rx = FALSE; blocking = TRUE; }
     else if (strcmp(dir, "udprx") == 0) { rx = TRUE;  udp = TRUE; }
     else if (strcmp(dir, "udptx") == 0) { rx = FALSE; udp = TRUE; }
+    else if (strcmp(dir, "rr") == 0)    rr = TRUE;
+    else if (strcmp(dir, "rrsel") == 0) { rr = TRUE;  rrsel = TRUE; }
     else                                dir_ok = FALSE;
 
     if (!dir_ok || argc < 3)
@@ -113,13 +379,26 @@ int main(int argc, char **argv)
                "  rx/tx = TCP; udprx/udptx = UDP. sizeKB is the TCP buffer or the UDP\n"
                "  datagram size (default: TCP 64 KB, UDP one 1500-MTU frame).\n"
                "  txblock = diagnostic: 1 blocking socket, tight send() loop, 32 KB\n"
-               "  default — reproduces AmiSpeedTest's upload path.\n",
+               "  default — reproduces AmiSpeedTest's upload path.\n"
+               "       sockbench rr|rrsel <host> [respBytes] [seconds] [reqBytes]\n"
+               "  request/response latency: small request out, respBytes back, repeat.\n"
+               "  respBytes takes K/M; 0 or omitted sweeps 1 byte..1M. Default 5 s per\n"
+               "  point, 128 byte requests. rrsel = libsmb2's WaitSelect + split-recv\n"
+               "  call pattern; rr = one send, one recv loop.\n",
                BENCH_MAX_STREAMS);
         return 5;
     }
-    LONG streams = (argc > 3) ? atoi(argv[3]) : 1;
-    LONG seconds = (argc > 4) ? atoi(argv[4]) : 10;
-    LONG sizeKB = (argc > 5) ? atoi(argv[5]) : 0; /* 0 = per-protocol default */
+    LONG streams = (!rr && argc > 3) ? atoi(argv[3]) : 1;
+    LONG seconds = (argc > 4) ? atoi(argv[4]) : (rr ? 5 : 10);
+    LONG sizeKB = (!rr && argc > 5) ? atoi(argv[5]) : 0; /* 0 = per-protocol default */
+    ULONG rr_resp = 0, rr_req = BENCH_RR_REQ;            /* resp 0 = sweep */
+    if (rr && ((argc > 3 && !bench_parse_size(argv[3], &rr_resp)) ||
+               (argc > 5 && !bench_parse_size(argv[5], &rr_req)) ||
+               rr_resp > BENCH_RR_MAX || rr_req < BENCH_RR_HDR || rr_req > BENCH_RR_REQ_MAX))
+    {
+        printf("sockbench: bad parameters (respBytes <= 8M, reqBytes 8..64K)\n");
+        return 5;
+    }
     if (streams < 1 || streams > BENCH_MAX_STREAMS || seconds < 1)
     {
         printf("sockbench: bad parameters\n");
@@ -191,6 +470,13 @@ int main(int argc, char **argv)
     if (addr == INADDR_NONE)
     {
         printf("sockbench: cannot resolve %s\n", argv[2]);
+        goto bench_out;
+    }
+
+    /* rr/rrsel share only the setup above: one socket, its own buffer and loop */
+    if (rr)
+    {
+        rc = bench_rr(addr, rrsel, rr_resp, rr_req, seconds);
         goto bench_out;
     }
 

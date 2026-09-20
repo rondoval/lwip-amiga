@@ -378,6 +378,18 @@ per-stream + aggregate Mb/s (`rx`/`tx` are TCP, `udprx`/`udptx` are UDP; `sizeKB
 TCP buffer or the UDP datagram size). Exercises DHCP + DNS + TCP/UDP through the whole
 zero-copy `netdev` path with hardware checksums active.
 
+`sockbench rr|rrsel <host> [respBytes] [seconds] [reqBytes]` measures what the streaming
+modes cannot: request/response latency. One blocking `TCP_NODELAY` socket plays strict
+ping-pong with the peer's port 5003 (small request out, `respBytes` back, repeat) and
+reports exchanges/s, latency avg/min/p50/p90/p99/max in µs and the resulting MB/s —
+the figure that governs SMB2, NFS and every other one-request-at-a-time protocol, where
+a fixed per-exchange delay (interrupt coalescing, delayed ACKs, wakeup latency) that a
+saturated stream amortises to nothing becomes the whole result. `respBytes` takes a K/M
+suffix; 0 or omitted sweeps 1 byte to 1 MB on one connection. `rr` is the ideal client
+(one `send`, `recv` straight into the buffer); `rrsel` replays libsmb2's call sequence
+(`WaitSelect` + `send`, `WaitSelect`, then the reply as 4/64/16-byte `recv`s before the
+payload), so `rrsel` minus `rr` prices that pattern on this stack.
+
 ## License
 
 `BSD-3-Clause` throughout — own code, the `include/` `netdev` ABI headers, and the

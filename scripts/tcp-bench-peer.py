@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-3-Clause
-"""LAN throughput peer for `sockbench` — TCP and UDP (stdlib only).
+"""LAN throughput and latency peer for `sockbench` — TCP and UDP (stdlib only).
 
     python3 tcp-bench-peer.py [--sink-rate KBPS] [--sink-stall ON:OFF] [bind-address]
 
 Port 5001: sink   — discards whatever the client sends (sockbench tx / udptx)
 Port 5002: source — blasts data at the client           (sockbench rx / udprx)
+Port 5003: rr     — answers each request with N bytes    (sockbench rr / rrsel)
 
-Both ports listen on TCP and UDP simultaneously. The Amiga side measures
+5001 and 5002 listen on TCP and UDP simultaneously; 5003 is TCP only. The Amiga side measures
 itself; this peer just moves bytes, but prints its own per-flow byte count
 and rate as a cross-check (for UDP that difference is the loss).
 
@@ -28,6 +29,12 @@ loss on this host's interface, e.g.
     sudo tc qdisc add dev eth0 root netem loss 1% delay 20ms
     sudo tc qdisc del dev eth0 root          # to remove
 
+The rr port is a request/response ping-pong: each request starts with an 8-byte
+big-endian header {u32 resp_len, u32 req_len}, padded with filler to req_len bytes
+in total; the reply is resp_len bytes. The client times every exchange, so this
+peer's own turnaround (tens of microseconds of Python) is inside every sample —
+constant across an A/B on the Amiga side, which is what the mode is for.
+
 UDP has no connection, so flows are keyed by peer address and delimited by
 one-byte "guns": the client sends "G<datagram-bytes>" to a source to start it
 (and learn where/what size to blast), and "S" to a sink/source to stop it and
@@ -35,13 +42,18 @@ trigger its report. A lost stop gun is covered by an idle/duration timeout.
 """
 
 import socket
+import struct
 import sys
 import threading
 import time
 
 SINK_PORT = 5001
 SOURCE_PORT = 5002
+RR_PORT = 5003
 CHUNK = 256 * 1024
+
+RR_HDR = struct.Struct(">II")            # resp_len, req_len (header included)
+RR_BLOB = memoryview(b"x" * (8 * 1024 * 1024))  # largest reply; sockbench clamps to the same
 
 UDP_DEFAULT_DGRAM = 1472  # one 1500-MTU frame, if a start gun omits the size
 UDP_IDLE_TIMEOUT = 3.0    # report + drop a silent UDP flow (lost stop gun)
@@ -112,6 +124,41 @@ def source(conn, peer):
     finally:
         conn.close()
         report("source", peer, total, time.monotonic() - start)
+
+
+def recv_exact(conn, n):
+    """n bytes, or None if the peer closed first."""
+    buf = bytearray(n)
+    view, got = memoryview(buf), 0
+    while got < n:
+        r = conn.recv_into(view[got:])
+        if r == 0:
+            return None
+        got += r
+    return buf
+
+
+def rr(conn, peer):
+    total, trans, start = 0, 0, time.monotonic()
+    try:
+        while True:
+            hdr = recv_exact(conn, RR_HDR.size)
+            if hdr is None:
+                break
+            resp_len, req_len = RR_HDR.unpack(hdr)
+            if req_len > RR_HDR.size and recv_exact(conn, req_len - RR_HDR.size) is None:
+                break
+            reply = RR_BLOB[: min(resp_len, len(RR_BLOB))]
+            conn.sendall(reply)
+            total += len(reply)
+            trans += 1
+    except OSError:
+        pass
+    finally:
+        conn.close()
+        secs = time.monotonic() - start
+        log(f"rr     {peer}: {trans} exchanges in {secs:.2f} s")
+        report("rr    ", peer, total, secs)
 
 
 def udp_report(role, addr, st):
@@ -233,6 +280,7 @@ def main():
     listeners = (
         (serve, (SINK_PORT, sink, bind_addr)),
         (serve, (SOURCE_PORT, source, bind_addr)),
+        (serve, (RR_PORT, rr, bind_addr)),
         (udp_sink, (SINK_PORT, bind_addr)),
         (udp_source, (SOURCE_PORT, bind_addr)),
     )

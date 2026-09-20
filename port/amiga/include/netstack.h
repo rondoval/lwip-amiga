@@ -94,7 +94,16 @@ void netstack_init(struct Device *timerBase);
 void netstack_lock(void);
 void netstack_unlock(void);
 
-/* Drive lwIP timeouts; call from the stack task every <= 100 ms. */
+/* Drive lwIP timeouts; call from the stack task every NETSTACK_TICK_MS.
+ *
+ * The period is the delayed-ACK bound. netstack_tick() flushes delayed ACKs
+ * itself on every call instead of leaving them to lwIP's 250 ms fast timer:
+ * a lone small reply that nothing piggybacks on (the last response of a
+ * burst) used to be acknowledged after 250 ms + one 100 ms tick, and
+ * mainstream peers retransmit after 200 ms — a spurious timeout that
+ * collapses THEIR congestion window for whatever we ask for next. 50 ms is
+ * the customary delayed-ACK ceiling and costs twenty wakeups a second. */
+#define NETSTACK_TICK_MS 50
 void netstack_tick(void);
 
 /* Monotonic milliseconds (also lwIP's sys_now). Call under the lock. */

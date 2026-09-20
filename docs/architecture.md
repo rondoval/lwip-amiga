@@ -65,7 +65,8 @@ table included — so every opening task gets its own `errno`, fd table, wait si
   open lock by the first `OpenLibrary()`. It reads `ENV:netstack.prefs` (`sb_config.c`:
   **stack-wide settings only** — hostname, search domain, explicit DNS servers, mDNS;
   flat `KEY = VALUE`, every key optional), initializes `netstack`, publishes the
-  control port, and ticks `sys_check_timeouts()` every 100 ms. The boot state is
+  control port, and ticks `sys_check_timeouts()` every `NETSTACK_TICK_MS` (50 ms —
+  the period doubles as the delayed-ACK bound, see the ACK policy below). The boot state is
   **loopback only** (the Roadshow model): network interfaces are added at runtime by
   the `AddNetInterface` command from per-interface files in `DEVS:NetInterfaces/`
   (the file name is the interface name), normally from `S:Network-Startup`. The file
@@ -124,7 +125,7 @@ both fail, the error from a driver that was found and refused beats a plain
 The reply contract: every delivered message is answered — inline, or *parked* and
 answered later. `ADD_IF` executes the attach/configure (`sb_netdev_up`) and parks the
 reply until the interface is *operational*: link up for a static config, DHCP lease
-bound for a dynamic one (a lease implies link) — checked by the 100 ms tick
+bound for a dynamic one (a lease implies link) — checked by the stack tick
 (explicitly configured DNS servers are re-applied after a lease so config beats DHCP).
 The client owns the timeout: `CANCEL_ADD` recalls a parked add — after a final
 readiness check that resolves the cancel-vs-completion race in the add's favor — and
@@ -170,6 +171,26 @@ merging (not concatenating) the queues in `tcp_rexmit_rto_prepare`.
   walk-and-compare self-check exists behind
   `TCP_UNSENT_TAIL_DBGCHECK` (enabled in the TRACE tier only — it re-adds the
   walk the cache removes).
+
+- **ACK policy** — what keeps the *peer's* sender flowing, and the stack's job alone.
+  Two rules, both measured against a Samba server whose replies arrived in ACK-gated
+  flights. (1) `LWIP_TCP_ACK_AGGREGATES` (fork option, on): an input that advances
+  `rcv_nxt` by more than `TCP_MSS` is acknowledged from `tcp_input`, at once. lwIP's
+  stock rule acknowledges every second *segment*, and GRO hands it a whole flight as
+  one — so nothing was acknowledged until the application had drained ≥ 4·MSS and
+  `tcp_recved` sent a window update, 1.2–2.2 ms later, per flight. The same rule gives
+  the immediate ACK RFC 5681 asks for when a retransmission fills a hole. (2) The
+  delayed ACK is bounded by `NETSTACK_TICK_MS`: `netstack_tick()` calls
+  `tcp_fasttmr()` itself instead of leaving it to lwIP's 250 ms base. A lone small
+  reply that nothing piggybacks on used to wait up to 350 ms; mainstream peers
+  retransmit after 200 ms, and that spurious timeout collapses their congestion
+  window for the next request. `tcp_fasttmr()` counts nothing in ticks, so RTO,
+  persist and keepalive stay on lwIP's own 500 ms base. (3) With (1) doing the
+  acknowledging, `TCP_WND_UPDATE_THRESHOLD` is a quarter of the window instead of
+  lwIP's 4·MSS: the explicit window update in `tcp_recved` no longer fires on every
+  application read. An ACK is expensive here — a lone frame drains the TX ring, so
+  each costs a TX-done interrupt and a unit-task wakeup on top of its own
+  transmission. Host tests: `test/ackagg`.
 
 - **Runtime model** (`lwipopts.h`): `NO_SYS=1` with external serialization — the
   core-locking idea implemented over an Exec `SignalSemaphore` instead of lwIP's own

@@ -11,7 +11,7 @@
  *
  * The task boots the stack with the loopback
  * interface only, publishes the netstack_ctl.h control port, and ticks lwIP
- * timeouts every 100 ms. Network interfaces are added and removed at
+ * timeouts every NETSTACK_TICK_MS. Network interfaces are added and removed at
  * runtime through that port (the AddNetInterface / RemoveNetInterface
  * commands drive sb_if_up/down here, which resolve the driver ABI — netdev
  * or SANA-II — and dispatch to the backend), and the stack stops through it
@@ -48,7 +48,8 @@
 #include "sb_netctl.h"
 #include "sb_stack_priv.h"
 
-#define SB_STACK_TICK_US 100000
+#define SB_STACK_TICK_US (NETSTACK_TICK_MS * 1000UL)
+#define SB_STACK_TICKS_PER_SEC (1000 / NETSTACK_TICK_MS)
 
 /* one instance; the library is a singleton and so is the stack */
 static struct SbStackCtx sb_stack;
@@ -406,9 +407,9 @@ static void SbStackTask(void)
             /* push any pending multicast filter change (devIO must be idle) */
             sb_rxfilter_sync(ctx);
 
-            /* refresh the NIC stats cache once per second (10 * 100 ms);
+            /* refresh the NIC stats cache once per second;
              * fire-and-forget — the reply lands via devSig above */
-            if (++statTick >= 10)
+            if (++statTick >= SB_STACK_TICKS_PER_SEC)
             {
                 statTick = 0;
                 sb_stats_kick(ctx);
