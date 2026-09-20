@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
-/* Host fuzzing config mirroring the TCP-relevant parts of
- * lwip-amiga/port/amiga/include/lwipopts.h (NO_SYS, core TCP sizing),
- * with the fuzz oracle allocator wired in via MEM_LIBC_MALLOC. */
-#ifndef FUZZ_LWIPOPTS_H
-#define FUZZ_LWIPOPTS_H
-
-#include <stddef.h>
+/* Host test config for the LWIP_TCP_ACK_AGGREGATES regression tests: the
+ * TCP-relevant parts of lwip-amiga/port/amiga/include/lwipopts.h, as in
+ * test/urg. build.sh compiles it twice — ACKAGG=1 (the port's setting) and
+ * ACKAGG=0 (stock lwIP) — so the tests pin down both behaviours and prove
+ * they can tell them apart. */
+#ifndef ACKAGG_LWIPOPTS_H
+#define ACKAGG_LWIPOPTS_H
 
 /* --- execution model --- */
 #define NO_SYS                          1
@@ -28,15 +28,9 @@
 #define IP_FRAG                         0
 #define IP_REASSEMBLY                   0
 
-/* --- memory: exact-size recording allocator (fuzz oracle) --- */
+/* --- memory: plain libc malloc --- */
 #define MEM_LIBC_MALLOC                 1
 #define MEM_STATS                       0
-void *fz_malloc(size_t sz);
-void *fz_calloc(size_t n, size_t sz);
-void fz_free(void *p);
-#define mem_clib_malloc fz_malloc
-#define mem_clib_calloc fz_calloc
-#define mem_clib_free   fz_free
 #define MEM_ALIGNMENT                   4
 
 /* --- TCP sizing: identical to the Amiga port --- */
@@ -49,20 +43,18 @@ void fz_free(void *p);
 #define TCP_SNDLOWAT                    (8 * TCP_MSS)
 #define MEMP_NUM_TCP_SEG                TCP_SND_QUEUELEN
 #define LWIP_TCP_SACK_OUT               1
-#define LWIP_TCP_ACK_AGGREGATES         1
 #define TCP_LISTEN_BACKLOG              1
 
-/* TCP_OVERSIZE defaults to TCP_MSS (as on the Amiga build; not overridden
- * there either). LWIP_DEBUG turns on TCP_OVERSIZE_DBGCHECK (per-seg shadow),
- * mirroring the Amiga DEBUG builds. Building with -DFUZZ_RELEASE_CFG drops
- * LWIP_DEBUG to mirror the RELEASE tier instead: no shadow bookkeeping and
- * no DBGCHECK-only code paths, but LWIP_ASSERT stays active - exactly like
- * a debug-tier build of the Amiga stack (asserts on). */
-#ifndef FUZZ_RELEASE_CFG
-#define LWIP_DEBUG                      1
+/* --- the feature under test --- */
+#ifndef ACKAGG
+#define ACKAGG                          1
 #endif
+#define LWIP_TCP_ACK_AGGREGATES         ACKAGG
+
+#define LWIP_DEBUG                      1
 #define TCP_UNSENT_TAIL_DBGCHECK        1
 
+/* one 44-frame aggregate is ~43 pool pbufs; leave room for ooseq scenarios */
 #define PBUF_POOL_SIZE                  1024
 
 /* --- stats: tcp_helper.c requires TCP+MEMP stats --- */
