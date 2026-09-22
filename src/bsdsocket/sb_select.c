@@ -137,6 +137,9 @@ LONG bsd_WaitSelect(LONG nfds asm("d0"), APTR readfds asm("a0"), APTR writefds a
             timerArmed = TRUE;
         }
 
+        if (readfds != NULL)
+            sb_rx_awaiting(base); /* about to block for input: a reply, if we sent */
+
         ULONG timerBit = timerArmed ? (1UL << base->timerPort->mp_SigBit) : 0;
         ULONG waitMask = (1UL << base->sigBit) | base->breakMask | userMask | timerBit;
 

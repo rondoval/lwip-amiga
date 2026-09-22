@@ -90,6 +90,9 @@ struct NetdevIf
     ULONG ndi_RxNoWrap;                 /* backpressure: wrap pool empty */
     ULONG ndi_TxOversize;               /* dropped: segs > caps even coalesced */
     ULONG ndi_RxCsumBad;                /* RAW-fold verification failures */
+    volatile ULONG ndi_RxFrames;        /* frames handed up, ever: written by the unit task
+                                           per batch, read unlocked by the stack task to
+                                           tell a busy receive side from an idle one */
     BOOL ndi_TxKickPending;             /* a TX batch is staged awaiting ndo_TxKick;
                                            set on submit, flushed at outermost unlock */
 

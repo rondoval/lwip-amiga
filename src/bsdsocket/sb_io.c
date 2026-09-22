@@ -73,6 +73,7 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
     PERF_T0(t_lock);
     netstack_lock();
     PERF_ADD(&ns_perf, NSP_SEND_LOCKWAIT, t_lock);
+    base->txSinceBlock = TRUE; /* see sb_rx_awaiting() */
     while (sent < len)
     {
         if (s->pcb.tcp == NULL || s->err != 0)
@@ -240,6 +241,7 @@ static LONG sb_dgram_send(struct SocketBase *base, struct SbSocket *s,
     PERF_T0(t_lock);
     netstack_lock();
     PERF_ADD(&ns_perf, NSP_SEND_LOCKWAIT, t_lock);
+    base->txSinceBlock = TRUE; /* see sb_rx_awaiting() */
     PERF_T0(t_send);
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
     if (p == NULL)
@@ -403,6 +405,7 @@ LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
         }
     }
 
+    base->txSinceBlock = TRUE; /* see sb_rx_awaiting() */
     err_t r = ERR_VAL;
     if (mh->msg_name != NULL)
     {
@@ -531,6 +534,7 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
                 netstack_unlock();
                 return sb_fail(base, SB_EWOULDBLOCK);
             }
+            sb_rx_awaiting(base);
             LONG we = sb_wait_to(base, s->rcvTimeoMs, &tw);
             if (we != 0)
             {
@@ -593,6 +597,7 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
                     return copied;
                 return sb_fail(base, SB_EWOULDBLOCK);
             }
+            sb_rx_awaiting(base);
             PERF_T0(t_sleep);
             LONG we = sb_wait_to(base, s->rcvTimeoMs, &tw);
             PERF_ADD(&ns_perf, NSP_RECV_SLEEP, t_sleep);
@@ -762,6 +767,7 @@ static struct SbDgram *sb_dgram_wait(struct SocketBase *base, struct SbSocket *s
             *err = SB_EWOULDBLOCK;
             return NULL;
         }
+        sb_rx_awaiting(base);
         LONG we = sb_wait_to(base, s->rcvTimeoMs, &tw);
         if (we != 0)
         {

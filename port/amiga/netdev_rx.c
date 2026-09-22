@@ -100,6 +100,8 @@ ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULONG count
     struct NetdevIf *ndi = stackctx;
     ULONG consumed = 0;
     ULONG since_yield = 0;
+
+    ndi->ndi_RxFrames += count;
     /* GRO rides on the RX csum offload: with lwIP's own TCP checksum check
      * active, a merged (rewritten) header would fail re-verification */
     BOOL gro = ndi->ndi_RxOffload;

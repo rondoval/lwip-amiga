@@ -56,6 +56,28 @@ struct SbStackCtx
     struct NetDevLinkState linkBuf;
     struct Sana2DeviceStats s2StatsBuf;
 
+    /* RX profile (NETDEV_CMD_SET_RX_PROFILE, drivers with NDCF_RX_PROFILE).
+     * The decision is root->rxProfileStated; these are its delivery — a
+     * request of its own, cloned from devIO, because the profile must reach
+     * the driver while devIO is out on a stats cycle, and asynchronous like
+     * everything else the stack task sends the driver. */
+    struct IOStdReq rxProfileIO;
+    struct NetDevRxProfile rxProfileBuf;
+    UBYTE rxProfileInFlight; /* rxProfileIO is out; its reply is still to come */
+    UBYTE rxProfileSent;     /* NDRP_* the driver has, or is being sent; UNSTATED = nothing yet */
+
+    /* the tick's sample of the receive side, the other half of the decision */
+    UBYTE rxWasBusy;    /* the last tick's frame delta reached SB_RX_BUSY_FRAMES */
+    ULONG rxFramesPrev; /* ndi_RxFrames as of that tick */
+
+    /* The signal this task allocated at startup for openers to raise when one
+     * of them blocks awaiting a reply; 0 = none was free, and the profile is
+     * then decided on the tick alone. root->rxAwaitSig is the same mask
+     * published where openers can see it, and only while a driver is listening
+     * — cleared at every teardown, which is why the allocation is kept here
+     * too: it is what the next bring-up republishes from. */
+    ULONG rxAwaitSigOwned;
+
     /* off-lock snapshot of the base's joined-MAC set: filled under the core
      * lock (netifbase_mcast_snapshot), then handed to the driver with the
      * lock dropped — netdev as one declarative NETDEV_CMD_SET_RXFILTER,
@@ -113,6 +135,13 @@ void sb_sana_down(struct SbStackCtx *ctx);
 void sb_netdev_stats_kick(struct SbStackCtx *ctx);
 void sb_netdev_stats_reply(struct SbStackCtx *ctx);
 void sb_netdev_rxfilter_sync(struct SbStackCtx *ctx);
+/* RX profile: _tick samples the receive side and decides, _decide only decides
+ * (the "somebody awaits a reply" signal), both push a change; _reply reclaims
+ * the request; _drain before STOP/DETACH, like the stats request. */
+void sb_netdev_profile_tick(struct SbStackCtx *ctx);
+void sb_netdev_profile_decide(struct SbStackCtx *ctx);
+void sb_netdev_profile_reply(struct SbStackCtx *ctx);
+void sb_netdev_profile_drain(struct SbStackCtx *ctx);
 void sb_sana_stats_kick(struct SbStackCtx *ctx);
 void sb_sana_stats_reply(struct SbStackCtx *ctx);
 void sb_sana_mcast_sync(struct SbStackCtx *ctx);

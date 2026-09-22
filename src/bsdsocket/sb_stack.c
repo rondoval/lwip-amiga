@@ -322,6 +322,12 @@ static void SbStackTask(void)
         goto out;
     }
 
+    /* openers wake us with this when one of them blocks for a reply while the
+     * receive side is not in its latency profile (sb_rx_awaiting). Without a
+     * free signal the profile is simply decided on the tick alone. */
+    BYTE profBit = AllocSignal(-1);
+    ctx->rxAwaitSigOwned = profBit < 0 ? 0 : 1UL << profBit;
+
     netstack_init(tick->tr_node.io_Device);
     sb_log_netif_attach();
     sb_config_load(&ctx->root->netCfg);
@@ -378,12 +384,19 @@ static void SbStackTask(void)
         ULONG devSig = ctx->devPort != NULL ? (1UL << ctx->devPort->mp_SigBit) : 0;
         ULONG mdnsSig = sb_mdns_sigmask();
         ULONG ctlSig = sb_netctl_sigmask();
+        ULONG profSig = ctx->root->rxAwaitSig; /* zero until a driver listens */
         /* CTRL_E: LibClose's "last client of a pending shutdown left" wake */
         ULONG sigs = Wait((1UL << timerPort->mp_SigBit) | devSig | mdnsSig |
-                          ctlSig | SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_E);
+                          ctlSig | profSig | SIGBREAKF_CTRL_C | SIGBREAKF_CTRL_E);
 
         if (sigs & devSig)
-            sb_stats_reply(ctx); /* harvest GET_STATS/GET_LINK, publish cache */
+        {
+            sb_stats_reply(ctx);          /* harvest GET_STATS/GET_LINK, publish cache */
+            sb_netdev_profile_reply(ctx); /* and the RX profile, out on the same port */
+        }
+
+        if (sigs & profSig)
+            sb_netdev_profile_decide(ctx); /* an opener blocked for a reply: latency, now */
 
         if (sigs & mdnsSig)
             sb_mdns_service(); /* `mdns` add/del/list of advertised services */
@@ -396,6 +409,7 @@ static void SbStackTask(void)
             if (CheckIO(&tick->tr_node))
                 WaitIO(&tick->tr_node);
             netstack_tick();
+            ctx->root->stackTicks++; /* the openers' time base (sb_rx_awaiting) */
             tick->tr_node.io_Command = TR_ADDREQUEST;
             tick->tr_time.tv_secs = 0;
             tick->tr_time.tv_micro = SB_STACK_TICK_US;
@@ -406,6 +420,12 @@ static void SbStackTask(void)
 
             /* push any pending multicast filter change (devIO must be idle) */
             sb_rxfilter_sync(ctx);
+
+            /* busy receive side and nobody waiting for a reply? Reclaim the
+             * last request first — it shares devPort with devIO, so a DoIO
+             * there may have swallowed its signal: look, do not be told */
+            sb_netdev_profile_reply(ctx);
+            sb_netdev_profile_tick(ctx);
 
             /* refresh the NIC stats cache once per second;
              * fire-and-forget — the reply lands via devSig above */

@@ -623,7 +623,19 @@ struct SocketBase
     struct sb_timeval netLastStart; /* IFQ_LastStart; zero until NETDEV_CMD_START */
     ULONG dgramRxDrops;    /* datagrams dropped at the socket queue (udpstat fullsock) */
     UBYTE netStatsValid;
-    UBYTE pad2[3];
+
+    /* RX profile intent (NETDEV_CMD_SET_RX_PROFILE; policy in sb_stack.c).
+     * Whether a task is blocked waiting for a reply is something only this
+     * layer knows; sb_rx_awaiting() below records it, the stack task turns
+     * it into a profile and pushes that to a driver with NDCF_RX_PROFILE.
+     * rxProfileStated is the stack task's own; the rest are single-word cells
+     * written under the core lock and read without it. */
+    UBYTE rxProfileStated; /* NDRP_* last decided (what the driver has or is being sent) */
+    UBYTE pad2[2];
+    volatile ULONG stackTicks;  /* the stack task's tick counter (NETSTACK_TICK_MS each) */
+    volatile ULONG rxAwaitTick; /* stackTicks when a task last blocked awaiting a reply */
+    ULONG rxAwaitSig;           /* signal the stack task with this; 0 = nobody is listening,
+                                   so do not (no such driver, or the interface is down) */
 
     /* --- per-opener state (child bases; garbage in the root) --- */
     struct MinNode openNode; /* link in root->openers (under openLock) */
@@ -657,7 +669,8 @@ struct SocketBase
     struct timerequest *timerReq; /* UNIT_MICROHZ; one request, reused per blocking call */
     UBYTE timerOpen;   /* timer.device opened; FALSE => sb_wait_to falls back to blocking forever */
     UBYTE dnsDone;     /* handshake cell: the resolver callback sets it, then signals sigBit */
-    UBYTE pad1[2];
+    UBYTE txSinceBlock; /* this opener has sent since it last blocked for input (its own task) */
+    UBYTE pad1;
 
     /* DNS + netdb per-opener result storage. The netdb calls return pointers
      * straight into these fields, so each result stays valid only until the
@@ -683,6 +696,25 @@ struct SocketBase
 };
 
 #define SB_ROOT(b) ((b)->root != NULL ? (b)->root : (b))
+
+/* Under the core lock, where an opener is about to block for inbound data
+ * (recv, the read side of WaitSelect). Having sent since it last did so, it is
+ * waiting for a reply - a request/response conversation is running, whatever
+ * the protocol - and the receive side belongs in its latency profile. The
+ * stack task is only woken when that is news. */
+static inline void sb_rx_awaiting(struct SocketBase *base)
+{
+    if (base->txSinceBlock)
+    {
+        struct SocketBase *root = SB_ROOT(base);
+
+        base->txSinceBlock = FALSE;
+        root->rxAwaitTick = root->stackTicks;
+        if (root->rxProfileStated != NDRP_LATENCY && root->rxAwaitSig != 0 &&
+            root->stackTask != NULL)
+            Signal(root->stackTask, root->rxAwaitSig);
+    }
+}
 
 /* opener registry: openNode link back to its child base */
 #define SB_OPENER_FROM_NODE(n) \
