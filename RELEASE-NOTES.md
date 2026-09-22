@@ -1,3 +1,84 @@
+# Release notes — lwip-amiga 1.6
+
+Changes since v1.5.
+
+A tuning release with one new tool. Nothing to change in your configuration:
+your `netstack.prefs` and interface files are read exactly as before.
+
+---
+
+## New features
+
+### NetSpeed — watch what the network is doing
+
+A window showing throughput in both directions — current, average and peak —
+with the link speed and a scrolling graph of the last few minutes. It reads the
+figures the library already keeps, once a second, and it works with any interface, `netdev` or SANA-II.
+
+It takes no arguments. The interface to watch (or the whole stack), how much
+time a graph column covers, the averaging window, the units and the graph scale
+are all on the **Settings** menu; **Settings » Save** keeps them in
+`ENV:NetSpeed.prefs` for next time. The window iconifies to an AppIcon, and
+`NetShutdown` closes it along with everything else.
+
+Start it from Workbench, or from the Shell with `Run >NIL: C:NetSpeed`.
+
+### The stack tells the driver when something is waiting
+
+Receive interrupt moderation is one setting asked to serve two opposite jobs: a
+long timeout batches a download beautifully but makes a lone reply wait out the
+whole timeout, while a short one answers promptly and costs a large part of the
+bulk receive rate. No single value is right for both.
+
+Neither half can fix that alone. Whether a program is blocked waiting for a
+reply is visible only here, in the stack; how to moderate a receive interrupt is
+the driver's business. So the stack now states **intent** — whether anything is
+waiting on the next frame — and leaves the driver to act on it. Request-and-
+answer traffic is quicker for it, and downloads keep their speed.
+
+This needs a driver that understands the request: **genet.device 4.3** or newer.
+Older drivers are told nothing and keep the fixed moderation they always used,
+so nothing breaks — the two halves are simply worth updating together.
+
+Nothing to configure, and it is not a preferences setting.
+
+---
+
+## Bug fixes / Improvements
+
+### Request-and-answer traffic is quicker
+
+File shares and anything else that sends a request and waits for the answer
+spend most of their time waiting, so a fixed delay that a download never notices
+is the whole cost for them. Two of ours are gone.
+
+The stack was acknowledging received data later than the sender expected, which
+left the server waiting before it would send the next batch. It now acknowledges
+a full batch as soon as it arrives. And an acknowledgement that nothing else was
+going to carry along used to be able to wait long enough for the other end to
+give up and send the data again — which, besides the delay, makes most systems
+slow themselves down for the next request. That wait is now far shorter than any
+peer's patience.
+
+Both are measured against a Samba server; `smb2fs` users should see it plainly.
+
+---
+
+## For developers
+
+- **`sockbench rr` / `rrsel`** measure request/response latency — exchanges per
+  second and the latency spread, rather than streaming throughput. `rrsel`
+  replays libsmb2's exact call sequence, so the difference between the two
+  prices that pattern on this stack.
+- **`test/ackagg`** is a host-side regression test for the acknowledgement
+  policy above, runnable without an Amiga.
+- The `netdev` ABI gained `NETDEV_CMD_SET_RX_PROFILE` and the `NDCF_RX_PROFILE`
+  capability bit. `NETDEV_ABI_VERSION` is unchanged at 1: the command is only
+  ever sent to a driver that advertises the bit, so existing drivers are
+  unaffected and need no rebuild.
+
+---
+
 # Release notes — lwip-amiga 1.5
 
 Changes since v1.3.

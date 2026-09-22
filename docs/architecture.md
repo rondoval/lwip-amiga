@@ -383,6 +383,21 @@ Design choices worth knowing:
 - **Quiesce is exact.** STOP completes every in-flight TX cookie before replying; DETACH
   then requires all RX cookies released and all driver-allocated DMA memory freed, so
   after DETACH no pointer of either side survives in the other.
+- **Receive moderation is split by knowledge: the stack states intent, the driver maps
+  it** (`NETDEV_CMD_SET_RX_PROFILE`, capability `NDCF_RX_PROFILE`). A NIC driver can batch
+  received frames for throughput or deliver a lone frame at once, and cannot know which
+  is wanted; whether a task is blocked waiting for a reply is visible to the stack alone,
+  and timeouts, thresholds and how a burst is told from a lone frame are the driver's
+  hardware knowledge. The stack's policy (`sb_netdev.c`): `NDRP_LATENCY` is the normal
+  state - it costs an idle or lightly loaded receive side nothing, and it is what every
+  request/response conversation wants; `NDRP_THROUGHPUT` is stated while the receive side
+  is busy (>= 2000 frames/s) and no opener has blocked for input after sending
+  (`sb_rx_awaiting()`, in the recv paths and the read side of `WaitSelect`) for 300 ms - a
+  download nobody polls, or the ACK stream of an upload. That event moves the profile
+  back at once; everything else is decided on the 50 ms tick, so the command follows
+  conversations, never packets. It travels on a request of its own, asynchronously, like
+  everything the stack task sends the driver. `SET_COALESCE` stays the operator's knob
+  for the numbers, and pins them.
 
 ### Mapping to GENET (the first driver)
 
