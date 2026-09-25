@@ -38,6 +38,11 @@ keep their fixed moderation. Nothing to configure.
   `memcpy`, and received frames are padded so the IP header is
   longword-aligned. With genet.device 3.17, which aligns its outgoing frames
   the same way, a full-size TX copy drops from 3.9 µs to 0.9 µs.
+- **Accepting on a released listener no longer crashes.** A connection that
+  arrived while a listening socket was between `ReleaseSocket()` and
+  `ObtainSocket()` dereferenced a NULL owner. It is now refused with a reset,
+  as a full accept queue already was; the peer can retry once the listener
+  has been obtained.
 
 ---
 
@@ -51,6 +56,8 @@ keep their fixed moderation. Nothing to configure.
   drivers that advertise the bit.
 - `memcpy` is emu68-common's interrupt-callable `movem.l` routine for the whole
   library, lwIP's `MEMCPY` included.
+- Log, diag and `vsyslog` lines are formatted by emu68-common's formatter (same
+  C rules as before: 32-bit `%d`/`%u`/`%x`, `%p`); the stack's own copy is gone.
 
 ---
 

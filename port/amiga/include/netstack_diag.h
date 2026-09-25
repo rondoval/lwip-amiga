@@ -3,13 +3,11 @@
  * Diag formatting and the runtime log for the port layer (implemented in
  * netstack_diag.c).
  *
- * Every entry point formats with C argument promotion — 32-bit %d/%u/%x, %p —
- * which RawDoFmt (behind Kprintf) cannot do: it reads bare %d/%u/%x as 16-bit
- * and has no %p. Only the finished string reaches the sink. The format rules
- * are therefore C's, with one formatter's limits: every argument cell is
- * 32-bit, so %ld/%lu/%lx equal %d/%u/%x (the l/h/z modifiers are skipped);
- * %p prints 8 hex digits; %s of NULL prints "(null)"; width, precision, '-'
- * and '0' are honoured; there is no %m, no 64-bit and no floating point.
+ * Every entry point formats with emu68-common's engine (format.h), whose rules
+ * are C's with that engine's limits: every argument cell is 32-bit, so
+ * %ld/%lu/%lx equal %d/%u/%x (the l/h/z modifiers are skipped); %p prints 8
+ * hex digits; %s of NULL prints "(null)"; width, precision, '-' and '0' are
+ * honoured; there is no %m, no 64-bit and no floating point.
  *
  * Deliberately dependency-free, and plain C types rather than the usual
  * ULONG: lwipopts.h includes this, and lwipopts.h is pulled in by lwip/opt.h
@@ -25,13 +23,6 @@
  * a no-op, so lwIP's own diag and the fork's evidence printers go silent while
  * their checks keep running. */
 void netstack_diag_printf(const char *fmt, ...);
-
-/* Same formatter, arguments taken from a flat 32-bit array instead of varargs
- * — the AmigaOS vsyslog calling convention. Backs bsd_vsyslog (a public LVO),
- * which is why this is exported rather than static to netstack_diag.c.
- * Writes at most max-1 chars plus a NUL; returns the number written. */
-unsigned long netstack_vformat_args(char *dst, unsigned long max,
-                                    const char *fmt, const unsigned long *args);
 
 /*
  * The runtime log: operational events — interface and link state, lease

@@ -21,6 +21,7 @@
 #include <exec/memory.h>
 
 #include <debug.h>
+#include <format.h>
 
 #include <lwip/dhcp.h>
 #include <lwip/ip4_addr.h>
@@ -245,7 +246,7 @@ VOID bsd_vsyslog(LONG pri asm("d0"), STRPTR msg asm("a0"), APTR args asm("a1"),
     }
 
     char buf[SB_SYSLOG_BUF];
-    netstack_vformat_args(buf, sizeof(buf), fmt, (const unsigned long *)args);
+    _SNPrintfArgs((STRPTR)buf, sizeof(buf), (CONST_STRPTR)fmt, (const ULONG *)args);
 
     /* a priority word without facility bits takes the opener's default */
     ULONG facility = (ULONG)pri & SB_LOG_FACMASK;

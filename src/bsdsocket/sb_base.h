@@ -31,13 +31,15 @@
 #include <exec/libraries.h>
 
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* the library's global: see main.c */
 
 #ifdef __INTELLISENSE__
 #include <clib/exec_protos.h>
 #else
 #include <proto/exec.h>
 #endif
+
+extern struct ExecBase *SysBase;
 
 #include <exec/semaphores.h>
 #include <exec/types.h>

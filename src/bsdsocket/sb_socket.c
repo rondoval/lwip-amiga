@@ -490,9 +490,12 @@ static err_t sb_tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err)
     if (lst == NULL || err != ERR_OK || newpcb == NULL)
         return ERR_VAL;
 
+    /* A listener between ReleaseSocket() and ObtainSocket() has no owner to
+     * charge the new socket to: refuse the connection, as a full queue does. */
+    struct SocketBase *owner = sb_owner_first(lst);
     struct SbSocket *s = NULL;
-    if (lst->naccept < SB_ACCEPT_QMAX)
-        s = sb_sock_alloc(sb_owner_first(lst), SBT_TCP);
+    if (owner != NULL && lst->naccept < SB_ACCEPT_QMAX)
+        s = sb_sock_alloc(owner, SBT_TCP);
     if (s == NULL)
     {
         tcp_abort(newpcb);

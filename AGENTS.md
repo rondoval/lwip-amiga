@@ -36,8 +36,8 @@ output.
 format genuinely needs C semantics — `%p`, `%02x`, or 32-bit `%u`/`%d`/`%x`. It promotes
 arguments correctly into a 256-byte buffer and hands the finished string to `Kprintf`; it
 backs `LWIP_PLATFORM_DIAG` because lwIP's own format strings live in the submodule and
-cannot be rewritten. `bsd_vsyslog` shares that formatter via `netstack_vformat_args`.
-There is exactly one formatter in this component — do not add a second.
+cannot be rewritten. `bsd_vsyslog` calls the same engine directly (`_SNPrintfArgs`,
+emu68-common `format.h`). There is exactly one formatter — do not add a second.
 
 **Operator-facing events go to the runtime log**, not to `Kprintf`: `SB_LOG(NS_LOG_x, ...)`
 in the library (`sb_log.h`) and `netstack_log(NS_LOG_x, ...)` in the port layer, which

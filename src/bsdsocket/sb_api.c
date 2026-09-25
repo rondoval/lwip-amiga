@@ -20,6 +20,7 @@
 #include <debug.h>
 
 #include "netstack.h"
+#include <memory.h> /* memcpy (emu68-common: no Exec call) */
 
 /* -------------------------------------------------------------- helpers --- */
 
@@ -54,7 +55,7 @@ void sb_addr_out(APTR name, LONG *namelen, ULONG addr, UWORD port)
     out.sin_addr = addr;
 
     LONG n = *namelen < (LONG)sizeof(out) ? *namelen : (LONG)sizeof(out);
-    CopyMem(&out, name, (ULONG)n);
+    memcpy(name, &out, (ULONG)n);
     *namelen = n;
 }
 

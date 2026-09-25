@@ -83,7 +83,7 @@ static void sb_arp_fill(struct sb_arpreq *out, const ip4_addr_t *ip,
     LONG flags = SB_ATF_INUSE;
     if (!(info & ETHARP_ENTRY_PENDING))
     {
-        CopyMem((APTR)eth, out->arp_ha.sa_data, 6);
+        memcpy(out->arp_ha.sa_data, eth, 6);
         flags |= SB_ATF_COM;
     }
     if (info & ETHARP_ENTRY_STATIC)
@@ -117,7 +117,7 @@ LONG sb_arp_ioctl(struct SocketBase *base, ULONG req, APTR argp)
         if (sb_arp_pa_ip(ar, &ip) < 0)
             return sb_fail(base, SB_EAFNOSUPPORT);
         struct eth_addr eth;
-        CopyMem(ar->arp_ha.sa_data, eth.addr, 6);
+        memcpy(eth.addr, ar->arp_ha.sa_data, 6);
 
         netstack_lock();
         err_t err = etharp_add_entry(&ip, &eth, (ar->arp_flags & SB_ATF_PERM) != 0);

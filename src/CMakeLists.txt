@@ -443,8 +443,11 @@ target_compile_definitions(netspeed PRIVATE
     TOOL_DATE="${CURRENT_DATE}"
 )
 # Emu68Common::common for prefs_split() (the ENV: file reader), as emu68check
-# does for a hosted tool. Its memcpy/memset are CopyMem wrappers like libnix's,
-# so whichever the link order picks behaves the same.
+# does for a hosted tool. It is linked before libnix and NetSpeed calls memcpy
+# itself, so the tool's (and libnix's) memcpy is emu68-common's movem asm
+# (68020+, any alignment, no Exec call). The toolchain links with
+# --allow-multiple-definition, so should libnix's copy ever be pulled in too,
+# the first — this one — silently wins.
 target_link_libraries(netspeed PRIVATE amiga Emu68Common::common)
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/netspeed

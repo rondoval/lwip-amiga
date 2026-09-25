@@ -236,10 +236,9 @@ void netstack_platform_diag(const char *msg);
 #define LWIP_PLATFORM_ASSERT(x)         netstack_platform_diag(x)
 
 /* --- lwIP diag output ---
- * lwIP diag format strings use 32-bit %d/%u and %p, which RawDoFmt-based
- * output would misread as 16-bit / not support at all (fleet gotcha) — so
- * LWIP_PLATFORM_DIAG goes through netstack_diag_printf, which formats with C
- * argument promotion and hands the backend a finished string.
+ * lwIP diag format strings use 32-bit %d/%u and %p: LWIP_PLATFORM_DIAG goes
+ * through netstack_diag_printf, which formats with emu68-common's engine (C
+ * argument promotion, so those render correctly) straight to the backend.
  *
  * The SYMBOL is defined in every build: lwIP needs LWIP_PLATFORM_DIAG to
  * resolve, and its default would pull printf into the link. The BODY is

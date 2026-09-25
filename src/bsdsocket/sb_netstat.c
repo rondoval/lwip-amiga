@@ -154,7 +154,7 @@ static LONG sb_stat_out(APTR destination, LONG size, const void *src, LONG total
     LONG n = size < total ? size : total;
     if (n < 0)
         n = 0;
-    CopyMem((APTR)src, destination, (ULONG)n);
+    memcpy(destination, src, (ULONG)n);
     return n;
 }
 
@@ -266,7 +266,7 @@ static void sb_pcd_emit(UBYTE *out, LONG size, LONG *written, LONG *count,
     pcd.pcd_receive_queue_size = rq;
     pcd.pcd_send_queue_size = sq;
     pcd.pcd_tcp_state = state;
-    CopyMem(&pcd, out + *written, sizeof(pcd));
+    memcpy(out + *written, &pcd, sizeof(pcd));
     *written += (LONG)sizeof(pcd);
 }
 
