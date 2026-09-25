@@ -255,7 +255,11 @@ consuming full Ethernet frames, and the glue translates the 14-byte header at
 the boundary (RAW frame mode is unreliable across real drivers). SANA-II is
 copy-based by construction: the driver copies every frame through
 client-supplied callbacks (`S2_CopyToBuff`/`S2_CopyFromBuff`, register-
-convention, interrupt-callable — pure copy loops, no Exec calls, no locks).
+convention, interrupt-callable — they call emu68-common's `memcpy`, the
+`movem.l` routine that makes no Exec call, and take no locks). Received
+frames are armed with a 2-byte pad ahead of the Ethernet header so the IP
+header, and with it the copied body, sits on a longword; a driver that stages
+its frames the same way (genet.device 3.17) gets longword moves on both sides.
 
 - **TX** (`sana2_tx.c`): linkoutput, under the core lock, parses the built
   header into `ios2_DstAddr`/`ios2_PacketType` (`S2_BROADCAST`/`S2_MULTICAST`/

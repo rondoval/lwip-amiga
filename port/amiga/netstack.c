@@ -181,12 +181,13 @@ void netstack_tick(void)
     tcp_fasttmr();
 #ifdef PROFILE
     /* report every ~2 s: the core-lock wait/hold slots then the per-stage
-     * timings, both through perf_report */
+     * timings, both through perf_report, then the SANA-II pump's histogram */
     if (++netstack.ns_LockProfTicks >= 2000 / NETSTACK_TICK_MS)
     {
         netstack.ns_LockProfTicks = 0;
         lock_prof_report(&netstack.ns_LockProf);
         perf_report(&ns_perf);
+        sana2if_pump_perf_report();
     }
 #endif
     netstack_unlock();

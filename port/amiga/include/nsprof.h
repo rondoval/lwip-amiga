@@ -46,6 +46,8 @@ enum NsProfSlot
      * mutually exclusive per active interface */
     NSP_S2_REQUEUE,    /* hold per chunk: detach frames, alloc+arm
                           replacement pbufs, build the repost chain */
+    /* beside the slots, the pump keeps one perf_hist, s2_rx_per_wake: reads
+     * harvested per wake (the driver's reply batching) */
 
     NSP_SLOT_COUNT
 };

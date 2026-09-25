@@ -128,6 +128,11 @@ void sana2if_destroy(struct Sana2If *s2i);
 LONG sana2if_pump_start(struct Sana2If *s2i);
 void sana2if_pump_stop(struct Sana2If *s2i);
 
+#ifdef PROFILE
+/* The pump's reads-per-wake histogram, printed beside the nsprof slots. */
+void sana2if_pump_perf_report(void);
+#endif
+
 /* SendIO the staged TX batch. Called at every outermost netstack_unlock
  * (still under the lock); NULL-tolerant no-op when idle. */
 void sana2if_tx_flush(struct Sana2If *s2i);

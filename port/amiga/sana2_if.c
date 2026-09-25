@@ -19,43 +19,7 @@
 #include "sana2_priv.h"
 
 /* ------------------------------------------------------ copy callbacks --- */
-/* Driver-called, possibly from interrupt context per the SANA-II spec: pure
- * copies only — no Exec calls (emu68-common's memcpy routes through
- * CopyMem, which is not interrupt-callable), no locks, no allocation.
- * Longword loop when both sides share alignment (the common case: pbuf
- * payloads are MEM_ALIGNMENT-aligned and driver staging buffers are fresh
- * allocations); byte loop otherwise. */
-static void s2if_copy(UBYTE *dst, const UBYTE *src, ULONG n)
-{
-    if ((((ULONG)dst ^ (ULONG)src) & 3) == 0)
-    {
-        while (((ULONG)dst & 3) != 0 && n > 0)
-        {
-            *dst++ = *src++;
-            n--;
-        }
-        ULONG *dl = (ULONG *)dst;
-        const ULONG *sl = (const ULONG *)src;
-        for (; n >= 16; n -= 16)
-        {
-            dl[0] = sl[0];
-            dl[1] = sl[1];
-            dl[2] = sl[2];
-            dl[3] = sl[3];
-            dl += 4;
-            sl += 4;
-        }
-        for (; n >= 4; n -= 4)
-            *dl++ = *sl++;
-        dst = (UBYTE *)dl;
-        src = (const UBYTE *)sl;
-    }
-    while (n > 0)
-    {
-        *dst++ = *src++;
-        n--;
-    }
-}
+/* Driver-called, possibly from interrupt context per the SANA-II spec. */
 
 /* RX: the driver hands us one received frame. `to` is the CMD_READ's
  * ios2_Data cookie verbatim — our S2RxReq. `len` may exceed the true frame
@@ -67,7 +31,7 @@ BOOL s2if_copy_to_buff(APTR to asm("a0"), APTR from asm("a1"), ULONG len asm("d0
     struct S2RxReq *r = to;
     if (len > r->srx_Cap)
         return FALSE; /* refuse rather than overrun the pbuf */
-    s2if_copy(r->srx_Dst, from, len);
+    memcpy(r->srx_Dst, from, len);
     return TRUE;
 }
 
@@ -93,7 +57,7 @@ BOOL s2if_copy_from_buff(APTR to asm("a0"), APTR from asm("a1"), ULONG len asm("
         ULONG chunk = p->len - off;
         if (chunk > want)
             chunk = want;
-        s2if_copy(dst, (const UBYTE *)p->payload + off, chunk);
+        memcpy(dst, (const UBYTE *)p->payload + off, chunk);
         dst += chunk;
         want -= chunk;
         p = p->next;
