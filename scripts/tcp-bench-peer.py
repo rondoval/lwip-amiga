@@ -36,9 +36,14 @@ peer's own turnaround (tens of microseconds of Python) is inside every sample â€
 constant across an A/B on the Amiga side, which is what the mode is for.
 
 UDP has no connection, so flows are keyed by peer address and delimited by
-one-byte "guns": the client sends "G<datagram-bytes>" to a source to start it
-(and learn where/what size to blast), and "S" to a sink/source to stop it and
-trigger its report. A lost stop gun is covered by an idle/duration timeout.
+one-byte "guns": the client sends "G<datagram-bytes>[/<mbps>]" to a source to
+start it (and learn where to send, how big to make each datagram and how fast),
+and "S" to a sink/source to stop it and trigger its report. A lost stop gun is
+covered by an idle/duration timeout.
+
+The source paces itself to the requested rate (iperf's -b): a UDP receive
+benchmark is "does the client keep up with a stream of X Mb/s", and the
+client's received rate against X is the loss.
 """
 
 import socket
@@ -46,6 +51,7 @@ import struct
 import sys
 import threading
 import time
+from dataclasses import dataclass
 
 SINK_PORT = 5001
 SOURCE_PORT = 5002
@@ -58,10 +64,24 @@ RR_BLOB = memoryview(b"x" * (8 * 1024 * 1024))  # largest reply; sockbench clamp
 UDP_DEFAULT_DGRAM = 1472  # one 1500-MTU frame, if a start gun omits the size
 UDP_IDLE_TIMEOUT = 3.0    # report + drop a silent UDP flow (lost stop gun)
 UDP_MAX_BLAST = 60.0      # safety cap on how long a source blasts one client
+UDP_PACE_BURST = 64       # datagrams a paced flow may catch up per loop pass
 
 SINK_RATE = 0.0           # KB/s the TCP sink will read; 0 = as fast as possible
 SINK_STALL_ON = 0.0       # seconds the TCP sink stops reading entirely
 SINK_STALL_OFF = 0.0      # seconds it reads between stalls
+
+
+@dataclass
+class UdpFlow:
+    """One UDP flow's byte count and timing, keyed by peer address (`flows`
+    in udp_sink, `clients` in udp_source). dgram_size/rate_bps are set only
+    by a source flow; rate_bps 0 means unpaced (also true of every sink
+    flow, which never sets it)."""
+    start_ts: float
+    last_ts: float
+    bytes: int = 0
+    dgram_size: int = 0
+    rate_bps: int = 0
 
 
 def log(msg):
@@ -161,8 +181,11 @@ def rr(conn, peer):
         report("rr    ", peer, total, secs)
 
 
-def udp_report(role, addr, st):
-    report(role, f"{addr[0]}:{addr[1]}", st[0], st[2] - st[1])
+def udp_report(role, addr, flow):
+    peer = f"{addr[0]}:{addr[1]}"
+    if flow.rate_bps > 0:
+        log(f"{role} {peer}: paced at {flow.rate_bps / 1e6:.0f} Mb/s")
+    report(role, peer, flow.bytes, flow.last_ts - flow.start_ts)
 
 
 def udp_sink(port, bind_addr):
@@ -172,7 +195,7 @@ def udp_sink(port, bind_addr):
     srv.bind((bind_addr, port))
     srv.settimeout(1.0)
     log(f"udp listening on {bind_addr or '*'}:{port} (sink)")
-    flows = {}  # addr -> [bytes, start_ts, last_ts]
+    flows = {}  # addr -> UdpFlow
     while True:
         try:
             data, addr = srv.recvfrom(65535)
@@ -180,29 +203,30 @@ def udp_sink(port, bind_addr):
             data = None
         now = time.monotonic()
         if data == b"S":  # stop gun
-            st = flows.pop(addr, None)
-            if st:
-                udp_report("sink  ", addr, st)
+            flow = flows.pop(addr, None)
+            if flow:
+                udp_report("sink  ", addr, flow)
         elif data is not None:
-            st = flows.get(addr)
-            if st is None:
-                st = flows[addr] = [0, now, now]
+            flow = flows.get(addr)
+            if flow is None:
+                flow = flows[addr] = UdpFlow(start_ts=now, last_ts=now)
                 log(f"udp-sink flow from {addr[0]}:{addr[1]}")
-            st[0] += len(data)
-            st[2] = now
-        for addr in [a for a, s in flows.items() if now - s[2] > UDP_IDLE_TIMEOUT]:
+            flow.bytes += len(data)
+            flow.last_ts = now
+        for addr in [a for a, f in flows.items() if now - f.last_ts > UDP_IDLE_TIMEOUT]:
             udp_report("sink  ", addr, flows.pop(addr))
 
 
 def udp_source(port, bind_addr):
-    """Blast datagrams to each client that fired a start gun (sockbench udprx)."""
+    """Stream datagrams to each client that fired a start gun (sockbench udprx):
+    paced to the gun's rate, or an unpaced blast when it names none."""
     srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((bind_addr, port))
     srv.setblocking(False)
     log(f"udp listening on {bind_addr or '*'}:{port} (source)")
     blob = b"x" * 65507
-    clients = {}  # addr -> [bytes, start_ts, last_ts, dgram_size]
+    clients = {}  # addr -> UdpFlow
     while True:
         while True:  # drain control datagrams (start/stop guns)
             try:
@@ -211,31 +235,57 @@ def udp_source(port, bind_addr):
                 break
             now = time.monotonic()
             if data.startswith(b"G"):
+                size_s, _, rate_s = data[1:].decode(errors="replace").partition("/")
                 try:
-                    dgram = int(data[1:]) if len(data) > 1 else UDP_DEFAULT_DGRAM
+                    dgram = int(size_s) if size_s else UDP_DEFAULT_DGRAM
                 except ValueError:
                     dgram = UDP_DEFAULT_DGRAM
+                try:
+                    rate_bps = int(float(rate_s) * 1e6) if rate_s else 0
+                except ValueError:
+                    rate_bps = 0
                 dgram = max(1, min(dgram, len(blob)))
-                clients[addr] = [0, now, now, dgram]
-                log(f"udp-source blast to {addr[0]}:{addr[1]} ({dgram} B datagrams)")
+                clients[addr] = UdpFlow(start_ts=now, last_ts=now, dgram_size=dgram, rate_bps=rate_bps)
+                pace = f"paced at {rate_bps / 1e6:.0f} Mb/s" if rate_bps > 0 else "UNPACED flood"
+                log(f"udp-source to {addr[0]}:{addr[1]} ({dgram} B datagrams, {pace})")
             elif data == b"S":
-                st = clients.pop(addr, None)
-                if st:
-                    udp_report("source", addr, st)
+                flow = clients.pop(addr, None)
+                if flow:
+                    udp_report("source", addr, flow)
         if not clients:
             time.sleep(0.02)
             continue
         now = time.monotonic()
+        idle = True
         for addr in list(clients):
-            st = clients[addr]
-            try:
-                srv.sendto(blob[: st[3]], addr)
-                st[0] += st[3]
-                st[2] = now
-            except (BlockingIOError, OSError):
-                pass
-            if now - st[1] > UDP_MAX_BLAST:  # lost stop gun
+            flow = clients[addr]
+            if flow.rate_bps > 0:
+                # token bucket: send what the rate allows by now, in a bounded
+                # burst so one flow cannot starve another
+                allowed = (now - flow.start_ts) * flow.rate_bps / 8
+                burst = 0
+                while flow.bytes < allowed and burst < UDP_PACE_BURST:
+                    try:
+                        srv.sendto(blob[: flow.dgram_size], addr)
+                    except (BlockingIOError, OSError):
+                        break
+                    flow.bytes += flow.dgram_size
+                    flow.last_ts = now
+                    burst += 1
+                if burst:
+                    idle = False
+            else:
+                try:
+                    srv.sendto(blob[: flow.dgram_size], addr)
+                    flow.bytes += flow.dgram_size
+                    flow.last_ts = now
+                    idle = False
+                except (BlockingIOError, OSError):
+                    pass
+            if now - flow.start_ts > UDP_MAX_BLAST:  # lost stop gun
                 udp_report("source", addr, clients.pop(addr))
+        if idle:
+            time.sleep(0.001)  # every paced flow is ahead of its clock
 
 
 def serve(port, handler, bind_addr):

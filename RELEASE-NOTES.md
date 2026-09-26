@@ -36,7 +36,7 @@ keep their fixed moderation. Nothing to configure.
   slow itself down. Measured against Samba; `smb2fs` users should notice.
 - **Faster SANA-II copies.** The per-frame copy callbacks use a `movem.l`
   `memcpy`, and received frames are padded so the IP header is
-  longword-aligned. With genet.device 3.17, which aligns its outgoing frames
+  longword-aligned. With genet.device 3.16, which aligns its outgoing frames
   the same way, a full-size TX copy drops from 3.9 µs to 0.9 µs.
 - **Accepting on a released listener no longer crashes.** A connection that
   arrived while a listening socket was between `ReleaseSocket()` and

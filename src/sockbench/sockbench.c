@@ -5,13 +5,16 @@
  * Runs against scripts/tcp-bench-peer.py (start it on a PC; port 5001 discards
  * what we send, port 5002 blasts data at us — same ports for TCP and UDP):
  *
- *   sockbench rx|tx|txblock|udprx|udptx <host> [streams] [seconds] [sizeKB]
+ *   sockbench rx|tx|txblock|udprx|udptx <host> [streams] [seconds] [sizeKB] [mbps]
  *
  * rx/tx are TCP; udprx/udptx are UDP. N nonblocking sockets driven from one
  * WaitSelect loop; per-stream and aggregate Mb/s from ReadEClock. Defaults:
  * 1 stream, 10 s; TCP 64 KB buffer, UDP one 1500-MTU frame per datagram.
- * For UDP the size arg sets the datagram size (fragmented above one frame),
- * and the aggregate is best-effort — the peer's own count shows any loss.
+ * For UDP the size arg sets the datagram size (fragmented above one frame).
+ * udprx asks the peer for a PACED stream (default 100 Mb/s, iperf -b style):
+ * the benchmark is whether this machine keeps up with X Mb/s, and received
+ * against X is the loss. mbps 0 = unpaced line-rate flood. udptx is
+ * paced by the stack (a datagram is accepted only when it can go out whole).
  *
  * txblock is a diagnostic mode, not a benchmark: one BLOCKING socket driven by
  * a tight send() loop with no WaitSelect, mirroring AmiSpeedTest's upload test.
@@ -71,6 +74,7 @@ struct Device *TimerBase;
 #define BENCH_RR_PORT 5003     /* peer answers each request with N bytes (rr test) */
 #define BENCH_MAX_STREAMS 8
 #define BENCH_UDP_DGRAM 1472   /* default UDP payload: one 1500-MTU frame */
+#define BENCH_UDP_RATE_MBPS 100 /* default udprx pace; 0 = unpaced flood */
 
 #define BENCH_RR_HDR 8                   /* {u32 resp_len, u32 req_len}, network order */
 #define BENCH_RR_REQ 128                 /* default request: an SMB2 READ request is ~120 bytes */
@@ -360,7 +364,7 @@ rr_out:
 
 int main(int argc, char **argv)
 {
-    /* argv: [0]=sockbench [1]=rx|tx|udprx|udptx [2]=host [3]=streams [4]=secs [5]=sizeKB
+    /* argv: [0]=sockbench [1]=rx|tx|udprx|udptx [2]=host [3]=streams [4]=secs [5]=sizeKB [6]=mbps (udprx)
      *       rr|rrsel reuse the slots as     [2]=host [3]=respBytes [4]=secs [5]=reqBytes */
     const char *dir = (argc > 1) ? argv[1] : "";
     BOOL rx = FALSE, udp = FALSE, blocking = FALSE, rr = FALSE, rrsel = FALSE, dir_ok = TRUE;
@@ -375,9 +379,11 @@ int main(int argc, char **argv)
 
     if (!dir_ok || argc < 3)
     {
-        printf("usage: sockbench rx|tx|txblock|udprx|udptx <host> [streams<=%d] [seconds] [sizeKB]\n"
+        printf("usage: sockbench rx|tx|txblock|udprx|udptx <host> [streams<=%d] [seconds] [sizeKB] [mbps]\n"
                "  rx/tx = TCP; udprx/udptx = UDP. sizeKB is the TCP buffer or the UDP\n"
                "  datagram size (default: TCP 64 KB, UDP one 1500-MTU frame).\n"
+               "  udprx: the peer paces its stream to mbps (default %d); 0 = unpaced\n"
+               "  line-rate flood, an overload test rather than a benchmark.\n"
                "  txblock = diagnostic: 1 blocking socket, tight send() loop, 32 KB\n"
                "  default — reproduces AmiSpeedTest's upload path.\n"
                "       sockbench rr|rrsel <host> [respBytes] [seconds] [reqBytes]\n"
@@ -385,12 +391,13 @@ int main(int argc, char **argv)
                "  respBytes takes K/M; 0 or omitted sweeps 1 byte..1M. Default 5 s per\n"
                "  point, 128 byte requests. rrsel = libsmb2's WaitSelect + split-recv\n"
                "  call pattern; rr = one send, one recv loop.\n",
-               BENCH_MAX_STREAMS);
+               BENCH_MAX_STREAMS, BENCH_UDP_RATE_MBPS);
         return 5;
     }
     LONG streams = (!rr && argc > 3) ? atoi(argv[3]) : 1;
     LONG seconds = (argc > 4) ? atoi(argv[4]) : (rr ? 5 : 10);
     LONG sizeKB = (!rr && argc > 5) ? atoi(argv[5]) : 0; /* 0 = per-protocol default */
+    LONG mbps = (udp && rx) ? (argc > 6 ? atoi(argv[6]) : BENCH_UDP_RATE_MBPS) : 0;
     ULONG rr_resp = 0, rr_req = BENCH_RR_REQ;            /* resp 0 = sweep */
     if (rr && ((argc > 3 && !bench_parse_size(argv[3], &rr_resp)) ||
                (argc > 5 && !bench_parse_size(argv[5], &rr_req)) ||
@@ -399,7 +406,7 @@ int main(int argc, char **argv)
         printf("sockbench: bad parameters (respBytes <= 8M, reqBytes 8..64K)\n");
         return 5;
     }
-    if (streams < 1 || streams > BENCH_MAX_STREAMS || seconds < 1)
+    if (streams < 1 || streams > BENCH_MAX_STREAMS || seconds < 1 || mbps < 0)
     {
         printf("sockbench: bad parameters\n");
         return 5;
@@ -522,8 +529,10 @@ int main(int argc, char **argv)
          * where to send and how big to make each datagram. */
         LONG glen = 1;
         buf[0] = 'G';
-        if (udp)
-            glen = sprintf((char *)buf, "G%lu", (unsigned long)buflen);
+        if (udp && mbps > 0)
+            glen = sprintf((char *)buf, "G%lu/%ld", (unsigned long)buflen, (long)mbps);
+        else if (udp)
+            glen = sprintf((char *)buf, "G%lu", (unsigned long)buflen); /* the old gun: unpaced */
         for (LONG i = 0; i < streams; i++)
             send(sock[i], buf, glen, 0);
     }
@@ -531,6 +540,10 @@ int main(int argc, char **argv)
            udp ? "udp" : "tcp", blocking ? "txblock" : rx ? "rx" : "tx",
            (long)streams, port, (long)seconds,
            (unsigned long)buflen, udp ? "datagrams" : "buffer");
+    if (udp && rx)
+        printf(mbps > 0 ? "peer paced at %ld Mb/s per stream\n"
+                        : "peer UNPACED: line-rate flood, an overload test, not a benchmark\n",
+               (long)mbps);
 
     struct EClockVal ev;
     ULONG freq = ReadEClock(&ev);
@@ -643,6 +656,15 @@ int main(int argc, char **argv)
     if (!rx)
         printf(udp ? "(udp tx counts datagrams the stack accepted; the peer's count shows loss)\n"
                    : "(tx counts bytes accepted into send buffers; ~256 KB/stream tail margin)\n");
+    else if (udp && mbps > 0 && ticks != 0)
+    {
+        /* the same Mb/s x10 arithmetic as bench_report, against the pace */
+        unsigned long long got_x10 = total * 8ULL / 100000ULL * freq / ticks;
+        unsigned long long target_x10 = (unsigned long long)mbps * 10ULL * (unsigned long long)streams;
+        printf("(udp rx: %lu.%lu of %lu Mb/s target = %lu %%; the peer's sent count is the truth)\n",
+               (unsigned long)(got_x10 / 10), (unsigned long)(got_x10 % 10),
+               (unsigned long)(target_x10 / 10), (unsigned long)(got_x10 * 100ULL / target_x10));
+    }
     rc = 0;
 
 bench_close:
