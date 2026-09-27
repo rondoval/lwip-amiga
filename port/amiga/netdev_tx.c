@@ -3,8 +3,20 @@
  * netdev TX path: pbuf chains submitted to the driver as scatter-gather
  * descriptors with L4-checksum offload preparation, the L2 header cache
  * that lets the IP output hot path bypass etharp/ethernet_output, and the
- * TX-done reclaim. linkoutput runs in whatever task called into lwIP,
- * always under the netstack core lock.
+ * TX-done reclaim.
+ *
+ * In the order a frame travels, which is also the order of this file:
+ *
+ *   L2 header cache    — the prebuilt header the fast path prepends,
+ *   checksum offload   — pseudo-header seed and the offload offsets,
+ *   submit             — descriptor build, one handoff, the pending queue,
+ *   output             — the two netif entry points lwIP calls,
+ *   doorbell           — publish a staged burst, at the outermost unlock,
+ *   completion         — the driver's TX-done, reclaimed under the next hold.
+ *
+ * Everything down to the doorbell runs in whatever task called into lwIP,
+ * always under the netstack core lock. The completion callback is the
+ * exception: it runs on the driver's unit task and stays lock-free.
  */
 
 #include "netstack_sys.h"
@@ -19,65 +31,6 @@
 
 /* scatter-list bound; pathological chains are coalesced down to it */
 #define NDIF_MAX_STACK_SEGS 16
-
-/* nso_TxDone: the driver's unit task hands up completed TX cookies (the pbufs
- * transmitted, one per ndo_TxSubmit). Rather than take the core lock here and
- * ping-pong it with the app sender, stage the cookies on the lock-free reclaim
- * ring; netdevif_tx_reclaim frees them under the next hold that already owns the
- * lock. stackctx is the struct NetdevIf * (nda_StackCtx). Single producer (this
- * unit task, the only nso_* caller), so the enqueue needs no lock and never
- * blocks the unit task on the app's hold. */
-void ndif_tx_done(APTR stackctx, APTR const *cookies, ULONG count)
-{
-    struct NetdevIf *ndi = stackctx;
-    ULONG prod = ndi->ndi_TxFreeProd;
-    ULONG cons = ndi->ndi_TxFreeCons; /* snapshot; a stale (older) value only
-                                         makes the fullness test conservative */
-
-    if ((ULONG)(prod - cons) + count > ndi->ndi_TxFreeMask + 1)
-    {
-        /* Backstop: the ring is sized above the driver's in-flight ceiling, so
-         * this cannot trip at current constants — free inline so a cookie is
-         * never leaked should that sizing ever be invalidated. */
-        ndi->ndi_TxFreeOverflow += count;
-        netstack_lock();
-        for (ULONG i = 0; i < count; i++)
-            pbuf_free((struct pbuf *)cookies[i]);
-        netstack_unlock();
-        return;
-    }
-
-    for (ULONG i = 0; i < count; i++)
-        ndi->ndi_TxFree[prod++ & ndi->ndi_TxFreeMask] = cookies[i];
-    asm volatile("" ::: "memory"); /* publish the cookies before the index */
-    ndi->ndi_TxFreeProd = prod;
-}
-
-/* Free the completed TX cookies ndif_tx_done staged since the last drain. Runs
- * under the core lock (the outermost netstack_lock, and netdevif_destroy), so
- * the pbuf_free work folds into a hold that already exists instead of the unit
- * task taking a contended lock per completion batch. Snapshot-drain-commit,
- * mirroring the driver's netdev_drain_recycle. */
-void netdevif_tx_reclaim(struct NetdevIf *ndi)
-{
-    if (ndi == NULL)
-        return;
-
-    ULONG cons = ndi->ndi_TxFreeCons;
-    ULONG prod = ndi->ndi_TxFreeProd; /* snapshot bounds this pass */
-    if (cons == prod)
-        return; /* common case: nothing completed since the last hold */
-
-    PERF_T0(t_done);
-    while (cons != prod)
-    {
-        pbuf_free((struct pbuf *)ndi->ndi_TxFree[cons & ndi->ndi_TxFreeMask]);
-        cons++;
-    }
-    asm volatile("" ::: "memory"); /* commit the frees before releasing slots */
-    ndi->ndi_TxFreeCons = cons;
-    PERF_ADD(&ns_perf, NSP_TX_DONE, t_done);
-}
 
 /* --------------------------------------------------- L2 header cache --- */
 
@@ -158,6 +111,80 @@ static ULONG ndif_l4_offsets(struct pbuf *p, UWORD *csum_start, UWORD *csum_offs
 }
 
 /* ------------------------------------------------------------- submit --- */
+/* One frame's journey into the driver: build its descriptor, hand it over, and
+ * — when the ring will not take it — park it on the pending queue that
+ * netdevif_tx_reclaim drains as room appears. */
+
+/* Build the driver's descriptor for @frame: one scatter entry per pbuf, L4
+ * checksum offload where the frame qualifies. @segs is the caller's storage. */
+static void ndif_tx_desc(struct NetdevIf *ndi, struct pbuf *frame,
+                         struct NetDevSg *segs, struct NetDevTxDesc *desc)
+{
+    UWORD nsegs = 0;
+    for (struct pbuf *q = frame; q != NULL; q = q->next)
+    {
+        segs[nsegs].nsg_Data = q->payload;
+        segs[nsegs].nsg_Len = q->len;
+        nsegs++;
+    }
+    desc->ntd_Segs = segs;
+    desc->ntd_NumSegs = nsegs;
+    desc->ntd_Flags = 0;
+    desc->ntd_CsumStart = 0;
+    desc->ntd_CsumOffset = 0;
+    desc->ntd_Cookie = frame;
+
+    if (ndi->ndi_Caps.ndc_Features & NDCF_TX_L4CSUM)
+    {
+        ULONG proto = ndif_l4_offsets(frame, &desc->ntd_CsumStart, &desc->ntd_CsumOffset);
+        if (proto != 0xFFFF)
+        {
+            desc->ntd_Flags |= NDTF_L4CSUM;
+            if (proto == IP_PROTO_UDP)
+                desc->ntd_Flags |= NDTF_L4_UDP;
+        }
+        /* not offloadable: per-netif GEN switches are only cleared for
+         * TCP/UDP, so anything else was checksummed by lwIP already */
+    }
+}
+
+/* Hand one frame (already ref'd for the driver) to the ring. TRUE: staged,
+ * doorbell deferred to netdevif_tx_kick so a whole burst rings once. FALSE:
+ * the ring had no room and the frame is untouched. */
+static BOOL ndif_tx_submit(struct NetdevIf *ndi, struct pbuf *frame)
+{
+    struct NetDevSg segs[NDIF_MAX_STACK_SEGS];
+    struct NetDevTxDesc desc;
+    ndif_tx_desc(ndi, frame, segs, &desc);
+
+    PERF_T0(t_submit);
+    LONG accepted = ndi->ndi_Ops->ndo_TxSubmit(ndi->ndi_Drv, &desc, 1);
+    PERF_ADD(&ns_perf, NSP_TX_SUBMIT, t_submit);
+    if (accepted != 1)
+        return FALSE;
+    ndi->ndi_TxKickPending = TRUE;
+    return TRUE;
+}
+
+/* Resubmit pending frames in order while the ring takes them; each one that
+ * leaves the queue frees a slot for admission. */
+static void ndif_tx_pend_drain(struct NetdevIf *ndi)
+{
+    while (ndi->ndi_TxPendHead != ndi->ndi_TxPendTail)
+    {
+        struct pbuf *frame = ndi->ndi_TxPend[ndi->ndi_TxPendHead & ndi->ndi_TxPendMask];
+        if (!ndif_tx_submit(ndi, frame))
+            break;
+        ndi->ndi_TxPendHead++;
+        netifbase_tx_freed(&ndi->ndi_Base, 1);
+    }
+}
+
+/* ------------------------------------------------------------- output --- */
+/* The two entry points lwIP calls: netif->linkoutput for a frame that already
+ * carries its L2 header, netif->output for an IP packet that still needs one.
+ * linkoutput is defined first because the fast path in ndif_ip4_output calls
+ * it directly. */
 
 err_t ndif_linkoutput(struct netif *nif, struct pbuf *p)
 {
@@ -177,10 +204,7 @@ err_t ndif_linkoutput(struct netif *nif, struct pbuf *p)
     {
         p = pbuf_coalesce(p, PBUF_RAW);
         if (pbuf_clen(p) > max_segs)
-        {
-            ndi->ndi_TxOversize++;
-            return ERR_IF;
-        }
+            return ERR_IF; /* shape error, not capacity: nothing to retry */
     }
 
     /* Zero-copy aliasing guard. A ref beyond the owner's single hold means a
@@ -202,69 +226,31 @@ err_t ndif_linkoutput(struct netif *nif, struct pbuf *p)
         cloned = TRUE;
     }
 
-    struct NetDevSg segs[NDIF_MAX_STACK_SEGS];
-    UWORD nsegs = 0;
-    for (struct pbuf *q = frame; q != NULL; q = q->next)
-    {
-        segs[nsegs].nsg_Data = q->payload;
-        segs[nsegs].nsg_Len = q->len;
-        nsegs++;
-    }
-
-    struct NetDevTxDesc desc;
-    desc.ntd_Segs = segs;
-    desc.ntd_NumSegs = nsegs;
-    desc.ntd_Flags = 0;
-    desc.ntd_CsumStart = 0;
-    desc.ntd_CsumOffset = 0;
-    desc.ntd_Cookie = frame;
-
-    if (ndi->ndi_Caps.ndc_Features & NDCF_TX_L4CSUM)
-    {
-        ULONG proto = ndif_l4_offsets(frame, &desc.ntd_CsumStart, &desc.ntd_CsumOffset);
-        if (proto != 0xFFFF)
-        {
-            desc.ntd_Flags |= NDTF_L4CSUM;
-            if (proto == IP_PROTO_UDP)
-                desc.ntd_Flags |= NDTF_L4_UDP;
-        }
-        /* not offloadable: per-netif GEN switches are only cleared for
-         * TCP/UDP, so anything else was checksummed by lwIP already */
-    }
-
     /* The driver owns the frame until nso_TxDone; lwIP may free its
      * reference right after we return. A clone is born with the one ref
      * that nso_TxDone's pbuf_free consumes. */
     if (!cloned)
         pbuf_ref(frame);
 
-    PERF_T0(t_submit);
-    LONG accepted = ndi->ndi_Ops->ndo_TxSubmit(ndi->ndi_Drv, &desc, 1);
-    PERF_ADD(&ns_perf, NSP_TX_SUBMIT, t_submit);
-    if (accepted != 1)
+    /* Behind frames already waiting, or refused by a full ring, the frame
+     * waits its turn instead of being dropped: lwIP would not notice a drop
+     * (ip4_frag ignores a failed fragment) and a datagram would go out short.
+     * Admission (netifbase_tx_admit) keeps the queue from filling for any
+     * datagram the socket layer let through; lwIP's own senders (ARP, DHCP)
+     * can still meet a full one. */
+    if (ndi->ndi_TxPendHead != ndi->ndi_TxPendTail || !ndif_tx_submit(ndi, frame))
     {
-        pbuf_free(frame);
-        return ERR_MEM; /* ring full; TCP retries on timer */
+        if (ndi->ndi_TxPendTail - ndi->ndi_TxPendHead > ndi->ndi_TxPendMask)
+        {
+            pbuf_free(frame);
+            return ERR_MEM;
+        }
+        ndi->ndi_TxPend[ndi->ndi_TxPendTail++ & ndi->ndi_TxPendMask] = frame;
+        netifbase_tx_taken(&ndi->ndi_Base, 1);
     }
-
-    /* Staged on the ring; the doorbell is deferred to netdevif_tx_kick at the
-     * outermost unlock, so a whole tcp_output burst rings one doorbell. */
-    ndi->ndi_TxKickPending = TRUE;
 
     PERF_ADD(&ns_perf, NSP_TX_LINKOUT, t_out);
     return ERR_OK;
-}
-
-/* Publish a staged TX burst: called at every outermost netstack_unlock (and as
- * the STOP backstop). A no-op unless ndif_linkoutput staged frames since the
- * last kick — the common case for the RX/tick/tx-done unlock callers. */
-void netdevif_tx_kick(struct NetdevIf *ndi)
-{
-    if (ndi != NULL && ndi->ndi_TxKickPending)
-    {
-        ndi->ndi_Ops->ndo_TxKick(ndi->ndi_Drv);
-        ndi->ndi_TxKickPending = FALSE;
-    }
 }
 
 /* netif->output — the TX hot path for every IP frame (TCP segments, UDP
@@ -306,4 +292,104 @@ err_t ndif_ip4_output(struct netif *nif, struct pbuf *p, const ip4_addr_t *ipadd
     }
 
     return err;
+}
+
+/* ----------------------------------------------------------- doorbell --- */
+
+/* Publish a staged TX burst: called at every outermost netstack_unlock (and as
+ * the STOP backstop). A no-op unless ndif_linkoutput staged frames since the
+ * last kick — the common case for the RX/tick/tx-done unlock callers. */
+void netdevif_tx_kick(struct NetdevIf *ndi)
+{
+    if (ndi != NULL && ndi->ndi_TxKickPending)
+    {
+        ndi->ndi_Ops->ndo_TxKick(ndi->ndi_Drv);
+        ndi->ndi_TxKickPending = FALSE;
+    }
+}
+
+/* --------------------------------------------------------- completion --- */
+/* The far end of a submit, and the only group here that does NOT run under the
+ * core lock: nso_TxDone is the driver's unit task. It stages, the next
+ * lock holder frees (netdevif_tx_reclaim, from the outermost netstack_lock). */
+
+/* nso_TxDone: the driver's unit task hands up completed TX cookies (the pbufs
+ * transmitted, one per ndo_TxSubmit). Rather than take the core lock here and
+ * ping-pong it with the app sender, stage the cookies on the lock-free reclaim
+ * ring; netdevif_tx_reclaim frees them under the next hold that already owns the
+ * lock. stackctx is the struct NetdevIf * (nda_StackCtx). Single producer (this
+ * unit task, the only nso_* caller), so the enqueue needs no lock and never
+ * blocks the unit task on the app's hold. */
+void ndif_tx_done(APTR stackctx, APTR const *cookies, ULONG count)
+{
+    struct NetdevIf *ndi = stackctx;
+    ULONG prod = ndi->ndi_TxFreeProd;
+    ULONG cons = ndi->ndi_TxFreeCons; /* snapshot; a stale (older) value only
+                                         makes the fullness test conservative */
+
+    if ((ULONG)(prod - cons) + count > ndi->ndi_TxFreeMask + 1)
+    {
+        /* Backstop: the ring is sized above the driver's in-flight ceiling, so
+         * this cannot trip at current constants — free inline so a cookie is
+         * never leaked should that sizing ever be invalidated. */
+        netstack_lock();
+        for (ULONG i = 0; i < count; i++)
+            pbuf_free((struct pbuf *)cookies[i]);
+        netstack_unlock();
+        return;
+    }
+
+    for (ULONG i = 0; i < count; i++)
+        ndi->ndi_TxFree[prod++ & ndi->ndi_TxFreeMask] = cookies[i];
+    asm volatile("" ::: "memory"); /* publish the cookies before the index */
+    ndi->ndi_TxFreeProd = prod;
+
+    /* A sender blocked on transmit room (netifbase_tx_admit) with frames in
+     * the pending queue has nobody else to take the lock for it: do it here,
+     * once per completion batch and only in that state (both reads are
+     * unlocked snapshots; a stale one costs one more batch). The obtain runs
+     * netdevif_tx_reclaim - resubmit and the space wake - and the release
+     * rings the doorbell. */
+    if (netstack.ns_TxWantSpace && ndi->ndi_TxPendHead != ndi->ndi_TxPendTail)
+    {
+        netstack_lock();
+        netstack_unlock();
+    }
+}
+
+/* Free the completed TX cookies ndif_tx_done staged since the last drain. Runs
+ * under the core lock (the outermost netstack_lock, and netdevif_destroy), so
+ * the pbuf_free work folds into a hold that already exists instead of the unit
+ * task taking a contended lock per completion batch. Snapshot-drain-commit,
+ * mirroring the driver's netdev_drain_recycle. */
+void netdevif_tx_reclaim(struct NetdevIf *ndi)
+{
+    if (ndi == NULL)
+        return;
+
+    ULONG cons = ndi->ndi_TxFreeCons;
+    ULONG prod = ndi->ndi_TxFreeProd; /* snapshot bounds this pass */
+    if (cons != prod)
+    {
+        PERF_T0(t_done);
+        while (cons != prod)
+        {
+            pbuf_free((struct pbuf *)ndi->ndi_TxFree[cons & ndi->ndi_TxFreeMask]);
+            cons++;
+        }
+        asm volatile("" ::: "memory"); /* commit the frees before releasing slots */
+        ndi->ndi_TxFreeCons = cons;
+        PERF_ADD(&ns_perf, NSP_TX_DONE, t_done);
+    }
+    /* Ring room comes back ahead of the cookies (the driver's consumer index
+     * moves before its completion FIFO does), so the queue is tried whenever
+     * it holds anything, not only after a completion. */
+    if (ndi->ndi_TxPendHead != ndi->ndi_TxPendTail)
+        ndif_tx_pend_drain(ndi);
+}
+
+void netdevif_tx_pend_free(struct NetdevIf *ndi)
+{
+    while (ndi->ndi_TxPendHead != ndi->ndi_TxPendTail)
+        pbuf_free((struct pbuf *)ndi->ndi_TxPend[ndi->ndi_TxPendHead++ & ndi->ndi_TxPendMask]);
 }

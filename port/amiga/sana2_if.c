@@ -127,7 +127,10 @@ LONG sana2if_create(struct Sana2If *s2i, struct Device *dev, struct Unit *unit,
     ULONG nIp4, nArp, nVlan;
     s2if_rx_classes(vlanTci, &nIp4, &nArp, &nVlan);
     s2i->s2i_Base.nib_NumRead = (UWORD)(nIp4 + nArp + nVlan);
-    s2i->s2i_Base.nib_NumWrite = S2IF_TX_REQS;
+    s2i->s2i_TxReqs = netifbase_tx_frames(NIB_MAX_L3, mtu) + S2IF_TX_REQS_SLACK;
+    if (s2i->s2i_TxReqs < S2IF_TX_REQS_MIN)
+        s2i->s2i_TxReqs = S2IF_TX_REQS_MIN;
+    s2i->s2i_Base.nib_NumWrite = (UWORD)s2i->s2i_TxReqs;
     /* the pump sizes RX pbufs and decides on the 0x8100 read class from
      * this before the identity stamp re-sets it */
     s2i->s2i_Base.nib_VlanTci = vlanTci;
@@ -144,12 +147,12 @@ LONG sana2if_create(struct Sana2If *s2i, struct Device *dev, struct Unit *unit,
     /* Write-request pool. Cloned identity per the sanctioned duplication
      * (io_Device/io_Unit/ios2_BufferManagement from the opened request);
      * reply ports are stamped by the pump, which owns them. */
-    s2i->s2i_TxStorageSize = S2IF_TX_REQS * sizeof(struct S2TxReq);
+    s2i->s2i_TxStorageSize = s2i->s2i_TxReqs * sizeof(struct S2TxReq);
     s2i->s2i_TxStorage = AllocMem(s2i->s2i_TxStorageSize, MEMF_PUBLIC | MEMF_CLEAR);
     if (s2i->s2i_TxStorage == NULL)
         return -1;
     struct S2TxReq *t = s2i->s2i_TxStorage;
-    for (ULONG i = 0; i < S2IF_TX_REQS; i++, t++)
+    for (ULONG i = 0; i < s2i->s2i_TxReqs; i++, t++)
     {
         t->stx_Io.ios2_Req.io_Message.mn_Length = sizeof(struct IOSana2Req);
         t->stx_Io.ios2_Req.io_Device = dev;
@@ -158,6 +161,7 @@ LONG sana2if_create(struct Sana2If *s2i, struct Device *dev, struct Unit *unit,
         t->stx_Next = s2i->s2i_TxFree;
         s2i->s2i_TxFree = t;
     }
+    netifbase_tx_setup(&s2i->s2i_Base, s2i->s2i_TxReqs, mtu);
     s2i->s2i_TxStagedTail = &s2i->s2i_TxStagedHead;
 
     netstack_lock();
@@ -197,6 +201,7 @@ void sana2if_destroy(struct Sana2If *s2i)
         netstack.ns_ActiveSana2 = NULL;
         netstack.ns_ActiveIf = NULL;
     }
+    netifbase_tx_detached(); /* blocked senders re-check and find no interface */
     netstack_unlock();
 
     /* Delivered RX pbufs a socket still holds are plain heap pbufs — the

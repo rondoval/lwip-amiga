@@ -342,7 +342,7 @@ static void s2if_pump_abort(struct S2Pump *pp)
     netstack_lock();
     ULONG writes = s2i->s2i_TxInFlight;
     struct S2TxReq *t = s2i->s2i_TxStorage;
-    for (ULONG i = 0; i < S2IF_TX_REQS; i++, t++)
+    for (ULONG i = 0; i < s2i->s2i_TxReqs; i++, t++)
     {
         if (t->stx_InFlight)
             AbortIO(&t->stx_Io.ios2_Req);

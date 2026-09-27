@@ -79,6 +79,7 @@ struct Sana2If
     ULONG s2i_TxInFlight;
     APTR s2i_TxStorage;
     ULONG s2i_TxStorageSize;
+    ULONG s2i_TxReqs;      /* pool size (sana2if_create) */
 
     /* RX pump (sana2_pump.c) */
     struct Process *s2i_Pump;

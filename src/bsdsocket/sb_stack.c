@@ -329,6 +329,7 @@ static void SbStackTask(void)
     ctx->rxAwaitSigOwned = profBit < 0 ? 0 : 1UL << profBit;
 
     netstack_init(tick->tr_node.io_Device);
+    netstack.ns_TxSpaceCb = sb_tx_space_avail; /* wakes datagram senders waiting for transmit room */
     sb_log_netif_attach();
     sb_config_load(&ctx->root->netCfg);
     /* seed the resolver search domain from prefs via the LVO that owns the

@@ -34,22 +34,40 @@ keep their fixed moderation. Nothing to configure.
   soon as a full batch arrives instead of later than the sender expects, and a
   lone acknowledgement no longer waits long enough for the peer to resend and
   slow itself down. Measured against Samba; `smb2fs` users should notice.
-- **Faster SANA-II copies.** The per-frame copy callbacks use a `movem.l`
-  `memcpy`, and received frames are padded so the IP header is
-  longword-aligned. With genet.device 3.16, which aligns its outgoing frames
-  the same way, a full-size TX copy drops from 3.9 µs to 0.9 µs.
-- **Accepting on a released listener no longer crashes.** A connection that
-  arrived while a listening socket was between `ReleaseSocket()` and
-  `ObtainSocket()` dereferenced a NULL owner. It is now refused with a reset,
-  as a full accept queue already was; the peer can retry once the listener
-  has been obtained.
+- **Faster SANA-II transfers.** The per-frame copies are quicker, and received
+  frames are laid out so the stack can read them without shuffling. With
+  genet.device 3.16, which arranges its outgoing frames the same way, a
+  full-size send copy drops from 3.9 µs to 0.9 µs.
+- **Large UDP datagrams are no longer sent incomplete.** A datagram too big for
+  one frame travels as several, and any the driver could not take were dropped
+  while the program was told the send had succeeded — so the datagram arrived
+  broken or not at all, and benchmarks reported more than the wire can carry.
+  One is now sent only when the interface can take all of it; a program with
+  more to send waits its turn instead. With genet.device 3.16, which now queues
+  sends rather than failing them when busy, 64 KB datagrams go out at wire
+  speed over SANA-II; netdev drivers need no update.
+- **Accepting a connection on a handed-over listening socket no longer
+  crashes.** A connection arriving while the socket was being passed between
+  programs is refused with a reset, as a full accept queue already was; the
+  peer can retry once the new owner has it.
 
 ---
 
 ## For developers
 
+- UDP and raw send now applies backpressure instead of losing fragments: a
+  blocking `send()` waits for room on the interface (`SO_SNDTIMEO` applies), a
+  nonblocking one gets `EWOULDBLOCK`, and `WaitSelect()` reports the socket
+  writable only once a maximum-size datagram would fit — the Linux behaviour.
+- `send()`/`sendto()` with no destination on an unconnected UDP socket returns
+  `EDESTADDRREQ`, as `sendmsg()` already did and as BSD specifies; it used to
+  surface lwIP's error as `EINVAL`.
 - **`sockbench rr` / `rrsel`** measure request/response latency (exchanges per
   second and latency spread). `rrsel` replays libsmb2's call sequence.
+- **`sockbench udprx`** now paces the peer: it takes a rate (default
+  100 Mb/s, `0` for the old unpaced flood) and reports what arrived against
+  it. The unpaced number measured behaviour under a flood, which no real
+  sender produces. Update `scripts/tcp-bench-peer.py` on the PC to match.
 - **`test/ackagg`**: host-side regression test for the acknowledgement policy.
 - `netdev` ABI: new `NETDEV_CMD_SET_RX_PROFILE` command and `NDCF_RX_PROFILE`
   capability bit. `NETDEV_ABI_VERSION` stays 1; the command is only sent to

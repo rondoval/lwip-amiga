@@ -13,7 +13,13 @@
  *     netif and must not care which backend built it),
  *   - the refcounted joined-multicast MAC set maintained by the lwIP
  *     igmp_mac_filter hook; how the set reaches the driver is per-backend
- *     (netdev: declarative RX-filter command; SANA-II: add/del deltas).
+ *     (netdev: declarative RX-filter command; SANA-II: add/del deltas),
+ *   - the transmit capacity the socket layer admits whole datagrams against,
+ *     which every backend reports the same way however it counts it.
+ *
+ * Sections below: backend kinds and limits, the struct, lifecycle, transmit
+ * capacity, multicast. The VLAN hooks named above are lwIP hook functions and
+ * are declared with the rest of them, in netstack_lwiphooks.h.
  */
 
 #ifndef LWIPAMIGA_NETIF_BASE_H
@@ -25,7 +31,9 @@
 
 #include <netstack_ctl.h> /* NETCTL_* identity field sizes */
 
-/* nib_Kind */
+/* --- backend kinds and limits -------------------------------------------- */
+
+/* nib_Kind: which backend owns the struct this base is embedded in */
 #define NIF_KIND_NETDEV 0
 #define NIF_KIND_SANA2  1
 
@@ -35,6 +43,8 @@
  * SANA-II driver manages its own table and has no such command). Generous
  * vs real group counts. */
 #define NIB_MCAST_MAX 32u
+
+/* --- the shared base ------------------------------------------------------ */
 
 struct NetCtlIfConfig;
 
@@ -79,11 +89,24 @@ struct NetIfBase
     UWORD nib_McastCount;                  /* distinct MACs in the list */
     UWORD nib_McastOverflow;               /* joins that didn't fit */
     BOOL nib_RxFilterDirty;                /* set changed; stack task must push */
+
+    /* Transmit capacity, for whole-datagram admission (netifbase_tx_admit):
+     * lwIP sends a datagram's fragments in one lock hold and ignores one the
+     * interface drops, so the socket layer admits a datagram only when the
+     * backend can take all of its frames. The backend keeps nib_TxFree - the
+     * frames it can take right now without dropping one (SANA-II: free write
+     * requests; netdev: free pending-queue slots) - through
+     * netifbase_tx_taken/freed; one that does not stays ungated (~0). */
+    ULONG nib_TxFree;
+    ULONG nib_TxMaxFrames; /* frames of a maximum-size datagram at the MTU: what
+                              select's "writable" promises */
 };
 
+/* --- lifecycle, in call order -------------------------------------------- */
+
 /* Reset the base for a (re)create: kind stamped, multicast set empty, VLAN
- * untagged, identity cleared. The ifquery scalars stay 0 until the backend
- * fills them from its negotiated capabilities. */
+ * untagged, identity cleared, transmit ungated. The ifquery scalars stay 0
+ * until the backend fills them from its negotiated capabilities. */
 void netifbase_init(struct NetIfBase *nib, UWORD kind);
 
 /* Stamp the interface identity from the control-port config; @hostFallback
@@ -91,6 +114,54 @@ void netifbase_init(struct NetIfBase *nib, UWORD kind);
  * the stack task between the backend's create() and netif_set_up. */
 void netifbase_stamp(struct NetIfBase *nib, const struct NetCtlIfConfig *nif,
                      const char *hostFallback);
+
+/* --- transmit capacity: whole-datagram admission -------------------------- */
+/* Why this exists: lwIP sends a datagram's fragments in one lock hold and
+ * ignores one the interface drops, so a datagram admitted with too little room
+ * goes out short while send() reports success. The socket layer therefore asks
+ * first, via the active interface's nib_TxFree (see the struct above).
+ *
+ * The two sides never meet: a BACKEND reports events on its own interface
+ * (setup/taken/freed), the SOCKET layer asks questions of whichever interface
+ * is active (admit/writable/want_space) and is told when one disappears
+ * (detached). Both sides run under the core lock. */
+
+/* Largest IPv4 payload past the IP header: a maximum UDP datagram + its header. */
+#define NIB_MAX_L3 65515u
+
+/* Frames one IPv4 datagram of @l3len bytes past the IP header takes at @mtu:
+ * ip4_frag's arithmetic, every fragment but the last a multiple of 8. */
+static inline ULONG netifbase_tx_frames(ULONG l3len, ULONG mtu)
+{
+    if (l3len + 20 <= mtu)
+        return 1;
+    ULONG per = ((mtu - 20) / 8) * 8;
+    return (l3len + per - 1) / per;
+}
+
+/* Backend side. setup: @capacity frames free on an interface of @mtu, from the
+ * backend's create. taken/freed: frames handed to / returned by the driver;
+ * freed fires the space wake once a maximum datagram fits again. A backend that
+ * calls none of these stays ungated, exactly as before it was instrumented. */
+void netifbase_tx_setup(struct NetIfBase *nib, ULONG capacity, ULONG mtu);
+static inline void netifbase_tx_taken(struct NetIfBase *nib, ULONG n)
+{
+    nib->nib_TxFree -= n;
+}
+void netifbase_tx_freed(struct NetIfBase *nib, ULONG n);
+
+/* Socket side, all on the active interface. admit: a datagram of @l3len bytes
+ * past the IP header, to @dst, fits now — always TRUE without an interface, and
+ * for destinations that never reach one (loopback, our own address). writable:
+ * a maximum-size datagram fits, which is what select() promises. want_space:
+ * fire netstack.ns_TxSpaceCb once one does again. detached: an interface went
+ * away, so wake the waiters to re-check (they then find none). */
+BOOL netifbase_tx_admit(const ip4_addr_t *dst, ULONG l3len);
+BOOL netifbase_tx_writable(void);
+void netifbase_tx_want_space(void);
+void netifbase_tx_detached(void);
+
+/* --- multicast RX filter -------------------------------------------------- */
 
 /* The lwIP igmp_mac_filter hook every backend registers in its netif init. */
 err_t netifbase_igmp_mac_filter(struct netif *nif, const ip4_addr_t *group,

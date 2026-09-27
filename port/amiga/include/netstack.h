@@ -75,6 +75,11 @@ struct NetStack
      * reports and rezeroes it every ~2 s via lock_prof_report(). */
     struct lock_prof ns_LockProf;
     ULONG ns_LockProfTicks;
+
+    /* Datagram senders blocked on transmit room (netif_base.h): the socket
+     * layer registers the wake once, whichever backend is active. */
+    BOOL ns_TxWantSpace;
+    void (*ns_TxSpaceCb)(void);
 };
 
 /* The singleton (defined in netstack.c). */
