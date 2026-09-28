@@ -21,10 +21,9 @@
 #include "netstack.h"
 #include <memory.h> /* memcpy (emu68-common: no Exec call) */
 
-LONG __attribute__((used, no_reorder)) doNotExecute(void);
-LONG __attribute__((used, no_reorder)) doNotExecute(void)
+LONG __attribute__((used, section(".text.entry"))) doNotExecute(void);
+LONG __attribute__((used, section(".text.entry"))) doNotExecute(void)
 {
-    Kprintf("[bsdsocket] %s: entry stub executed\n", __func__);
     return -1;
 }
 
@@ -33,7 +32,7 @@ static const char libraryName[] = LIBRARY_NAME;
 static const char libraryIdString[] = LIBRARY_IDSTRING;
 static const APTR initTable[4];
 
-const struct Resident bsdsocketResident __attribute__((used)) = {
+const struct Resident bsdsocketResident __attribute__((used, section(".text.modhdr"))) = {
     RTC_MATCHWORD,
     (struct Resident *)&bsdsocketResident,
     (APTR)&endOfCode,

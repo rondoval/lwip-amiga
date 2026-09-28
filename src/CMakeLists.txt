@@ -86,8 +86,6 @@ target_link_libraries(netstack
 )
 
 # --- bsdsocket.library ------------------------------------------------------
-# Source order matters: main.c first (doNotExecute entry), end.c last
-# (endOfCode marker bounds the resident structure).
 add_executable(bsdsocket_library
     bsdsocket/main.c
     bsdsocket/vectors.c
@@ -116,7 +114,6 @@ add_executable(bsdsocket_library
     bsdsocket/sb_netstat.c
     bsdsocket/sb_arp.c
     bsdsocket/sb_route.c
-    bsdsocket/end.c
 )
 
 target_compile_definitions(bsdsocket_library
@@ -137,25 +134,28 @@ target_compile_options(bsdsocket_library
         -Wstrict-prototypes
 )
 
-# libnix supplies the libc bits (ctype, string, atoi) — but no startup code:
-# a library binary must not carry crt0, so the entry stays doNotExecute and
-# nothing may depend on constructor-initialized libc state (the lwIP heap is
-# routed to netstack_malloc, never to libc malloc).
 target_link_options(bsdsocket_library
     PRIVATE
+        -nostdlib
         -nostartfiles
         -s
-        -Wl,-e,_doNotExecute
-        -Wl,-Map=bsdsocket.library.map
 )
 
 target_link_libraries(bsdsocket_library
     PRIVATE
         netstack
         Emu68Common::common
+        -lgcc
 )
 
-emu68_debug_backend_finalize(bsdsocket_library)
+emu68_enable_lto(netstack)
+emu68_enable_lto(bsdsocket_library)
+# Layout contract (entry at offset 0, RT_ENDSKIP, no writable sections) belongs to the
+# linker, not to source order -- see Emu68CommonModuleLayout.cmake.
+# WRITABLE: bsdsocket.library is LoadSeg'd and never placed in ROM, and lwIP's pools
+# and pcb tables are genuine writable state -- unlike every .device/.library above it,
+# which keeps all of its state in its allocated base.
+emu68_module_layout(bsdsocket_library WRITABLE)
 
 set_target_properties(bsdsocket_library PROPERTIES
     OUTPUT_NAME bsdsocket

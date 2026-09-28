@@ -14,4 +14,11 @@
 #define BYTE_ORDER BIG_ENDIAN
 #endif
 
+/* Use lwIP's own ASCII character tests rather than <ctype.h>.  Mapping them to
+ * ctype.h would make dns.c reference libnix's 268-byte _ctype_ table, and
+ * bsdsocket.library links no other part of libnix.  The private versions are
+ * also the more correct ones here: the only user is DNS label comparison, and
+ * RFC 4343 case-insensitivity is defined on ASCII alone, not on a locale. */
+#define LWIP_NO_CTYPE_H 1
+
 #endif /* LWIPAMIGA_ARCH_CC_H */
