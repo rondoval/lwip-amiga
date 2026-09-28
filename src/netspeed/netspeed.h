@@ -75,10 +75,6 @@ struct NspSettings
 
 extern BOOL nspFromWb;
 
-/* libnix.a has strlcpy, but under -mcrt=nix20 its <string.h> only declares it
- * when __NO_INLINE__ is set. */
-__stdargs size_t strlcpy(char *dst, const char *src, size_t size);
-
 /* Requester when started from Workbench, stderr line from the Shell. */
 void nsp_report(const char *fmt, ...);
 /* EasyRequest with the given "A|B|C" gadgets; returns the button number. */

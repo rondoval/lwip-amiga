@@ -45,11 +45,6 @@
  * ReAction layout and the ASL requester need more than a 4 KB Shell stack */
 unsigned long __stack = 16384;
 
-/* libnix.a has strlcpy, but under -mcrt=nix20 its <string.h> only declares it
- * when __NO_INLINE__ is set. Declare it (same signature) rather than grow yet
- * another bounded-copy helper. */
-__stdargs size_t strlcpy(char *dst, const char *src, size_t size);
-
 struct IntuitionBase *IntuitionBase;
 struct Library *IconBase;
 struct Library *CxBase;
