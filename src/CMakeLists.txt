@@ -17,6 +17,9 @@ math(EXPR BSDSOCKET_REVISION "${lwip-amiga_VERSION_MAJOR} * 100 + ${lwip-amiga_V
 
 # Version string (fleet convention)
 string(TIMESTAMP CURRENT_DATE "(%d.%m.%Y)")
+if(EMU68_BUILD_STAMP)   # local-build marker from the stack's build.sh; empty in releases
+    string(APPEND CURRENT_DATE " ${EMU68_BUILD_STAMP}")
+endif()
 set(VERSTRING "$VER: ${PROJECT_NAME} ${BSDSOCKET_ABI_MAJOR}.${BSDSOCKET_REVISION} ${CURRENT_DATE}")
 
 # SBTC_RELEASESTRPTR: identifies the STACK (component release), not the library
