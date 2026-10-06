@@ -14,7 +14,9 @@
  *   > netdev-stats RXUSECS 500 RXFRAMES 64 TXFRAMES 32   set interrupt coalescing
  *
  * ReadArgs CLI (`netdev-stats ?` prints the template): DEVICE/UNIT select the
- * driver (default genet.device unit 0); the three coalesce keywords go together.
+ * driver (default genet.device unit 0); the three coalesce keywords go
+ * together, and pin the driver to those numbers until an all-default setting
+ * releases it.
  *
  * TWO VIEWS, and they are alternatives rather than layers, because the two
  * netdev commands behind them each answer their question in full:

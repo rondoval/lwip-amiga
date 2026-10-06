@@ -79,6 +79,7 @@ struct Sana2If
     ULONG s2i_TxInFlight;
     APTR s2i_TxStorage;
     ULONG s2i_TxStorageSize;
+    ULONG s2i_TxReqs;      /* pool size (sana2if_create) */
 
     /* RX pump (sana2_pump.c) */
     struct Process *s2i_Pump;
@@ -127,6 +128,11 @@ void sana2if_destroy(struct Sana2If *s2i);
  * pointer of ours. */
 LONG sana2if_pump_start(struct Sana2If *s2i);
 void sana2if_pump_stop(struct Sana2If *s2i);
+
+#ifdef PROFILE
+/* The pump's reads-per-wake histogram, printed beside the nsprof slots. */
+void sana2if_pump_perf_report(void);
+#endif
 
 /* SendIO the staged TX batch. Called at every outermost netstack_unlock
  * (still under the lock); NULL-tolerant no-op when idle. */

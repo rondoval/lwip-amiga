@@ -19,6 +19,7 @@
 #include <debug.h>
 
 #include "netstack.h"
+#include <memory.h> /* memcpy (emu68-common: no Exec call) */
 
 /* SBTC_RELEASESTRPTR (RELEASE_STRING from the build): "lwip-amiga x.y" */
 static const char releaseString[] = RELEASE_STRING;
@@ -183,7 +184,7 @@ LONG bsd_SocketBaseTagList(struct TagItem *tags asm("a0"),
                     if (nfd == NULL)
                         return index;
                     netstack_lock();
-                    CopyMem(base->fd, nfd, base->fdCount * sizeof(struct SbSocket *));
+                    memcpy(nfd, base->fd, base->fdCount * sizeof(struct SbSocket *));
                     struct SbSocket **ofd = base->fd;
                     ULONG ocount = base->fdCount;
                     base->fd = nfd;

@@ -11,3 +11,5 @@ docs/TODO.md
 test/fuzz/fuzz_oversize
 test/fuzz/fuzz_oversize_rel
 test/urg/urg_test
+test/ackagg/ackagg_test
+test/ackagg/ackagg_test_off

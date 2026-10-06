@@ -69,6 +69,11 @@ struct NdHhEntry
  * the fallback when the driver advertises 0 (pre-field). */
 #define NDIF_TX_FREE_MIN 256u
 
+/* Pending TX queue floor (frames). Sized at create to hold a maximum-size
+ * datagram's fragments and then some, so the socket layer's whole-datagram
+ * admission (netifbase_tx_admit) always has room to fit one. */
+#define NDIF_TX_PEND_MIN 128u
+
 struct NetdevIf
 {
     struct NetIfBase ndi_Base;          /* must stay first: netif->state points
@@ -87,9 +92,9 @@ struct NetdevIf
     APTR ndi_WrapStorage;
     ULONG ndi_WrapStorageSize;
     BOOL ndi_RxOffload;                 /* lwIP TCP/UDP checking disabled */
-    ULONG ndi_RxNoWrap;                 /* backpressure: wrap pool empty */
-    ULONG ndi_TxOversize;               /* dropped: segs > caps even coalesced */
-    ULONG ndi_RxCsumBad;                /* RAW-fold verification failures */
+    volatile ULONG ndi_RxFrames;        /* frames handed up, ever: written by the unit task
+                                           per batch, read unlocked by the stack task to
+                                           tell a busy receive side from an idle one */
     BOOL ndi_TxKickPending;             /* a TX batch is staged awaiting ndo_TxKick;
                                            set on submit, flushed at outermost unlock */
 
@@ -98,8 +103,16 @@ struct NetdevIf
     ULONG ndi_TxFreeMask;               /* NDIF_TX_FREE_RING_N - 1 */
     volatile ULONG ndi_TxFreeProd;      /* unit task (producer) */
     volatile ULONG ndi_TxFreeCons;      /* core-lock holder (consumer) */
-    ULONG ndi_TxFreeOverflow;           /* backstop: inline frees on a full ring
-                                           (unreachable at correct sizing) */
+
+    /* Pending TX queue (netdev_tx.c): frames the ring refused, kept in order
+     * and resubmitted from netdevif_tx_reclaim as the ring drains, so a
+     * refusal never loses a frame - lwIP's ip4_frag would not notice, and a
+     * datagram would go out short. Its free slots are the interface's
+     * nib_TxFree (netif_base.h). Under the core lock. */
+    APTR *ndi_TxPend;
+    ULONG ndi_TxPendMask;
+    ULONG ndi_TxPendHead;               /* next to resubmit */
+    ULONG ndi_TxPendTail;               /* next free slot */
 
     struct NdHhEntry ndi_Hh[NDIF_HH_ENTRIES];
     ULONG ndi_HhPrimeDst;               /* dst IP whose header linkoutput should
@@ -149,6 +162,8 @@ void netdevif_tx_kick(struct NetdevIf *ndi);
  * lock at every outermost netstack_lock entry (and once from netdevif_destroy).
  * Cheap no-op when the ring is empty. */
 void netdevif_tx_reclaim(struct NetdevIf *ndi);
+/* Free every frame still in the pending TX queue (destroy). Core lock held. */
+void netdevif_tx_pend_free(struct NetdevIf *ndi);
 
 /* TX-pool memory for the netstack heap (routes to ndo_DmaAlloc/Free).
  * @align: 1:1 with the ABI's ndo_DmaAlloc alignment (the heap passes

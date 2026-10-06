@@ -17,6 +17,9 @@ math(EXPR BSDSOCKET_REVISION "${lwip-amiga_VERSION_MAJOR} * 100 + ${lwip-amiga_V
 
 # Version string (fleet convention)
 string(TIMESTAMP CURRENT_DATE "(%d.%m.%Y)")
+if(EMU68_BUILD_STAMP)   # local-build marker from the stack's build.sh; empty in releases
+    string(APPEND CURRENT_DATE " ${EMU68_BUILD_STAMP}")
+endif()
 set(VERSTRING "$VER: ${PROJECT_NAME} ${BSDSOCKET_ABI_MAJOR}.${BSDSOCKET_REVISION} ${CURRENT_DATE}")
 
 # SBTC_RELEASESTRPTR: identifies the STACK (component release), not the library
@@ -86,8 +89,6 @@ target_link_libraries(netstack
 )
 
 # --- bsdsocket.library ------------------------------------------------------
-# Source order matters: main.c first (doNotExecute entry), end.c last
-# (endOfCode marker bounds the resident structure).
 add_executable(bsdsocket_library
     bsdsocket/main.c
     bsdsocket/vectors.c
@@ -116,7 +117,6 @@ add_executable(bsdsocket_library
     bsdsocket/sb_netstat.c
     bsdsocket/sb_arp.c
     bsdsocket/sb_route.c
-    bsdsocket/end.c
 )
 
 target_compile_definitions(bsdsocket_library
@@ -137,25 +137,28 @@ target_compile_options(bsdsocket_library
         -Wstrict-prototypes
 )
 
-# libnix supplies the libc bits (ctype, string, atoi) — but no startup code:
-# a library binary must not carry crt0, so the entry stays doNotExecute and
-# nothing may depend on constructor-initialized libc state (the lwIP heap is
-# routed to netstack_malloc, never to libc malloc).
 target_link_options(bsdsocket_library
     PRIVATE
+        -nostdlib
         -nostartfiles
         -s
-        -Wl,-e,_doNotExecute
-        -Wl,-Map=bsdsocket.library.map
 )
 
 target_link_libraries(bsdsocket_library
     PRIVATE
         netstack
         Emu68Common::common
+        -lgcc
 )
 
-emu68_debug_backend_finalize(bsdsocket_library)
+emu68_enable_lto(netstack)
+emu68_enable_lto(bsdsocket_library)
+# Layout contract (entry at offset 0, RT_ENDSKIP, no writable sections) belongs to the
+# linker, not to source order -- see Emu68CommonModuleLayout.cmake.
+# WRITABLE: bsdsocket.library is LoadSeg'd and never placed in ROM, and lwIP's pools
+# and pcb tables are genuine writable state -- unlike every .device/.library above it,
+# which keeps all of its state in its allocated base.
+emu68_module_layout(bsdsocket_library WRITABLE)
 
 set_target_properties(bsdsocket_library PROPERTIES
     OUTPUT_NAME bsdsocket
@@ -425,6 +428,39 @@ install(
 # the CX_POPKEY/CX_PRIORITY/CX_POPUP tooltypes and DONOTWAIT.
 install(
     FILES ${CMAKE_SOURCE_DIR}/dist/NetLogViewer.info
+    DESTINATION C
+)
+
+# --- NetSpeed: throughput monitor window ---------------------------------------
+add_executable(netspeed
+    netspeed/netspeed.c
+    netspeed/nsp_graph.c
+    netspeed/nsp_menu.c
+    netspeed/nsp_prefs.c
+    netspeed/nsp_sample.c
+    netspeed/nsp_window.c
+)
+target_compile_options(netspeed PRIVATE -Os ${LWIP_WARN})
+target_compile_definitions(netspeed PRIVATE
+    TOOL_VERSION="${TOOL_VERSION}"
+    TOOL_DATE="${CURRENT_DATE}"
+)
+# Emu68Common::common for prefs_split() (the ENV: file reader), as emu68check
+# does for a hosted tool. It is linked before libnix and NetSpeed calls memcpy
+# itself, so the tool's (and libnix's) memcpy is emu68-common's movem asm
+# (68020+, any alignment, no Exec call). The toolchain links with
+# --allow-multiple-definition, so should libnix's copy ever be pulled in too,
+# the first — this one — silently wins.
+target_link_libraries(netspeed PRIVATE amiga Emu68Common::common)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/netspeed
+    DESTINATION C
+    RENAME NetSpeed
+)
+# Workbench icon (committed static asset; see dist/icons/README.md), also the
+# window's AppIcon while iconified. No tooltypes: NetSpeed takes no arguments.
+install(
+    FILES ${CMAKE_SOURCE_DIR}/dist/NetSpeed.info
     DESTINATION C
 )
 

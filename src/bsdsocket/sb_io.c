@@ -20,6 +20,7 @@
 #include <debug.h>
 
 #include "netstack.h"
+#include "netif_base.h"
 #include "nsprof.h"
 
 /* ----------------------------------------------------------------- send --- */
@@ -73,6 +74,7 @@ static LONG sb_tcp_send(struct SocketBase *base, struct SbSocket *s,
     PERF_T0(t_lock);
     netstack_lock();
     PERF_ADD(&ns_perf, NSP_SEND_LOCKWAIT, t_lock);
+    base->txSinceBlock = TRUE; /* see sb_rx_awaiting() */
     while (sent < len)
     {
         if (s->pcb.tcp == NULL || s->err != 0)
@@ -229,53 +231,126 @@ static LONG sb_hdrincl_complete(struct SbSocket *s, struct pbuf *p,
     return 0;
 }
 
-static LONG sb_dgram_send(struct SocketBase *base, struct SbSocket *s,
-                          const UBYTE *buf, LONG len,
-                          BOOL have_dst, ip_addr_t *dst, u16_t port)
+/* Room for the whole datagram: lwIP sends a datagram's fragments in one go
+ * and ignores one the interface drops, so a datagram waits until the
+ * interface can take all of it - blocking like Linux's UDP send buffer,
+ * EWOULDBLOCK when nonblocking. @dst NULL means the connected peer; @len is
+ * the payload. Core lock held; returns 0 with it held and *to resolved,
+ * else an errno with it released. */
+static LONG sb_dgram_room(struct SocketBase *base, struct SbSocket *s,
+                          const ip_addr_t *dst, ULONG len, LONG flags,
+                          const ip_addr_t **to)
 {
-    KprintfT("[bsdsocket] %s: len %ld have_dst %ld port %lu\n", __func__, len, (LONG)have_dst, (ULONG)port);
-    if (len < 0 || len > 0xFFFF)
+    BOOL dontwait = s->nonblock || (flags & SB_MSG_DONTWAIT);
+    struct SbTimedWait tw = { 0, FALSE };
+    for (;;)
+    {
+        /* re-resolved per pass: the pcb may change while we sleep */
+        *to = dst;
+        ULONG l3len = len;
+        if (s->type == SBT_UDP && s->pcb.udp != NULL)
+        {
+            if (*to == NULL)
+                *to = &s->pcb.udp->remote_ip;
+            l3len += UDP_HLEN;
+        }
+        else if (s->type == SBT_RAW && s->pcb.raw != NULL)
+        {
+            if (*to == NULL)
+                *to = &s->pcb.raw->remote_ip;
+            if ((raw_flags(s->pcb.raw) & RAW_FLAGS_HDRINCL) && l3len >= IP_HLEN)
+                l3len -= IP_HLEN;
+        }
+        else
+            return 0; /* no pcb: the send itself reports it */
+
+        if (netifbase_tx_admit(ip_2_ip4(*to), l3len))
+            return 0;
+        if (dontwait)
+        {
+            netstack_unlock();
+            return SB_EWOULDBLOCK;
+        }
+        sb_tx_want_space(s); /* enrol for the wake, then do the sleeping here */
+        LONG we = sb_wait_to(base, s->sndTimeoMs, &tw);
+        if (we != 0)
+        {
+            netstack_unlock();
+            return we;
+        }
+    }
+}
+
+/* One datagram, gathered from @iov (@iovcnt pieces), to @dst/@port or to the
+ * connected peer when @dst is NULL: everything send/sendto/sendmsg share past
+ * argument parsing, for UDP and raw sockets alike. */
+static LONG sb_dgram_send(struct SocketBase *base, struct SbSocket *s,
+                          const struct sb_iovec *iov, ULONG iovcnt, LONG flags,
+                          const ip_addr_t *dst, u16_t port)
+{
+    ULONG total = 0;
+    for (ULONG i = 0; i < iovcnt; i++)
+        total += iov[i].iov_len;
+    KprintfT("[bsdsocket] %s: len %lu have_dst %ld port %lu\n", __func__, total, (LONG)(dst != NULL), (ULONG)port);
+    if (total > 0xFFFF)
         return sb_fail(base, SB_EMSGSIZE);
 
     PERF_T0(t_lock);
     netstack_lock();
     PERF_ADD(&ns_perf, NSP_SEND_LOCKWAIT, t_lock);
+    /* no destination: valid only on a connected datagram socket - settled
+     * before any wait for room */
+    if (s->type == SBT_UDP && s->pcb.udp != NULL && dst == NULL &&
+        !(s->pcb.udp->flags & UDP_FLAGS_CONNECTED))
+    {
+        netstack_unlock();
+        return sb_fail(base, SB_EDESTADDRREQ);
+    }
+    const ip_addr_t *to;
+    LONG room = sb_dgram_room(base, s, dst, total, flags, &to);
+    if (room != 0)
+        return sb_fail(base, room); /* lock already released */
+    base->txSinceBlock = TRUE; /* see sb_rx_awaiting() */
     PERF_T0(t_send);
-    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)total, PBUF_RAM);
     if (p == NULL)
     {
         netstack_unlock();
         return sb_fail(base, SB_ENOBUFS);
     }
-    pbuf_take(p, buf, (u16_t)len);
+    ULONG off = 0;
+    for (ULONG i = 0; i < iovcnt; i++)
+    {
+        if (iov[i].iov_len != 0)
+        {
+            pbuf_take_at(p, iov[i].iov_base, (u16_t)iov[i].iov_len, (u16_t)off);
+            off += iov[i].iov_len;
+        }
+    }
 
+    LONG e = 0;
     err_t r = ERR_VAL;
     if (s->type == SBT_UDP && s->pcb.udp != NULL)
-        r = have_dst ? udp_sendto(s->pcb.udp, p, dst, port)
-                     : udp_send(s->pcb.udp, p);
+        r = dst != NULL ? udp_sendto(s->pcb.udp, p, dst, port)
+                        : udp_send(s->pcb.udp, p);
     else if (s->type == SBT_RAW && s->pcb.raw != NULL)
     {
         if (raw_flags(s->pcb.raw) & RAW_FLAGS_HDRINCL)
-        {
-            LONG e = sb_hdrincl_complete(s, p, have_dst ? dst : &s->pcb.raw->remote_ip);
-            if (e != 0)
-            {
-                pbuf_free(p);
-                netstack_unlock();
-                return sb_fail(base, e);
-            }
-        }
-        r = have_dst ? raw_sendto(s->pcb.raw, p, dst)
-                     : raw_send(s->pcb.raw, p);
+            e = sb_hdrincl_complete(s, p, to);
+        if (e == 0)
+            r = dst != NULL ? raw_sendto(s->pcb.raw, p, dst)
+                            : raw_send(s->pcb.raw, p);
     }
 
     pbuf_free(p);
     PERF_ADD(&ns_perf, NSP_UDP_SEND, t_send);
     netstack_unlock();
 
+    if (e != 0)
+        return sb_fail(base, e);
     if (r != ERR_OK)
         return sb_fail(base, sb_map_err(r));
-    return len;
+    return (LONG)total;
 }
 
 LONG bsd_sendto(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
@@ -296,16 +371,15 @@ LONG bsd_sendto(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
     if (flags & SB_MSG_OOB)
         return sb_fail(base, SB_EOPNOTSUPP);
 
-    if (to != NULL)
-    {
-        ip_addr_t ip;
-        u16_t port;
-        LONG e = sb_addr_in(to, tolen, &ip, &port);
-        if (e != 0)
-            return sb_fail(base, e);
-        return sb_dgram_send(base, s, buf, len, TRUE, &ip, port);
-    }
-    return sb_dgram_send(base, s, buf, len, FALSE, NULL, 0);
+    struct sb_iovec iov = { buf, (ULONG)len };
+    if (to == NULL)
+        return sb_dgram_send(base, s, &iov, 1, flags, NULL, 0);
+    ip_addr_t ip;
+    u16_t port;
+    LONG e = sb_addr_in(to, tolen, &ip, &port);
+    if (e != 0)
+        return sb_fail(base, e);
+    return sb_dgram_send(base, s, &iov, 1, flags, &ip, port);
 }
 
 LONG bsd_send(LONG sock asm("d0"), APTR buf asm("a0"), LONG len asm("d1"),
@@ -323,15 +397,9 @@ LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
     struct SbSocket *s = sb_fd_get(base, sock);
 
     if (s == NULL)
-    {
-        sb_set_errno(base, SB_EBADF);
-        return -1;
-    }
+        return sb_fail(base, SB_EBADF);
     if (mh == NULL || (mh->msg_iovlen != 0 && mh->msg_iov == NULL))
-    {
-        sb_set_errno(base, SB_EINVAL);
-        return -1;
-    }
+        return sb_fail(base, SB_EINVAL);
     /* ancillary data (SCM_RIGHTS etc.) is not supported; like 4.4BSD's
      * datagram output paths we free/ignore it rather than fail the send */
     if (mh->msg_control != NULL && mh->msg_controllen != 0)
@@ -369,110 +437,17 @@ LONG bsd_sendmsg(LONG sock asm("d0"), APTR msg asm("a0"), LONG flags asm("d1"),
 
     /* urgent data is a TCP concept; BSD refuses it on datagram sockets */
     if (flags & SB_MSG_OOB)
-    {
-        sb_set_errno(base, SB_EOPNOTSUPP);
-        return -1;
-    }
+        return sb_fail(base, SB_EOPNOTSUPP);
 
     /* datagram: one message from all iovs */
-    ULONG total = 0;
-    for (ULONG i = 0; i < mh->msg_iovlen; i++)
-        total += mh->msg_iov[i].iov_len;
-    if (total > 0xFFFF)
-    {
-        sb_set_errno(base, SB_EMSGSIZE);
-        return -1;
-    }
-
-    netstack_lock();
-    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)total, PBUF_RAM);
-    if (p == NULL)
-    {
-        netstack_unlock();
-        sb_set_errno(base, SB_ENOBUFS);
-        return -1;
-    }
-    ULONG off = 0;
-    for (ULONG i = 0; i < mh->msg_iovlen; i++)
-    {
-        const struct sb_iovec *iv = &mh->msg_iov[i];
-        if (iv->iov_len != 0)
-        {
-            pbuf_take_at(p, iv->iov_base, (u16_t)iv->iov_len, (u16_t)off);
-            off += iv->iov_len;
-        }
-    }
-
-    err_t r = ERR_VAL;
-    if (mh->msg_name != NULL)
-    {
-        ip_addr_t ip;
-        u16_t port;
-        LONG e = sb_addr_in(mh->msg_name, (LONG)mh->msg_namelen, &ip, &port);
-        if (e != 0)
-        {
-            pbuf_free(p);
-            netstack_unlock();
-            sb_set_errno(base, e);
-            return -1;
-        }
-        if (s->type == SBT_UDP && s->pcb.udp != NULL)
-            r = udp_sendto(s->pcb.udp, p, &ip, port);
-        else if (s->type == SBT_RAW && s->pcb.raw != NULL)
-        {
-            if (raw_flags(s->pcb.raw) & RAW_FLAGS_HDRINCL)
-            {
-                e = sb_hdrincl_complete(s, p, &ip);
-                if (e != 0)
-                {
-                    pbuf_free(p);
-                    netstack_unlock();
-                    sb_set_errno(base, e);
-                    return -1;
-                }
-            }
-            r = raw_sendto(s->pcb.raw, p, &ip);
-        }
-    }
-    else
-    {
-        /* no destination: valid only on a connected datagram socket */
-        if (s->type == SBT_UDP && s->pcb.udp != NULL)
-        {
-            if (!(s->pcb.udp->flags & UDP_FLAGS_CONNECTED))
-            {
-                pbuf_free(p);
-                netstack_unlock();
-                sb_set_errno(base, SB_EDESTADDRREQ);
-                return -1;
-            }
-            r = udp_send(s->pcb.udp, p);
-        }
-        else if (s->type == SBT_RAW && s->pcb.raw != NULL)
-        {
-            if (raw_flags(s->pcb.raw) & RAW_FLAGS_HDRINCL)
-            {
-                LONG e = sb_hdrincl_complete(s, p, &s->pcb.raw->remote_ip);
-                if (e != 0)
-                {
-                    pbuf_free(p);
-                    netstack_unlock();
-                    sb_set_errno(base, e);
-                    return -1;
-                }
-            }
-            r = raw_send(s->pcb.raw, p);
-        }
-    }
-    pbuf_free(p);
-    netstack_unlock();
-
-    if (r != ERR_OK)
-    {
-        sb_set_errno(base, sb_map_err(r));
-        return -1;
-    }
-    return (LONG)total;
+    if (mh->msg_name == NULL)
+        return sb_dgram_send(base, s, mh->msg_iov, mh->msg_iovlen, flags, NULL, 0);
+    ip_addr_t ip;
+    u16_t port;
+    LONG e = sb_addr_in(mh->msg_name, (LONG)mh->msg_namelen, &ip, &port);
+    if (e != 0)
+        return sb_fail(base, e);
+    return sb_dgram_send(base, s, mh->msg_iov, mh->msg_iovlen, flags, &ip, port);
 }
 
 /* ----------------------------------------------------------------- recv --- */
@@ -531,6 +506,7 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
                 netstack_unlock();
                 return sb_fail(base, SB_EWOULDBLOCK);
             }
+            sb_rx_awaiting(base);
             LONG we = sb_wait_to(base, s->rcvTimeoMs, &tw);
             if (we != 0)
             {
@@ -593,6 +569,7 @@ static LONG sb_tcp_recv(struct SocketBase *base, struct SbSocket *s,
                     return copied;
                 return sb_fail(base, SB_EWOULDBLOCK);
             }
+            sb_rx_awaiting(base);
             PERF_T0(t_sleep);
             LONG we = sb_wait_to(base, s->rcvTimeoMs, &tw);
             PERF_ADD(&ns_perf, NSP_RECV_SLEEP, t_sleep);
@@ -762,6 +739,7 @@ static struct SbDgram *sb_dgram_wait(struct SocketBase *base, struct SbSocket *s
             *err = SB_EWOULDBLOCK;
             return NULL;
         }
+        sb_rx_awaiting(base);
         LONG we = sb_wait_to(base, s->rcvTimeoMs, &tw);
         if (we != 0)
         {

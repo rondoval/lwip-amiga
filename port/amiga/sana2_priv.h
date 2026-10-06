@@ -27,7 +27,11 @@
 #define S2IF_RX_READS_DATA       ((TCP_WND / TCP_MSS) + 64)
 #define S2IF_RX_READS_IP4_TAGGED 32 /* untagged stragglers on a VLAN iface */
 #define S2IF_RX_READS_ARP        8
-#define S2IF_TX_REQS             32
+/* Write pool: at least S2IF_TX_REQS_MIN, and always a whole maximum-size
+ * datagram's fragments plus slack (sana2if_create), so the pool can take any
+ * datagram the socket layer admits (netifbase_tx_admit) without a gap. */
+#define S2IF_TX_REQS_MIN         64
+#define S2IF_TX_REQS_SLACK       8
 
 /* Per-class read counts for an interface: the data depth goes to the class
  * that actually carries the TCP/UDP stream. Shared by sana2if_create

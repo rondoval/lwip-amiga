@@ -2,8 +2,7 @@
 /*
  * NetLogViewer argument parsing. Shell: ReadArgs with the documented
  * template (CX_POPKEY/K,CX_PRIORITY/K/N,CX_POPUP/K). Workbench: the same
- * keys as tooltypes of the program's icon. The $VER cookie rides on the
- * template string the way the other tools do it.
+ * keys as tooltypes of the program's icon.
  */
 
 #include "nlv_args.h"
@@ -19,8 +18,10 @@
 #include <proto/exec.h>
 #include <proto/icon.h>
 
-#define VERSTAG "\0$VER: " NLV_NAME " " TOOL_VERSION " " TOOL_DATE
-static const char argTemplate[] = "CX_POPKEY/K,CX_PRIORITY/K/N,CX_POPUP/K" VERSTAG;
+__attribute__((used)) static const char verstag[] =
+    "\0$VER: " NLV_NAME " " TOOL_VERSION " " TOOL_DATE;
+
+static const char argTemplate[] = "CX_POPKEY/K,CX_PRIORITY/K/N,CX_POPUP/K";
 
 enum
 {

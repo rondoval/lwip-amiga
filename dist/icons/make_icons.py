@@ -39,6 +39,7 @@ ICONTOOL = os.environ.get("ICONTOOL",
 # (source PNG, .info.src, output .info) — paths relative to the repo root
 ICONS = [
     ("dist/icons/NetLogViewer.png", "dist/icons/NetLogViewer.info.src", "dist/NetLogViewer.info"),
+    ("dist/icons/NetSpeed.png", "dist/icons/NetSpeed.info.src", "dist/NetSpeed.info"),
 ]
 
 

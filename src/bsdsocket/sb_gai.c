@@ -16,6 +16,7 @@
 #include <lwip/ip4_addr.h>
 
 #include <debug.h>
+#include <memory.h> /* memcpy (emu68-common: no Exec call) */
 
 /* hidden allocation header; 8 bytes keeps the addrinfos LONG-aligned */
 struct SbGaiBlock
@@ -269,7 +270,7 @@ LONG bsd_getnameinfo(APTR sa asm("a0"), ULONG salen asm("d0"),
         ULONG n = strlen(name);
         if (n + 1 > hostlen)
             return SB_EAI_MEMORY;
-        CopyMem((APTR)name, host, n + 1);
+        memcpy(host, name, n + 1);
     }
 
     if (wantServ)
@@ -299,7 +300,7 @@ LONG bsd_getnameinfo(APTR sa asm("a0"), ULONG salen asm("d0"),
         ULONG n = strlen(name);
         if (n + 1 > servlen)
             return SB_EAI_MEMORY;
-        CopyMem((APTR)name, serv, n + 1);
+        memcpy(serv, name, n + 1);
     }
 
     return 0;

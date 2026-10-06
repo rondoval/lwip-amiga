@@ -220,10 +220,18 @@ See [RELEASE-NOTES.md](RELEASE-NOTES.md) for more on what's behind these numbers
   the whole bring-up — the stack keeps the last 16 lines of its own boot and
   replays them to a viewer that starts late — for example from `S:Network-Startup`:
   `Run >NIL: C:NetLogViewer CX_POPUP NO`.
+- **`NetSpeed`** — a window showing one interface's (or the whole stack's) throughput
+  both ways — current, average and peak — with the link speed and a scrolling graph.
+  It samples the library's interface query once a second, so it works over any
+  interface, `netdev` or SANA-II. It takes no arguments: the interface, the time one
+  graph column covers, the averaging window, the units and the graph scale are on the
+  **Settings** menu, and **Settings » Save** keeps them in `ENV:NetSpeed.prefs`. The
+  window iconifies to an AppIcon; `NetShutdown` closes it with everything else. From
+  the Shell: `Run >NIL: C:NetSpeed`.
 
-`netinfo`, `netdev-stats` and `NetLogViewer` are read-only status tools; the stack is
-configured through the interface files and `netstack.prefs` above, plus the
-`AddNetInterface`/`RemoveNetInterface`/`NetShutdown`/`Arp` commands at runtime.
+`netinfo`, `netdev-stats`, `NetLogViewer` and `NetSpeed` are read-only status tools;
+the stack is configured through the interface files and `netstack.prefs` above, plus
+the `AddNetInterface`/`RemoveNetInterface`/`NetShutdown`/`Arp` commands at runtime.
 
 Scripts can test the outcome Roadshow-style: with `QUIET`, the commands demote every
 failure to exit code 5 (`IF WARN` in a script), and `AddNetInterface` returns 5 when
@@ -377,6 +385,18 @@ sockets from one `WaitSelect` loop against `scripts/tcp-bench-peer.py` and repor
 per-stream + aggregate Mb/s (`rx`/`tx` are TCP, `udprx`/`udptx` are UDP; `sizeKB` is the
 TCP buffer or the UDP datagram size). Exercises DHCP + DNS + TCP/UDP through the whole
 zero-copy `netdev` path with hardware checksums active.
+
+`sockbench rr|rrsel <host> [respBytes] [seconds] [reqBytes]` measures what the streaming
+modes cannot: request/response latency. One blocking `TCP_NODELAY` socket plays strict
+ping-pong with the peer's port 5003 (small request out, `respBytes` back, repeat) and
+reports exchanges/s, latency avg/min/p50/p90/p99/max in µs and the resulting MB/s —
+the figure that governs SMB2, NFS and every other one-request-at-a-time protocol, where
+a fixed per-exchange delay (interrupt coalescing, delayed ACKs, wakeup latency) that a
+saturated stream amortises to nothing becomes the whole result. `respBytes` takes a K/M
+suffix; 0 or omitted sweeps 1 byte to 1 MB on one connection. `rr` is the ideal client
+(one `send`, `recv` straight into the buffer); `rrsel` replays libsmb2's call sequence
+(`WaitSelect` + `send`, `WaitSelect`, then the reply as 4/64/16-byte `recv`s before the
+payload), so `rrsel` minus `rr` prices that pattern on this stack.
 
 ## License
 

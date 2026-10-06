@@ -49,6 +49,7 @@ void fz_free(void *p);
 #define TCP_SNDLOWAT                    (8 * TCP_MSS)
 #define MEMP_NUM_TCP_SEG                TCP_SND_QUEUELEN
 #define LWIP_TCP_SACK_OUT               1
+#define LWIP_TCP_ACK_AGGREGATES         1
 #define TCP_LISTEN_BACKLOG              1
 
 /* TCP_OVERSIZE defaults to TCP_MSS (as on the Amiga build; not overridden

@@ -23,6 +23,15 @@
  * locking of its own). Packet payloads never appear here — recv copies
  * out of driver-owned pbufs (the one copy), send copies into DMA-backed
  * PBUF_RAM via tcp_write/COPY.
+ *
+ * LAYOUT, in this order:
+ *   1. the application ABI — wire-format structures, then the constant
+ *      families an app sees (addresses, options, flags, events, ioctls,
+ *      errnos, tag lists). Fixed by the NDK headers; nothing here may
+ *      change value or size.
+ *   2. our own objects — sockets, then the library base.
+ *   3. internal prototypes, by concern.
+ *   4. the LVO surface, grouped by implementing file.
  */
 
 #ifndef SB_BASE_H
@@ -31,13 +40,15 @@
 #include <exec/libraries.h>
 
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* the library's global: see main.c */
 
 #ifdef __INTELLISENSE__
 #include <clib/exec_protos.h>
 #else
 #include <proto/exec.h>
 #endif
+
+extern struct ExecBase *SysBase;
 
 #include <exec/semaphores.h>
 #include <exec/types.h>
@@ -57,14 +68,11 @@ struct tcp_pcb;
 struct udp_pcb;
 struct raw_pcb;
 
-/* case-insensitive ASCII string equality — the one comparer for every
- * netdb/config table (protocols, services, networks) */
-static inline BOOL sb_strieq(const char *a, const char *b)
-{
-    return _Stricmp((CONST_STRPTR)a, (CONST_STRPTR)b) == 0;
-}
+/* ==========================================================================
+ * 1. THE APPLICATION ABI
+ * ========================================================================== */
 
-/* --- wire-format structures (the app ABI; 4.4BSD with length bytes) ------ */
+/* --- wire-format structures (4.4BSD, with the length bytes) -------------- */
 
 struct sb_sockaddr_in
 {
@@ -133,19 +141,13 @@ struct sb_DomainNameServerNode
     LONG dnsn_UseCount;
 };
 
-/* a socket parked by ReleaseSocket/ReleaseCopyOfSocket */
-struct SbReleased
-{
-    struct MinNode node;
-    LONG id;
-    struct SbSocket *s;
-};
-
 struct sb_timeval
 {
     ULONG tv_secs;
     ULONG tv_micro;
 };
+
+/* --- address families, socket types, protocols --------------------------- */
 
 #define SB_AF_UNSPEC 0
 #define SB_AF_INET 2
@@ -156,6 +158,8 @@ struct sb_timeval
 #define SB_IPPROTO_ICMP 1
 #define SB_IPPROTO_TCP 6
 #define SB_IPPROTO_UDP 17
+
+/* --- socket options (get/setsockopt), by level --------------------------- */
 
 /* IP-level socket options (level SB_IPPROTO_IP), BSD/AmiTCP numbering */
 #define SB_IP_HDRINCL 2
@@ -173,6 +177,7 @@ struct sb_ip_mreq
     ULONG imr_interface; /* local interface address, network order (0 = any) */
 };
 
+/* socket-level options (level SB_SOL_SOCKET) */
 #define SB_SOL_SOCKET 0xFFFF
 #define SB_SO_REUSEADDR 0x0004
 #define SB_SO_KEEPALIVE 0x0008
@@ -185,7 +190,18 @@ struct sb_ip_mreq
 #define SB_SO_ERROR 0x1007
 #define SB_SO_OOBINLINE 0x0100
 #define SB_SO_TYPE 0x1008
+
+/* SO_LINGER's optval */
+struct sb_linger
+{
+    LONG l_onoff;
+    LONG l_linger;
+};
+
+/* TCP-level options (level SB_IPPROTO_TCP) */
 #define SB_TCP_NODELAY 1
+
+/* --- send/recv flags ----------------------------------------------------- */
 
 #define SB_MSG_OOB 0x01
 #define SB_MSG_PEEK 0x02
@@ -194,7 +210,8 @@ struct sb_ip_mreq
 #define SB_MSG_WAITALL 0x40
 #define SB_MSG_DONTWAIT 0x80
 
-/* GetSocketEvents / SO_EVENTMASK (libraries/bsdsocket.h) */
+/* --- socket events: GetSocketEvents / SO_EVENTMASK (libraries/bsdsocket.h) */
+
 #define SB_SO_EVENTMASK 0x2001
 #define SB_FD_ACCEPT 0x01
 #define SB_FD_CONNECT 0x02
@@ -203,6 +220,8 @@ struct sb_ip_mreq
 #define SB_FD_WRITE 0x10
 #define SB_FD_ERROR 0x20
 #define SB_FD_CLOSE 0x40
+
+/* --- ioctls (IoctlSocket) ------------------------------------------------ */
 
 #define SB_FIOASYNC 0x8004667DUL
 #define SB_FIONBIO 0x8004667EUL
@@ -223,14 +242,8 @@ struct sb_ip_mreq
 #define SB_ATF_PUBL 0x08        /* publish entry -- never supported */
 #define SB_ATF_USETRAILERS 0x10 /* trailers -- never supported */
 
-/* TCP urgent-data (MSG_OOB) receive state, 4.4BSD semantics. Transitions in
- * sb_tcp_recv_cb (latch/excise) and sb_tcp_recv (consume/pass the mark). */
-#define SB_OOB_NONE 0   /* no mark; recv(MSG_OOB) = EINVAL */
-#define SB_OOB_MARKED 1 /* mark known, byte not yet delivered; recv(MSG_OOB) waits/EWOULDBLOCK */
-#define SB_OOB_HAVE 2   /* byte latched (excised) or, inline, in-stream at the mark */
-#define SB_OOB_READ 3   /* byte consumed via MSG_OOB; mark clamp active until passed */
+/* --- errno and h_errno values (netinclude/sys/errno.h, netdb.h) ---------- */
 
-/* BSD errno values (netinclude/sys/errno.h) */
 #define SB_EINTR 4
 #define SB_ENXIO 6
 #define SB_EBADF 9
@@ -264,12 +277,14 @@ struct sb_ip_mreq
 #define SB_ECONNREFUSED 61
 #define SB_EHOSTUNREACH 65
 
+/* h_errno: the resolver's own error cell (gethostby*) */
 #define SB_HOST_NOT_FOUND 1
 #define SB_TRY_AGAIN 2
 #define SB_NO_RECOVERY 3
 #define SB_NO_DATA 4
 
-/* getaddrinfo/getnameinfo (netinclude/netdb.h) */
+/* --- getaddrinfo / getnameinfo (netinclude/netdb.h) ---------------------- */
+
 #define SB_PF_UNSPEC 0
 
 #define SB_AI_PASSIVE 1
@@ -312,7 +327,9 @@ struct sb_addrinfo
     struct sb_addrinfo *ai_next;
 };
 
-/* SocketBaseTagList encoding (netinclude/libraries/bsdsocket.h) */
+/* --- SocketBaseTagList (netinclude/libraries/bsdsocket.h) ---------------- */
+
+/* tag encoding: a code, shifted, with the SET/REF bits alongside */
 #define SBTF_REF 0x8000UL
 #define SBTF_SET 1UL
 #define SBTM_CODE(td) (((td) >> 1) & 0x3FFF)
@@ -323,6 +340,15 @@ struct sb_addrinfo
 #define SBTC_ERRNO 6
 #define SBTC_HERRNO 7
 #define SBTC_DTABLESIZE 8
+/* errno/h_errno redirection: the opener points us at its own cell, of a
+ * width it chooses (SetErrnoPtr does the same for errno) */
+#define SBTC_ERRNOSTRPTR 14
+#define SBTC_HERRNOSTRPTR 15
+#define SBTC_ERRNOBYTEPTR 21
+#define SBTC_ERRNOWORDPTR 22
+#define SBTC_ERRNOLONGPTR 24
+#define SBTC_HERRNOLONGPTR 25
+#define SBTC_RELEASESTRPTR 29 /* GET-only: stack-identifying version string */
 /* syslog configuration (openlog/setlogmask). The C runtimes wire these at
  * startup — clib2 sets SBTC_LOGTAGPTR to the program name during its socket
  * init, so failing them here aborts every clib2-linked networked program with
@@ -340,13 +366,6 @@ struct sb_addrinfo
 #define SB_LOG_USER (1UL << 3)
 #define SB_LOG_MASK(pri) (1UL << ((pri) & SB_LOG_PRIMASK))
 #define SB_LOGMASK_ALL 0xFFUL
-#define SBTC_ERRNOSTRPTR 14
-#define SBTC_HERRNOSTRPTR 15
-#define SBTC_ERRNOBYTEPTR 21
-#define SBTC_ERRNOWORDPTR 22
-#define SBTC_ERRNOLONGPTR 24
-#define SBTC_HERRNOLONGPTR 25
-#define SBTC_RELEASESTRPTR 29 /* GET-only: stack-identifying version string */
 /* the log hook (sb_log.h): stack-wide, unlike the per-opener SBTC_LOG* above.
  * SBTC_LOG_FILE_NAME (52) is deliberately absent — there is no file sink. */
 #define SBTC_LOG_HOOK 55
@@ -382,8 +401,9 @@ struct sb_addrinfo
 #define SBSYSSTAT_Routes (1UL << 4)
 #define SBSYSSTAT_DefaultRoute (1UL << 5)
 
-/* QueryInterfaceTagList tags (netinclude/libraries/bsdsocket.h). Only the
- * read-only address/config/link subset this stack answers is copied here;
+/* --- QueryInterfaceTagList (netinclude/libraries/bsdsocket.h) ------------- */
+
+/* Only the read-only address/config/link subset this stack answers is here;
  * IFQ_BASE = TAG_USER + 1900. Each tag's ti_Data points to caller storage
  * to fill (per the autodoc): a STRPTR/LONG/ULONG pointer for scalars, a raw
  * byte buffer for the hardware address, and a struct sb_sockaddr_in pointer
@@ -425,6 +445,20 @@ struct sb_addrinfo
 #define IFQ_IPDrops (IFQ_BASE + 41)          /* LONG *    */
 #define IFQ_ARPDrops (IFQ_BASE + 42)         /* LONG *    */
 
+/* IFQ_AddressBindType values */
+#define IFABT_Unknown 0
+#define IFABT_Static 1
+#define IFABT_Dynamic 2
+
+/* IFQ_State values (subset: this stack reports only down/up) */
+#define SM_Offline 0
+#define SM_Online 1
+#define SM_Down 2
+#define SM_Up 3
+
+/* SANA-II hardware type reported for Ethernet interfaces (S2WireType_Ethernet) */
+#define SB_S2WIRETYPE_ETHERNET 1
+
 /* SBQUAD_T (libraries/bsdsocket.h): a 64-bit counter, high word first. Used
  * by the IFQ_GetBytes* tags and the SBTC_GET_BYTES_* SocketBaseTagList tags. */
 struct sb_squad
@@ -440,25 +474,9 @@ static inline void sb_squad_from_u64(struct sb_squad *q, struct NetDevU64 v)
     q->sbq_Low = v.ndu_Lo;
 }
 
-/* IFQ_AddressBindType values */
-#define IFABT_Unknown 0
-#define IFABT_Static 1
-#define IFABT_Dynamic 2
-
-/* IFQ_State values (subset: this stack reports only down/up) */
-#define SM_Offline 0
-#define SM_Online 1
-#define SM_Down 2
-#define SM_Up 3
-
-/* SANA-II hardware type reported for Ethernet interfaces (S2WireType_Ethernet) */
-#define SB_S2WIRETYPE_ETHERNET 1
-
-struct sb_linger
-{
-    LONG l_onoff;
-    LONG l_linger;
-};
+/* ==========================================================================
+ * 2. OUR OWN OBJECTS
+ * ========================================================================== */
 
 /* --- sockets -------------------------------------------------------------- */
 
@@ -477,6 +495,15 @@ typedef enum
     SBT_RAW = 3
 } SbSockType;
 
+/* TCP urgent-data (MSG_OOB) receive state, 4.4BSD semantics — our own
+ * bookkeeping, not an app-visible value (see SbSocket.oobState). Transitions
+ * in sb_tcp_recv_cb (latch/excise) and sb_tcp_recv (consume/pass the mark). */
+#define SB_OOB_NONE 0   /* no mark; recv(MSG_OOB) = EINVAL */
+#define SB_OOB_MARKED 1 /* mark known, byte not yet delivered; recv(MSG_OOB) waits/EWOULDBLOCK */
+#define SB_OOB_HAVE 2   /* byte latched (excised) or, inline, in-stream at the mark */
+#define SB_OOB_READ 3   /* byte consumed via MSG_OOB; mark clamp active until passed */
+
+/* one queued UDP/RAW datagram (SbSocket.dgrams) */
 struct SbDgram
 {
     struct MinNode node;
@@ -501,6 +528,7 @@ struct SbOwnerRef
 struct SbSocket
 {
     struct MinNode node; /* accept-queue linkage */
+    struct MinNode txWaitNode; /* sb_tx_want_space: awaiting transmit room */
     /* owner bases whose tasks get woken; slot 0 is the sole owner in the
      * common case, extra slots fill only via ReleaseCopyOfSocket sharing.
      * All-empty == parked by ReleaseSocket (nobody to wake until obtained). */
@@ -521,6 +549,7 @@ struct SbSocket
      * and AmiTCP-era apps park in Wait() on it without ever calling FIOASYNC
      * (see sb_wake). FIOASYNC(0) opts a socket back out. */
     UBYTE asyncIo;
+    UBYTE txWaiting; /* on the transmit-room waiter list (sb_tx_want_space) */
 
     UBYTE lingerOn;  /* SO_LINGER; on + time 0 => abort (RST) on close */
     UBYTE forceRst;  /* linger deadline expired: teardown must abort (RST) */
@@ -570,6 +599,15 @@ struct SbSocket
     /* listener: pre-created sockets awaiting accept() */
     struct MinList acceptq;
     ULONG naccept;
+};
+
+/* A socket parked by ReleaseSocket/ReleaseCopyOfSocket until some task claims
+ * it with ObtainSocket (sb_sockpass.c). Lives on root->releasedSockets. */
+struct SbReleased
+{
+    struct MinNode node;
+    LONG id;
+    struct SbSocket *s;
 };
 
 /* --- the library base ------------------------------------------------------ */
@@ -623,7 +661,19 @@ struct SocketBase
     struct sb_timeval netLastStart; /* IFQ_LastStart; zero until NETDEV_CMD_START */
     ULONG dgramRxDrops;    /* datagrams dropped at the socket queue (udpstat fullsock) */
     UBYTE netStatsValid;
-    UBYTE pad2[3];
+
+    /* RX profile intent (NETDEV_CMD_SET_RX_PROFILE; policy in sb_stack.c).
+     * Whether a task is blocked waiting for a reply is something only this
+     * layer knows; sb_rx_awaiting() below records it, the stack task turns
+     * it into a profile and pushes that to a driver with NDCF_RX_PROFILE.
+     * rxProfileStated is the stack task's own; the rest are single-word cells
+     * written under the core lock and read without it. */
+    UBYTE rxProfileStated; /* NDRP_* last decided (what the driver has or is being sent) */
+    UBYTE pad2[2];
+    volatile ULONG stackTicks;  /* the stack task's tick counter (NETSTACK_TICK_MS each) */
+    volatile ULONG rxAwaitTick; /* stackTicks when a task last blocked awaiting a reply */
+    ULONG rxAwaitSig;           /* signal the stack task with this; 0 = nobody is listening,
+                                   so do not (no such driver, or the interface is down) */
 
     /* --- per-opener state (child bases; garbage in the root) --- */
     struct MinNode openNode; /* link in root->openers (under openLock) */
@@ -657,7 +707,8 @@ struct SocketBase
     struct timerequest *timerReq; /* UNIT_MICROHZ; one request, reused per blocking call */
     UBYTE timerOpen;   /* timer.device opened; FALSE => sb_wait_to falls back to blocking forever */
     UBYTE dnsDone;     /* handshake cell: the resolver callback sets it, then signals sigBit */
-    UBYTE pad1[2];
+    UBYTE txSinceBlock; /* this opener has sent since it last blocked for input (its own task) */
+    UBYTE pad1;
 
     /* DNS + netdb per-opener result storage. The netdb calls return pointers
      * straight into these fields, so each result stays valid only until the
@@ -684,43 +735,84 @@ struct SocketBase
 
 #define SB_ROOT(b) ((b)->root != NULL ? (b)->root : (b))
 
+/* Under the core lock, where an opener is about to block for inbound data
+ * (recv, the read side of WaitSelect). Having sent since it last did so, it is
+ * waiting for a reply - a request/response conversation is running, whatever
+ * the protocol - and the receive side belongs in its latency profile. The
+ * stack task is only woken when that is news. */
+static inline void sb_rx_awaiting(struct SocketBase *base)
+{
+    if (base->txSinceBlock)
+    {
+        struct SocketBase *root = SB_ROOT(base);
+
+        base->txSinceBlock = FALSE;
+        root->rxAwaitTick = root->stackTicks;
+        if (root->rxProfileStated != NDRP_LATENCY && root->rxAwaitSig != 0 &&
+            root->stackTask != NULL)
+            Signal(root->stackTask, root->rxAwaitSig);
+    }
+}
+
 /* opener registry: openNode link back to its child base */
 #define SB_OPENER_FROM_NODE(n) \
     ((struct SocketBase *)((UBYTE *)(n) - __builtin_offsetof(struct SocketBase, openNode)))
 
-/* --- internals ------------------------------------------------------------- */
+/* ==========================================================================
+ * 3. INTERNAL PROTOTYPES, BY CONCERN
+ * ========================================================================== */
 
-/* errno plumbing (sb_errno.c); sb_fail = set errno, return -1 */
+/* --- errno plumbing (sb_errno.c) ----------------------------------------- */
+
 void sb_set_errno(struct SocketBase *base, LONG code);
 void sb_set_herrno(struct SocketBase *base, LONG code);
-LONG sb_fail(struct SocketBase *base, LONG code);
+LONG sb_fail(struct SocketBase *base, LONG code); /* set errno, return -1 */
+LONG sb_map_err(signed char lwip_err);            /* lwIP err_t -> SB_E* (sb_socket.c) */
 /* BSD error texts: syslog's %m and the SBTC_(H)ERRNOSTRPTR tags. Static
  * strings, valid forever; unknown codes get a generic text. */
 const char *sb_errno_text(LONG code);
 const char *sb_herrno_text(LONG code);
 
-/* socket core (sb_socket.c) */
-struct SbSocket *sb_sock_alloc(struct SocketBase *base, SbSockType type);
-void sb_sock_free(struct SocketBase *base, struct SbSocket *s); /* under lock */
+/* --- sockets and fd tables (sb_socket.c); all under the core lock -------- */
 
-/* multicast membership (sb_sockopt.c): leave every group @s joined via
- * IP_ADD_MEMBERSHIP. Called under the core lock from the socket teardown. */
-void sb_mcast_drop_all(struct SbSocket *s);
+struct SbSocket *sb_sock_alloc(struct SocketBase *base, SbSockType type);
+void sb_sock_free(struct SocketBase *base, struct SbSocket *s);
 LONG sb_fd_alloc(struct SocketBase *base, struct SbSocket *s);
 struct SbSocket *sb_fd_get(struct SocketBase *base, LONG fd);
 
-/* socket ownership (sb_socket.c); all under the core lock. incref adds one fd
- * reference for @b (a new owner slot on first, else fdrefs++), returning FALSE
- * only if the socket already has SB_SOCK_OWNERS distinct owners. decref drops
- * one, freeing the slot at zero. first == NULL only for a parked socket. */
+/* Ownership. incref adds one fd reference for @b (a new owner slot on first,
+ * else fdrefs++), returning FALSE only if the socket already has
+ * SB_SOCK_OWNERS distinct owners. decref drops one, freeing the slot at zero.
+ * first == NULL only for a parked socket. */
 BOOL sb_owner_incref(struct SbSocket *s, struct SocketBase *b);
 void sb_owner_decref(struct SbSocket *s, struct SocketBase *b);
 struct SocketBase *sb_owner_first(struct SbSocket *s);
-void sb_wake(struct SbSocket *s);
-void sb_wake_urg(struct SbSocket *s); /* SIGURG only — on urgent arrival, not every readiness change */
-void sb_event(struct SbSocket *s, ULONG ev); /* under lock; signals sigEventMask */
-LONG sb_wait(struct SocketBase *base); /* 0 or SB_EINTR; drops+retakes the lock */
 
+/* --- lwIP pcb wiring (sb_socket.c): our callbacks onto a fresh pcb ------- */
+
+void sb_tcp_wire(struct SbSocket *s);  /* attach lwIP callbacks to s->pcb.tcp */
+err_t sb_tcp_connected_cb(void *arg, struct tcp_pcb *tpcb, err_t err);
+void sb_listen_wire(struct SbSocket *s);
+void sb_udp_wire(struct SbSocket *s);
+void sb_raw_wire(struct SbSocket *s);
+/* TCP peer address readout; core lock held, 0/0 without a pcb */
+void sb_peer_ip(struct SbSocket *s, ULONG *addr, UWORD *port);
+
+/* --- readiness, wakes and blocking (sb_socket.c) ------------------------- */
+
+/* readiness: what WaitSelect's three sets report (4.4BSD so*able()) */
+BOOL sb_sock_readable(const struct SbSocket *s);
+BOOL sb_sock_writable(struct SbSocket *s);
+BOOL sb_sock_exceptable(const struct SbSocket *s); /* pending unconsumed OOB */
+
+/* wakes, all under the core lock: Signal() every owner task of a socket whose
+ * readiness changed (sb_wake), on a fresh urgent mark only (sb_wake_urg), or
+ * record an FD_* event and signal sigEventMask (sb_event) */
+void sb_wake(struct SbSocket *s);
+void sb_wake_urg(struct SbSocket *s);
+void sb_event(struct SbSocket *s, ULONG ev);
+
+LONG sb_wait(struct SocketBase *base); /* 0 or SB_EINTR; drops+retakes the lock */
 /* sb_wait with a per-call deadline (SO_RCVTIMEO/SO_SNDTIMEO). Zero-init the
  * SbTimedWait per API call; the first blocking iteration latches the
  * deadline. Adds SB_EWOULDBLOCK to sb_wait's returns; reclaims the opener's
@@ -731,26 +823,73 @@ struct SbTimedWait
     UBYTE set;
 };
 LONG sb_wait_to(struct SocketBase *base, ULONG ms, struct SbTimedWait *tw);
-void sb_tcp_wire(struct SbSocket *s);  /* attach lwIP callbacks to s->pcb.tcp */
-err_t sb_tcp_connected_cb(void *arg, struct tcp_pcb *tpcb, err_t err);
-void sb_listen_wire(struct SbSocket *s);
-void sb_udp_wire(struct SbSocket *s);
-void sb_raw_wire(struct SbSocket *s);
-BOOL sb_sock_readable(const struct SbSocket *s);
-BOOL sb_sock_writable(struct SbSocket *s);
-BOOL sb_sock_exceptable(const struct SbSocket *s); /* pending unconsumed OOB */
-LONG sb_map_err(signed char lwip_err);
-/* TCP peer address readout (sb_socket.c); core lock held, 0/0 without a pcb */
-void sb_peer_ip(struct SbSocket *s, ULONG *addr, UWORD *port);
 
-/* app sockaddr_in conversion (sb_api.c); shared with the sb_io.c data path */
+/* Datagram send backpressure (the interface's transmit capacity,
+ * netifbase_tx_admit). Core lock held; NEITHER call blocks. want_space queues
+ * @s to be woken once a maximum-size datagram fits again and returns at once —
+ * the caller decides what to do meanwhile (sb_dgram_room then sleeps in
+ * sb_wait_to; sb_sock_writable just reports not-writable). space_avail is that
+ * wake (SB_FD_WRITE + sb_wake for every queued socket), registered as
+ * netstack.ns_TxSpaceCb. */
+void sb_tx_want_space(struct SbSocket *s);
+void sb_tx_space_avail(void);
+
+/* --- multicast membership (sb_sockopt.c) -------------------------------- */
+
+/* leave every group @s joined via IP_ADD_MEMBERSHIP. Called under the core
+ * lock from the socket teardown. */
+void sb_mcast_drop_all(struct SbSocket *s);
+
+/* --- app sockaddr_in conversion (sb_api.c); shared with sb_io.c --------- */
+
 LONG sb_addr_in(const struct sb_sockaddr_in *sa, LONG salen, ip_addr_t *ip, u16_t *port);
 void sb_addr_out(APTR name, LONG *namelen, ULONG addr, UWORD port);
 
-/* ARP table ioctls (sb_arp.c); caller task, takes the core lock itself */
+/* --- ARP table ioctls (sb_arp.c); caller task, takes the core lock itself  */
+
 LONG sb_arp_ioctl(struct SocketBase *base, ULONG req, APTR argp);
 
-/* library plumbing (main.c) */
+/* --- interfaces (sb_ifquery.c) ------------------------------------------ */
+
+/* name resolution: matches the Roadshow-style identity (NetIfBase nib_Name,
+ * case-insensitive) first, then lwIP's own short name ("nd0", "lo0"). Core
+ * lock held; NULL when nothing matches. */
+struct netif;
+struct netif *sb_if_find(const char *name);
+BOOL sb_if_is_loopback(const struct netif *nif);
+/* fill a caller-provided sockaddr_in from a network-order address
+ * (== host order on 68k); NULL dst is a no-op */
+void sb_if_set_sockaddr(APTR dst, ULONG addr);
+
+/* --- resolver and netdb internals, shared across the DNS/netdb files ---- */
+
+/* first configured DNS server, or NULL when no slot holds one (sb_dnsconfig.c).
+ * The slots are sparse — see the definition; never probe slot 0 directly.
+ * Core lock held. */
+const ip_addr_t *sb_dns_first_server(void);
+
+/* the blocking resolver core (sb_resolver.c); shared with sb_gai.c */
+struct sb_hostent *sb_host_resolve(struct SocketBase *base, const char *name, ULONG *addrOut, LONG *herrOut);
+
+/* reverse DNS (sb_rdns.c): resolve @addr (network order) to a hostname via a
+ * PTR query to the configured resolver. Fills @out (NUL-terminated) and
+ * returns 0 on success, -1 if no PTR record, no resolver, or timeout. Takes
+ * the core lock internally; call it without the lock held. */
+LONG sb_ptr_resolve(struct SocketBase *base, ULONG addr, char *out, ULONG outmax);
+
+/* services table lookups (sb_netdb.c); ports host-order, proto "tcp"/"udp" */
+LONG sb_serv_port_by_name(const char *name, const char *proto);
+const char *sb_serv_name_by_port(UWORD port, const char *proto);
+
+/* case-insensitive ASCII string equality — the one comparer for every
+ * netdb table (protocols, services, networks) */
+static inline BOOL sb_strieq(const char *a, const char *b)
+{
+    return _Stricmp((CONST_STRPTR)a, (CONST_STRPTR)b) == 0;
+}
+
+/* --- library plumbing (main.c) ----------------------------------------- */
+
 extern const APTR bsdsocket_functable[];
 struct SocketBase *LibOpen(ULONG version asm("d0"), struct SocketBase *base asm("a6"));
 ULONG LibClose(struct SocketBase *base asm("a6"));
@@ -759,26 +898,14 @@ ULONG LibNull(void);
 LONG LibStub(void);
 APTR LibStubNull(void); /* for the pointer-returning unimplemented LVOs */
 
-/* stack task (sb_stack.c) */
+/* --- stack task (sb_stack.c) ------------------------------------------- */
+
 LONG sb_stack_start(struct SocketBase *root); /* under root->openLock */
 void sb_stack_stop(struct SocketBase *root);
 
-/* interface-name resolution (sb_ifquery.c): matches the Roadshow-style
- * identity (NetIfBase nib_Name, case-insensitive) first, then lwIP's own
- * short name ("nd0", "lo0"). Core lock held; NULL when nothing matches. */
-struct netif;
-struct netif *sb_if_find(const char *name);
-BOOL sb_if_is_loopback(const struct netif *nif);
-/* fill a caller-provided sockaddr_in from a network-order address
- * (== host order on 68k); NULL dst is a no-op */
-void sb_if_set_sockaddr(APTR dst, ULONG addr);
-
-/* first configured DNS server, or NULL when no slot holds one (sb_dnsconfig.c).
- * The slots are sparse — see the definition; never probe slot 0 directly.
- * Core lock held. */
-const ip_addr_t *sb_dns_first_server(void);
-
-/* --- the implemented API surface (register conventions from the NDK sfd) --- */
+/* ==========================================================================
+ * 4. THE IMPLEMENTED LVO SURFACE (register conventions from the NDK sfd)
+ * ========================================================================== */
 
 struct TagItem;
 
@@ -893,18 +1020,5 @@ LONG bsd_getaddrinfo(STRPTR hostname asm("a0"), STRPTR servname asm("a1"), struc
 VOID bsd_freeaddrinfo(struct sb_addrinfo *ai asm("a0"), struct SocketBase *base asm("a6"));
 STRPTR bsd_gai_strerror(LONG errnum asm("a0"), struct SocketBase *base asm("a6"));
 LONG bsd_getnameinfo(APTR sa asm("a0"), ULONG salen asm("d0"), STRPTR host asm("a1"), ULONG hostlen asm("d1"), STRPTR serv asm("a2"), ULONG servlen asm("d2"), ULONG flags asm("d3"), struct SocketBase *base asm("a6"));
-
-/* the blocking resolver core (sb_resolver.c); shared with sb_gai.c */
-struct sb_hostent *sb_host_resolve(struct SocketBase *base, const char *name, ULONG *addrOut, LONG *herrOut);
-
-/* reverse DNS (sb_rdns.c): resolve @addr (network order) to a hostname via a
- * PTR query to the configured resolver. Fills @out (NUL-terminated) and
- * returns 0 on success, -1 if no PTR record, no resolver, or timeout. Takes
- * the core lock internally; call it without the lock held. */
-LONG sb_ptr_resolve(struct SocketBase *base, ULONG addr, char *out, ULONG outmax);
-
-/* services table lookups (sb_netdb.c); ports host-order, proto "tcp"/"udp" */
-LONG sb_serv_port_by_name(const char *name, const char *proto);
-const char *sb_serv_name_by_port(UWORD port, const char *proto);
 
 #endif /* SB_BASE_H */

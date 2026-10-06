@@ -15,6 +15,7 @@
 #include <debug.h>
 
 #include "netstack.h"
+#include <memory.h> /* memcpy (emu68-common: no Exec call) */
 
 /* working copies must cover the largest possible table (SBTC_DTABLESIZE) */
 #define SB_FD_WORDS ((SB_FD_MAX + 31) / 32)
@@ -100,11 +101,11 @@ LONG bsd_WaitSelect(LONG nfds asm("d0"), APTR readfds asm("a0"), APTR writefds a
         r_out[i] = w_out[i] = e_out[i] = 0;
     }
     if (readfds != NULL)
-        CopyMem(readfds, r_in, copyBytes);
+        memcpy(r_in, readfds, copyBytes);
     if (writefds != NULL)
-        CopyMem(writefds, w_in, copyBytes);
+        memcpy(w_in, writefds, copyBytes);
     if (exceptfds != NULL)
-        CopyMem(exceptfds, e_in, copyBytes);
+        memcpy(e_in, exceptfds, copyBytes);
 
     BOOL timerArmed = FALSE;
     BOOL timedOut = FALSE;
@@ -136,6 +137,9 @@ LONG bsd_WaitSelect(LONG nfds asm("d0"), APTR readfds asm("a0"), APTR writefds a
             SendIO(&base->timerReq->tr_node);
             timerArmed = TRUE;
         }
+
+        if (readfds != NULL)
+            sb_rx_awaiting(base); /* about to block for input: a reply, if we sent */
 
         ULONG timerBit = timerArmed ? (1UL << base->timerPort->mp_SigBit) : 0;
         ULONG waitMask = (1UL << base->sigBit) | base->breakMask | userMask | timerBit;
@@ -187,11 +191,11 @@ LONG bsd_WaitSelect(LONG nfds asm("d0"), APTR readfds asm("a0"), APTR writefds a
     }
 
     if (readfds != NULL)
-        CopyMem(r_out, readfds, copyBytes);
+        memcpy(readfds, r_out, copyBytes);
     if (writefds != NULL)
-        CopyMem(w_out, writefds, copyBytes);
+        memcpy(writefds, w_out, copyBytes);
     if (exceptfds != NULL)
-        CopyMem(e_out, exceptfds, copyBytes);
+        memcpy(exceptfds, e_out, copyBytes);
     if (signals != NULL)
         *signals = gotUser;
 

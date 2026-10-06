@@ -1,0 +1,4 @@
+TYPE  = TOOL
+# ReAction layout needs more than the 4 KB Shell default; the program swaps
+# to this size itself when started with less
+STACK = 16384

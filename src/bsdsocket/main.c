@@ -19,11 +19,11 @@
 #include <debug.h>
 
 #include "netstack.h"
+#include <memory.h> /* memcpy (emu68-common: no Exec call) */
 
-LONG __attribute__((used, no_reorder)) doNotExecute(void);
-LONG __attribute__((used, no_reorder)) doNotExecute(void)
+LONG __attribute__((used, section(".text.entry"))) doNotExecute(void);
+LONG __attribute__((used, section(".text.entry"))) doNotExecute(void)
 {
-    Kprintf("[bsdsocket] %s: entry stub executed\n", __func__);
     return -1;
 }
 
@@ -32,7 +32,7 @@ static const char libraryName[] = LIBRARY_NAME;
 static const char libraryIdString[] = LIBRARY_IDSTRING;
 static const APTR initTable[4];
 
-const struct Resident bsdsocketResident __attribute__((used)) = {
+const struct Resident bsdsocketResident __attribute__((used, section(".text.modhdr"))) = {
     RTC_MATCHWORD,
     (struct Resident *)&bsdsocketResident,
     (APTR)&endOfCode,
@@ -97,10 +97,14 @@ ULONG LibExpunge(struct SocketBase *base asm("a6"))
     return segList;
 }
 
+/* The library's Exec base: set once from LibInit's a6, read by every exec call
+ * in the library and its port layer (EXEC_BASE_NAME), so nothing reads address 4. */
+struct ExecBase *SysBase;
+
 static struct Library *LibInit(struct Library *base asm("d0"), ULONG seglist asm("a0"), struct ExecBase *execBase asm("a6"))
 {
     struct SocketBase *root = (struct SocketBase *)base;
-    (void)execBase;
+    SysBase = execBase;
 
     root->segList = seglist;
     root->libNode.lib_Revision = (UWORD)LIBRARY_REVISION;
@@ -201,7 +205,7 @@ struct SocketBase *LibOpen(ULONG version asm("d0"), struct SocketBase *base asm(
         ReleaseSemaphore(&root->openLock);
         return NULL;
     }
-    CopyMem((UBYTE *)root - negSize, mem, negSize + posSize);
+    memcpy(mem, (UBYTE *)root - negSize, negSize + posSize);
 
     struct SocketBase *b = (struct SocketBase *)(mem + negSize);
     b->root = root;

@@ -8,6 +8,7 @@ matter when *regenerating* them.
 | Output (committed) | From | Kind |
 |---|---|---|
 | `dist/NetLogViewer.info` | `NetLogViewer.png` + `NetLogViewer.info.src` | tool (stack 16384, `DONOTWAIT`, `CX_POPKEY` / `CX_PRIORITY` / `CX_POPUP` tooltypes), ColorIcon + classic fallback |
+| `dist/NetSpeed.info` | `NetSpeed.png` + `NetSpeed.info.src` | tool (stack 16384, no tooltypes), ColorIcon + classic fallback; also the AppIcon while the window is iconified |
 
 `make_icons.py` drives the icontool fork, one invocation per icon — `--create`
 synthesises the DiskObject, the imports supply the art, and the tooltype options
@@ -29,5 +30,6 @@ ICONTOOL=/path/to/icontool/icontool .venv/bin/python make_icons.py NetLogViewer
 
 ## Licensing
 
-`NetLogViewer.png` is original art for this project (BSD-3-Clause, like the rest of
-the repository). Nothing here is taken from AmigaOS or third-party icon sets.
+`NetLogViewer.png` and `NetSpeed.png` are original art for this project
+(BSD-3-Clause, like the rest of the repository). Nothing here is taken from AmigaOS
+or third-party icon sets.

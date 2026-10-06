@@ -65,7 +65,8 @@ table included — so every opening task gets its own `errno`, fd table, wait si
   open lock by the first `OpenLibrary()`. It reads `ENV:netstack.prefs` (`sb_config.c`:
   **stack-wide settings only** — hostname, search domain, explicit DNS servers, mDNS;
   flat `KEY = VALUE`, every key optional), initializes `netstack`, publishes the
-  control port, and ticks `sys_check_timeouts()` every 100 ms. The boot state is
+  control port, and ticks `sys_check_timeouts()` every `NETSTACK_TICK_MS` (50 ms —
+  the period doubles as the delayed-ACK bound, see the ACK policy below). The boot state is
   **loopback only** (the Roadshow model): network interfaces are added at runtime by
   the `AddNetInterface` command from per-interface files in `DEVS:NetInterfaces/`
   (the file name is the interface name), normally from `S:Network-Startup`. The file
@@ -124,7 +125,7 @@ both fail, the error from a driver that was found and refused beats a plain
 The reply contract: every delivered message is answered — inline, or *parked* and
 answered later. `ADD_IF` executes the attach/configure (`sb_netdev_up`) and parks the
 reply until the interface is *operational*: link up for a static config, DHCP lease
-bound for a dynamic one (a lease implies link) — checked by the 100 ms tick
+bound for a dynamic one (a lease implies link) — checked by the stack tick
 (explicitly configured DNS servers are re-applied after a lease so config beats DHCP).
 The client owns the timeout: `CANCEL_ADD` recalls a parked add — after a final
 readiness check that resolves the cancel-vs-completion race in the add's favor — and
@@ -170,6 +171,26 @@ merging (not concatenating) the queues in `tcp_rexmit_rto_prepare`.
   walk-and-compare self-check exists behind
   `TCP_UNSENT_TAIL_DBGCHECK` (enabled in the TRACE tier only — it re-adds the
   walk the cache removes).
+
+- **ACK policy** — what keeps the *peer's* sender flowing, and the stack's job alone.
+  Two rules, both measured against a Samba server whose replies arrived in ACK-gated
+  flights. (1) `LWIP_TCP_ACK_AGGREGATES` (fork option, on): an input that advances
+  `rcv_nxt` by more than `TCP_MSS` is acknowledged from `tcp_input`, at once. lwIP's
+  stock rule acknowledges every second *segment*, and GRO hands it a whole flight as
+  one — so nothing was acknowledged until the application had drained ≥ 4·MSS and
+  `tcp_recved` sent a window update, 1.2–2.2 ms later, per flight. The same rule gives
+  the immediate ACK RFC 5681 asks for when a retransmission fills a hole. (2) The
+  delayed ACK is bounded by `NETSTACK_TICK_MS`: `netstack_tick()` calls
+  `tcp_fasttmr()` itself instead of leaving it to lwIP's 250 ms base. A lone small
+  reply that nothing piggybacks on used to wait up to 350 ms; mainstream peers
+  retransmit after 200 ms, and that spurious timeout collapses their congestion
+  window for the next request. `tcp_fasttmr()` counts nothing in ticks, so RTO,
+  persist and keepalive stay on lwIP's own 500 ms base. (3) With (1) doing the
+  acknowledging, `TCP_WND_UPDATE_THRESHOLD` is a quarter of the window instead of
+  lwIP's 4·MSS: the explicit window update in `tcp_recved` no longer fires on every
+  application read. An ACK is expensive here — a lone frame drains the TX ring, so
+  each costs a TX-done interrupt and a unit-task wakeup on top of its own
+  transmission. Host tests: `test/ackagg`.
 
 - **Runtime model** (`lwipopts.h`): `NO_SYS=1` with external serialization — the
   core-locking idea implemented over an Exec `SignalSemaphore` instead of lwIP's own
@@ -234,7 +255,11 @@ consuming full Ethernet frames, and the glue translates the 14-byte header at
 the boundary (RAW frame mode is unreliable across real drivers). SANA-II is
 copy-based by construction: the driver copies every frame through
 client-supplied callbacks (`S2_CopyToBuff`/`S2_CopyFromBuff`, register-
-convention, interrupt-callable — pure copy loops, no Exec calls, no locks).
+convention, interrupt-callable — they call emu68-common's `memcpy`, the
+`movem.l` routine that makes no Exec call, and take no locks). Received
+frames are armed with a 2-byte pad ahead of the Ethernet header so the IP
+header, and with it the copied body, sits on a longword; a driver that stages
+its frames the same way (genet.device 3.17) gets longword moves on both sides.
 
 - **TX** (`sana2_tx.c`): linkoutput, under the core lock, parses the built
   header into `ios2_DstAddr`/`ios2_PacketType` (`S2_BROADCAST`/`S2_MULTICAST`/
@@ -362,6 +387,21 @@ Design choices worth knowing:
 - **Quiesce is exact.** STOP completes every in-flight TX cookie before replying; DETACH
   then requires all RX cookies released and all driver-allocated DMA memory freed, so
   after DETACH no pointer of either side survives in the other.
+- **Receive moderation is split by knowledge: the stack states intent, the driver maps
+  it** (`NETDEV_CMD_SET_RX_PROFILE`, capability `NDCF_RX_PROFILE`). A NIC driver can batch
+  received frames for throughput or deliver a lone frame at once, and cannot know which
+  is wanted; whether a task is blocked waiting for a reply is visible to the stack alone,
+  and timeouts, thresholds and how a burst is told from a lone frame are the driver's
+  hardware knowledge. The stack's policy (`sb_netdev.c`): `NDRP_LATENCY` is the normal
+  state - it costs an idle or lightly loaded receive side nothing, and it is what every
+  request/response conversation wants; `NDRP_THROUGHPUT` is stated while the receive side
+  is busy (>= 2000 frames/s) and no opener has blocked for input after sending
+  (`sb_rx_awaiting()`, in the recv paths and the read side of `WaitSelect`) for 300 ms - a
+  download nobody polls, or the ACK stream of an upload. That event moves the profile
+  back at once; everything else is decided on the 50 ms tick, so the command follows
+  conversations, never packets. It travels on a request of its own, asynchronously, like
+  everything the stack task sends the driver. `SET_COALESCE` stays the operator's knob
+  for the numbers, and pins them.
 
 ### Mapping to GENET (the first driver)
 

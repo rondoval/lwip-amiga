@@ -23,6 +23,7 @@
 #include <lwip/netif.h>
 #include <lwip/sys.h>
 #include <lwip/timeouts.h>
+#include <lwip/priv/tcp_priv.h> /* tcp_fasttmr: delayed ACKs at our own cadence */
 
 #include "netstack.h"
 #include "netdev_if.h" /* netdevif_tx_kick / netdevif_tx_reclaim at outermost lock */
@@ -172,14 +173,21 @@ void netstack_tick(void)
 {
     netstack_lock();
     sys_check_timeouts();
+    /* Delayed ACKs, at OUR cadence (see NETSTACK_TICK_MS). Extra calls are
+     * free of side effects: tcp_fasttmr() only flushes TF_ACK_DELAY, pending
+     * FINs and refused data, and counts nothing in ticks — every tick-based
+     * TCP timer (RTO, persist, keepalive) lives in tcp_slowtmr(), which stays
+     * on lwIP's own 500 ms base inside sys_check_timeouts(). */
+    tcp_fasttmr();
 #ifdef PROFILE
-    /* report every ~2 s (20 × 100 ms ticks): the core-lock wait/hold slots
-     * then the per-stage timings, both through perf_report */
-    if (++netstack.ns_LockProfTicks >= 20)
+    /* report every ~2 s: the core-lock wait/hold slots then the per-stage
+     * timings, both through perf_report, then the SANA-II pump's histogram */
+    if (++netstack.ns_LockProfTicks >= 2000 / NETSTACK_TICK_MS)
     {
         netstack.ns_LockProfTicks = 0;
         lock_prof_report(&netstack.ns_LockProf);
         perf_report(&ns_perf);
+        sana2if_pump_perf_report();
     }
 #endif
     netstack_unlock();
@@ -187,7 +195,8 @@ void netstack_tick(void)
 
 /* Monotonic ms from the 32-bit EClock low word: unsigned wraparound delta,
  * divide-carry so remainder ticks are never lost. Correct as long as
- * successive calls are < ~1.6 h apart — the stack task ticks every 100 ms. */
+ * successive calls are < ~1.6 h apart — the stack task ticks every
+ * NETSTACK_TICK_MS. */
 ULONG netstack_now_ms(void)
 {
     if (TimerBase == NULL)

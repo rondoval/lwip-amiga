@@ -1,9 +1,17 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 /*
  * Backend-agnostic interface glue: the shared base every hardware-interface
- * struct embeds first — identity stamping, the refcounted joined-multicast
- * MAC set behind the lwIP igmp_mac_filter hook, and the in-band 802.1Q VLAN
- * hooks. See netif_base.h for the ownership story.
+ * struct embeds first. See netif_base.h for the ownership story and the
+ * contracts; this file is the implementation, in the same order:
+ *
+ *   lifecycle          — reset the base, then stamp its identity,
+ *   transmit capacity  — the whole-datagram admission accounting,
+ *   VLAN hooks         — in-band 802.1Q, per frame,
+ *   IGMP RX filter     — the refcounted joined-multicast MAC set.
+ *
+ * Locking is per group and noted with each: the lwIP hooks and the transmit
+ * calls run with the core lock already held, netifbase_mcast_snapshot takes it
+ * itself, and lifecycle runs at create time on the stack task.
  */
 
 #include "netstack_sys.h"
@@ -14,6 +22,10 @@
 #include "netstack.h"
 #include "netstack_lwiphooks.h"
 
+/* ----------------------------------------------------------- lifecycle --- */
+
+/* Reset the base's own fields for a (re)create. The embedded lwIP netif is not
+ * touched: netif_add, in the backend's create, owns that. */
 void netifbase_init(struct NetIfBase *nib, UWORD kind)
 {
     nib->nib_Kind = kind;
@@ -29,8 +41,13 @@ void netifbase_init(struct NetIfBase *nib, UWORD kind)
     nib->nib_McastCount = 0;
     nib->nib_McastOverflow = 0;
     nib->nib_RxFilterDirty = FALSE;
+    nib->nib_TxFree = ~0UL; /* ungated until the backend calls netifbase_tx_setup */
+    nib->nib_TxMaxFrames = 0;
 }
 
+/* Identity, from the control-port config the opener parsed: runs between the
+ * backend's create() and netif_set_up, so the query LVOs never see a half
+ * interface. The VLAN TCI arrives with it, before the first frame. */
 void netifbase_stamp(struct NetIfBase *nib, const struct NetCtlIfConfig *nif,
                      const char *hostFallback)
 {
@@ -49,6 +66,83 @@ void netifbase_stamp(struct NetIfBase *nib, const struct NetCtlIfConfig *nif,
     for (; h < NETCTL_ID_MAX - 1 && host[h] != '\0'; h++)
         nib->nib_Hostname[h] = host[h];
     nib->nib_Hostname[h] = '\0';
+}
+
+/* --------------------------------------------------- transmit capacity --- */
+/* Whole-datagram admission; the contract is in netif_base.h. Everything here
+ * runs under the core lock. Two groups: the backend reports what its transmit
+ * path did (setup/freed, plus the inline taken), the socket layer asks whether
+ * a datagram fits and arranges to be told when one does (admit/writable/
+ * want_space/detached). */
+
+void netifbase_tx_setup(struct NetIfBase *nib, ULONG capacity, ULONG mtu)
+{
+    nib->nib_TxFree = capacity;
+    nib->nib_TxMaxFrames = netifbase_tx_frames(NIB_MAX_L3, mtu);
+}
+
+/* The one wake, shared by the two events that can let a blocked sender run
+ * again: room crossing the threshold, and the interface going away. One-shot —
+ * ns_TxWantSpace is cleared here, and the socket layer re-arms it (through
+ * netifbase_tx_want_space) for any waiter that re-checks and still cannot go. */
+static inline void netifbase_tx_wake(void)
+{
+    if (netstack.ns_TxWantSpace && netstack.ns_TxSpaceCb != NULL)
+    {
+        netstack.ns_TxWantSpace = FALSE;
+        netstack.ns_TxSpaceCb();
+    }
+}
+
+/* Edge-triggered on purpose: the wake fires only as the free count crosses
+ * nib_TxMaxFrames, so a draining ring wakes the waiters once instead of once
+ * per frame — and only then is a maximum-size datagram guaranteed to fit. */
+void netifbase_tx_freed(struct NetIfBase *nib, ULONG n)
+{
+    ULONG was = nib->nib_TxFree;
+    nib->nib_TxFree = was + n;
+    if (was < nib->nib_TxMaxFrames && nib->nib_TxFree >= nib->nib_TxMaxFrames)
+        netifbase_tx_wake();
+}
+
+/* No interface, or no destination to route: admit. There is nothing to account
+ * against, and the send that follows fails on its own with the right errno (no
+ * route, or a dead pcb) — refusing here would invent a different one. */
+BOOL netifbase_tx_admit(const ip4_addr_t *dst, ULONG l3len)
+{
+    struct NetIfBase *nib = netstack.ns_ActiveIf;
+    if (nib == NULL || dst == NULL)
+        return TRUE;
+    struct netif *nif = &nib->nib_Netif;
+    /* diverted to the loopback path before any fragmenting (ip4.c) */
+    if (ip4_addr_isloopback(dst) || ip4_addr_eq(dst, netif_ip4_addr(nif)))
+        return TRUE;
+    return netifbase_tx_frames(l3len, nif->mtu) <= nib->nib_TxFree;
+}
+
+/* What select() promises: room for a datagram of ANY size, since the caller is
+ * not telling us what it will send. Writable with no interface, as admit is. */
+BOOL netifbase_tx_writable(void)
+{
+    struct NetIfBase *nib = netstack.ns_ActiveIf;
+    return nib == NULL || nib->nib_TxFree >= nib->nib_TxMaxFrames;
+}
+
+/* Arm only while an interface exists: with none there will never be a
+ * netifbase_tx_freed to clear the flag again. */
+void netifbase_tx_want_space(void)
+{
+    if (netstack.ns_ActiveIf != NULL)
+        netstack.ns_TxWantSpace = TRUE;
+}
+
+/* An interface went away, so the room its waiters are blocked on is never
+ * coming. Wake them unconditionally — there is no capacity left to compare
+ * against — and they re-check, are admitted (see above) and let the send report
+ * the real error. */
+void netifbase_tx_detached(void)
+{
+    netifbase_tx_wake();
 }
 
 /* ---------------------------------------------------------- VLAN hooks --- */

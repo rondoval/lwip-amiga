@@ -44,6 +44,17 @@ err_t s2if_linkoutput(struct netif *nif, struct pbuf *p)
     struct S2TxReq *req = s2i->s2i_TxFree;
     if (req == NULL)
     {
+        /* Dry with frames still staged: one lock hold can emit more frames
+         * than the pool holds (ip4_frag sends a 64K datagram's ~45
+         * fragments in one go, and ignores our error). Publish the staged
+         * batch now - a synchronous driver retires it in place and refills
+         * the pool; a queuing one leaves it in flight, and that is real
+         * backpressure. */
+        sana2if_tx_flush(s2i);
+        req = s2i->s2i_TxFree;
+    }
+    if (req == NULL)
+    {
         s2i->s2i_TxDrops++;
         return ERR_MEM; /* backpressure; TCP retries on timer */
     }
@@ -64,6 +75,7 @@ err_t s2if_linkoutput(struct netif *nif, struct pbuf *p)
         pbuf_ref(frame); /* the driver reads it until the reply */
 
     s2i->s2i_TxFree = req->stx_Next;
+    netifbase_tx_taken(&s2i->s2i_Base, 1);
 
     const UBYTE *eth = frame->payload;
     struct IOSana2Req *io = &req->stx_Io;
@@ -114,6 +126,7 @@ static void s2if_tx_retire(struct Sana2If *s2i, struct S2TxReq *req)
     req->stx_Io.ios2_Data = NULL;
     req->stx_Next = s2i->s2i_TxFree;
     s2i->s2i_TxFree = req;
+    netifbase_tx_freed(&s2i->s2i_Base, 1);
 }
 
 /* Publish the staged batch: called at every outermost netstack_unlock,

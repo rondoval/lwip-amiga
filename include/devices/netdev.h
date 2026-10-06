@@ -110,6 +110,7 @@
 #define NETDEV_CMD_GET_LINK     (NETDEV_CMD_BASE + 0x07)  /* NetDevLinkState */
 #define NETDEV_CMD_SET_MAC      (NETDEV_CMD_BASE + 0x08)  /* UBYTE[6] */
 #define NETDEV_CMD_GET_COUNTERS (NETDEV_CMD_BASE + 0x09)  /* NetDevCounterSet */
+#define NETDEV_CMD_SET_RX_PROFILE (NETDEV_CMD_BASE + 0x0a) /* NetDevRxProfile */
 
 #define NETDEV_IS_CMD(cmd)      ((((UWORD)(cmd)) & 0xFFE0) == NETDEV_CMD_BASE)
 
@@ -164,6 +165,8 @@ struct NetDevCaps
 #define NDCF_COALESCE       (1UL << 3)  /* SET_COALESCE is honored */
 #define NDCF_MCAST_FILTER   (1UL << 4)  /* exact multicast filtering in HW */
 #define NDCF_LINK_EVENTS    (1UL << 5)  /* nso_LinkChange will be called */
+#define NDCF_RX_PROFILE     (1UL << 9)  /* SET_RX_PROFILE is honored; without it the command
+                                           is never sent */
 /* Reserved capabilities — defined so the frozen v1 layout can express them later without an
  * ABI break; no v1 driver advertises them and no v1 stack acts on them. */
 #define NDCF_RX_SCATTER     (1UL << 6)  /* reserved: multi-buffer RX frames (see NDRF_SOP/EOP) */
@@ -308,7 +311,11 @@ struct NetDevStackOps           /* stack provides, driver calls */
     ULONG   (*nso_RxInput)(APTR stackctx, const struct NetDevRxDesc *descs, ULONG count);
 
     /* Completed TX cookies (transmitted or dropped on STOP). The stack may
-     * reclaim the segment memory and submit queued packets from here. */
+     * reclaim the segment memory and submit queued packets from here.
+     * Completion is not immediate: a driver reports cookies when it next
+     * services the device — on receive activity, or on its housekeeping tick
+     * at the latest — and promptly only after ndo_TxSubmit returned short.
+     * That is the one situation in which a stack may wait for this call. */
     VOID    (*nso_TxDone)(APTR stackctx, APTR const *cookies, ULONG count);
 
     /* Link state changed (only with NDCF_LINK_EVENTS). Also called once
@@ -393,6 +400,41 @@ struct NetDevCoalesce
     UWORD   ndcl_RxMaxFrames;   /* ... or after this many frames */
     UWORD   ndcl_TxMaxFrames;   /* TX-done interrupt batching */
 };
+
+/* NETDEV_CMD_SET_RX_PROFILE (io_Data -> struct NetDevRxProfile). Honored with
+ * NDCF_RX_PROFILE, otherwise never sent.
+ *
+ * Declares what the receive side is currently for, so that each side supplies
+ * what only it knows: the stack whether a consumer is blocked awaiting a
+ * reply, the driver how to moderate receive interrupts for that case —
+ * timeouts, thresholds, telling a burst from a lone frame.
+ *
+ *   NDRP_UNSTATED    no intent: the driver's own moderation settings, which
+ *                    have to serve both cases below. Zero, and so the state
+ *                    both sides start in — before the first command, and
+ *                    again after DETACH. A stack may also send it, to
+ *                    withdraw an intent it stated earlier.
+ *   NDRP_THROUGHPUT  nothing waits on an individual frame; batch as far as
+ *                    the moderation settings allow.
+ *   NDRP_LATENCY     a frame arriving at an idle receiver is delivered at
+ *                    once. A burst may still be batched, by whatever rule the
+ *                    driver chooses.
+ *
+ * The profile describes the traffic, not the frame: the stack sends it when
+ * the answer changes, never per exchange, and a driver may be given the same
+ * value twice. SET_COALESCE keeps its meaning as the numeric setting; a
+ * driver may let explicit RX values from it pin static moderation and ignore
+ * the profile until they are cleared. */
+
+struct NetDevRxProfile
+{
+    UWORD   ndrp_Profile;       /* NDRP_* */
+    UWORD   ndrp_Reserved;      /* 0 */
+};
+
+#define NDRP_UNSTATED       0
+#define NDRP_THROUGHPUT     1
+#define NDRP_LATENCY        2
 
 /* NETDEV_CMD_GET_LINK (io_Data -> struct NetDevLinkState) — poll variant of
  * nso_LinkChange. */
@@ -501,6 +543,7 @@ NETDEV_ABI_ASSERT(sizeof(struct NetDevCaps) == 40);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevAttach) == 64);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevRxFilter) == 8);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevCoalesce) == 8);
+NETDEV_ABI_ASSERT(sizeof(struct NetDevRxProfile) == 4);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevLinkState) == 4);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevStats) == 104);
 NETDEV_ABI_ASSERT(sizeof(struct NetDevCounter) == 16);

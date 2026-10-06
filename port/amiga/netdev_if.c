@@ -8,6 +8,7 @@
 
 #include "netstack_sys.h"
 
+#include <bits.h> /* round_up_pow2_u32 */
 #include <debug.h>
 
 #include <lwip/snmp.h>
@@ -144,17 +145,15 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
     ndi->ndi_Drv = drvCtx;
     ndi->ndi_Ops = drvOps;
     ndi->ndi_Caps = *caps;
-    ndi->ndi_RxNoWrap = 0;
-    ndi->ndi_TxOversize = 0;
-    ndi->ndi_RxCsumBad = 0;
     ndi->ndi_TxKickPending = FALSE;
     netdevif_hh_invalidate(ndi);
     rxgro_init(&ndi->ndi_Gro, &ndi->ndi_Base.nib_Netif);
 
     /* RX wrappers: one per buffer the stack can possibly hold. The driver
      * advertises its pool size; a wrap count below it silently re-imposes
-     * the old limit as ndi_RxNoWrap backpressure. Ring*2 is the fallback
-     * for drivers that leave ndc_RxPoolBufs 0. */
+     * the old limit as backpressure (nso_RxInput returns short and the driver
+     * recycles the tail). Ring*2 is the fallback for drivers that leave
+     * ndc_RxPoolBufs 0. */
     ULONG count = caps->ndc_RxPoolBufs;
     if (count < (ULONG)caps->ndc_RxRingSlots * 2)
         count = (ULONG)caps->ndc_RxRingSlots * 2;
@@ -185,9 +184,9 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
         want = (ULONG)ndi->ndi_Caps.ndc_TxRingSlots * 2;
     if (want < NDIF_TX_FREE_MIN)
         want = NDIF_TX_FREE_MIN;
-    ULONG ring_n = 1;
-    while (ring_n < want + 1)
-        ring_n <<= 1;
+    /* a power of two so the head/tail indices wrap with an AND (ndi_TxFreeMask)
+     * instead of a modulo, and may run free across the 32-bit rollover */
+    ULONG ring_n = round_up_pow2_u32(want + 1);
     ndi->ndi_TxFree = AllocMem(ring_n * sizeof(APTR), MEMF_PUBLIC | MEMF_CLEAR);
     if (ndi->ndi_TxFree == NULL)
     {
@@ -197,7 +196,25 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
     ndi->ndi_TxFreeMask = ring_n - 1;
     ndi->ndi_TxFreeProd = 0;
     ndi->ndi_TxFreeCons = 0;
-    ndi->ndi_TxFreeOverflow = 0;
+
+    /* Pending TX queue (netdev_tx.c), and with it the interface's transmit
+     * capacity for whole-datagram admission: a maximum-size datagram's
+     * fragments plus slack, NDIF_TX_PEND_MIN at least. */
+    ULONG pend_want = netifbase_tx_frames(NIB_MAX_L3, caps->ndc_Mtu) + 8;
+    if (pend_want < NDIF_TX_PEND_MIN)
+        pend_want = NDIF_TX_PEND_MIN;
+    ULONG pend_n = round_up_pow2_u32(pend_want); /* AND-masked indices, as above */
+    ndi->ndi_TxPend = AllocMem(pend_n * sizeof(APTR), MEMF_PUBLIC | MEMF_CLEAR);
+    if (ndi->ndi_TxPend == NULL)
+    {
+        FreeMem(ndi->ndi_TxFree, ring_n * sizeof(APTR));
+        FreeMem(ndi->ndi_WrapStorage, ndi->ndi_WrapStorageSize);
+        return -1;
+    }
+    ndi->ndi_TxPendMask = pend_n - 1;
+    ndi->ndi_TxPendHead = 0;
+    ndi->ndi_TxPendTail = 0;
+    netifbase_tx_setup(&ndi->ndi_Base, pend_n, caps->ndc_Mtu);
 
     netstack_lock();
     struct netif *added = netif_add_noaddr(&ndi->ndi_Base.nib_Netif, ndi,
@@ -211,6 +228,7 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
 
     if (added == NULL)
     {
+        FreeMem(ndi->ndi_TxPend, (ndi->ndi_TxPendMask + 1) * sizeof(APTR));
         FreeMem(ndi->ndi_TxFree, (ndi->ndi_TxFreeMask + 1) * sizeof(APTR));
         FreeMem(ndi->ndi_WrapStorage, ndi->ndi_WrapStorageSize);
         return -1;
@@ -230,6 +248,7 @@ void netdevif_destroy(struct NetdevIf *ndi)
      * did this while ns_ActiveNetdev == ndi; the explicit call keeps the ordering
      * vs. netstack_slab_detach self-evident and is a no-op if already drained.) */
     netdevif_tx_reclaim(ndi);
+    netdevif_tx_pend_free(ndi); /* frames the ring never took: STOP will not complete them */
     netif_remove(&ndi->ndi_Base.nib_Netif);
     if (netstack.ns_ActiveNetdev == ndi)
     {
@@ -238,6 +257,7 @@ void netdevif_destroy(struct NetdevIf *ndi)
         netstack.ns_ActiveNetdev = NULL;
         netstack.ns_ActiveIf = NULL;
     }
+    netifbase_tx_detached(); /* blocked senders re-check and find no interface */
 
     /* Wrap-pool disposition, decided under the lock (wrap frees run under it
      * too, so ndi_WrapsOut is exact). Sockets may still hold RX wraps — their
@@ -267,4 +287,6 @@ void netdevif_destroy(struct NetdevIf *ndi)
     ndi->ndi_WrapsOut = 0;
     FreeMem(ndi->ndi_TxFree, (ndi->ndi_TxFreeMask + 1) * sizeof(APTR));
     ndi->ndi_TxFree = NULL;
+    FreeMem(ndi->ndi_TxPend, (ndi->ndi_TxPendMask + 1) * sizeof(APTR));
+    ndi->ndi_TxPend = NULL;
 }

@@ -10,6 +10,7 @@
 #include "sb_base.h"
 
 #include <minlist.h>
+#include <stddef.h> /* offsetof */
 
 #include <lwip/netif.h>
 #include <lwip/raw.h>
@@ -19,6 +20,7 @@
 #include <debug.h>
 
 #include "netstack.h"
+#include "netif_base.h"
 
 LONG sb_map_err(signed char e)
 {
@@ -255,6 +257,44 @@ void sb_peer_ip(struct SbSocket *s, ULONG *addr, UWORD *port)
     }
 }
 
+/* Datagram sockets waiting for transmit room on the interface: one list for
+ * the whole library (every socket shares the one interface), woken all at
+ * once when a maximum-size datagram fits again. Core lock held throughout. */
+static struct MinList sb_txWaiters = {
+    (struct MinNode *)&sb_txWaiters.mlh_Tail, NULL, (struct MinNode *)&sb_txWaiters.mlh_Head
+};
+
+/* Ask to be woken once a maximum-size datagram fits again. This does NOT
+ * block: it enrols @s on the list above (idempotently) and returns, because
+ * its callers must not sleep here — sb_sock_writable owes select() an answer
+ * for every other fd in the set, and sb_dgram_room does its sleeping in
+ * sb_wait_to. Enrolling under the caller's lock hold is what makes the wake
+ * unmissable: netifbase_tx_freed runs under the same lock. */
+void sb_tx_want_space(struct SbSocket *s)
+{
+    if (!s->txWaiting)
+    {
+        AddTailMinList(&sb_txWaiters, &s->txWaitNode);
+        s->txWaiting = TRUE;
+    }
+    netifbase_tx_want_space();
+}
+
+/* The wake, registered as netstack.ns_TxSpaceCb: room for a maximum-size
+ * datagram is back. Every waiter re-tests for itself, so waking all of them is
+ * correct even when only one datagram's worth came free. */
+void sb_tx_space_avail(void)
+{
+    struct MinNode *n;
+    while ((n = RemHeadMinList(&sb_txWaiters)) != NULL)
+    {
+        struct SbSocket *s = (struct SbSocket *)((UBYTE *)n - offsetof(struct SbSocket, txWaitNode));
+        s->txWaiting = FALSE;
+        sb_event(s, SB_FD_WRITE);
+        sb_wake(s);
+    }
+}
+
 /* 4.4BSD sowriteable(), in its order. The !connected case is the one that
  * matters: for a connection-required protocol BSD needs SS_ISCONNECTED, so a
  * TCP socket whose connect() never got off the ground (no route: tcp_connect
@@ -268,7 +308,15 @@ BOOL sb_sock_writable(struct SbSocket *s)
     if (s->err != 0)
         return TRUE; /* so_error pending: write reports it at once */
     if (s->type != SBT_TCP)
-        return TRUE;
+    {
+        /* a datagram is writable when the largest one would go out whole;
+         * otherwise arrange the wake (this does not block) and report it
+         * not-writable — select() owns the sleeping, once, for the whole set */
+        if (netifbase_tx_writable())
+            return TRUE;
+        sb_tx_want_space(s);
+        return FALSE;
+    }
     if (s->connecting)
         return FALSE;
     if (s->pcb.tcp == NULL || s->shut_wr)
@@ -490,9 +538,12 @@ static err_t sb_tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err)
     if (lst == NULL || err != ERR_OK || newpcb == NULL)
         return ERR_VAL;
 
+    /* A listener between ReleaseSocket() and ObtainSocket() has no owner to
+     * charge the new socket to: refuse the connection, as a full queue does. */
+    struct SocketBase *owner = sb_owner_first(lst);
     struct SbSocket *s = NULL;
-    if (lst->naccept < SB_ACCEPT_QMAX)
-        s = sb_sock_alloc(sb_owner_first(lst), SBT_TCP);
+    if (owner != NULL && lst->naccept < SB_ACCEPT_QMAX)
+        s = sb_sock_alloc(owner, SBT_TCP);
     if (s == NULL)
     {
         tcp_abort(newpcb);
@@ -613,6 +664,12 @@ void sb_sock_free(struct SocketBase *base, struct SbSocket *s)
     sb_owner_decref(s, base); /* this base gives up one fd on the socket */
     if (--s->refs != 0)
         return;
+
+    if (s->txWaiting)
+    {
+        RemoveMinNode(&s->txWaitNode);
+        s->txWaiting = FALSE;
+    }
 
     sb_mcast_drop_all(s); /* leave any IP_ADD_MEMBERSHIP groups this socket held */
 

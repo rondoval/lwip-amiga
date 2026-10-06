@@ -34,6 +34,130 @@ static BYTE sb_netdev_cmd(struct IOStdReq *io, UWORD cmd, APTR data, ULONG len)
     return io->io_Error;
 }
 
+/* The asynchronous twin, for everything issued from the tick loop: that loop
+ * must never block on the driver unit task (a DoIO here would stall lwIP timer
+ * servicing for the whole round trip — worst exactly when the link is busy),
+ * and a netdev command must never be issued under netstack_lock, which the unit
+ * task takes in its RX path. Both callers below harvest the reply on a later
+ * tick instead. */
+static void sb_netdev_send(struct IOStdReq *io, UWORD cmd, APTR data, ULONG len)
+{
+    KprintfT("[bsdsocket] %s: cmd 0x%04lx, len %lu\n", __func__, (ULONG)cmd, len);
+    io->io_Command = cmd;
+    io->io_Data = data;
+    io->io_Length = len;
+    io->io_Actual = 0;
+    SendIO((struct IORequest *)io);
+}
+
+/*
+ * RX profile: the stack's half of NETDEV_CMD_SET_RX_PROFILE.
+ *
+ * The driver can batch received frames for throughput or deliver a lone frame
+ * at once, and cannot know which is wanted; this layer can. The policy:
+ *
+ *   LATENCY is the normal state. It costs an idle or lightly loaded receive
+ *   side nothing - sparse frames take one interrupt each either way, only
+ *   earlier - and it is what every request/response conversation wants: SMB,
+ *   NFS, DNS, ping, an interactive session, a server on this machine.
+ *
+ *   THROUGHPUT is stated when the receive side is busy (SB_RX_BUSY_FRAMES or
+ *   more per tick) and no task has blocked waiting for a reply for
+ *   SB_RX_AWAIT_TICKS: a stream in one direction - a download nobody polls, or
+ *   the ACKs of an upload, which under the latency profile cost an interrupt
+ *   per handful of ACKs and a fifth of the send rate.
+ *
+ * "Waiting for a reply" is sb_rx_awaiting(): an opener that has sent blocks
+ * for input. That event moves the profile back at once (it signals the stack
+ * task); everything else is decided on the tick. The profile follows
+ * conversations, not packets: at most one command per tick plus one per
+ * conversation that starts during a bulk stream.
+ */
+#define SB_RX_BUSY_FRAMES 100u                       /* per tick: 2000 frames/s */
+#define SB_RX_AWAIT_TICKS (300u / NETSTACK_TICK_MS)  /* a conversation is over after this long */
+
+static void sb_netdev_profile_sync(struct SbStackCtx *ctx)
+{
+    UBYTE want = ctx->root->rxProfileStated;
+
+    if (!ctx->started || ctx->root->rxAwaitSig == 0 || ctx->rxProfileInFlight ||
+        ctx->rxProfileSent == want)
+        return;
+
+    ctx->rxProfileBuf.ndrp_Profile = want;
+    ctx->rxProfileBuf.ndrp_Reserved = 0;
+    ctx->rxProfileSent = want;
+    ctx->rxProfileInFlight = TRUE;
+    sb_netdev_send(&ctx->rxProfileIO, NETDEV_CMD_SET_RX_PROFILE, &ctx->rxProfileBuf,
+                   sizeof(ctx->rxProfileBuf));
+}
+
+void sb_netdev_profile_decide(struct SbStackCtx *ctx)
+{
+    struct SocketBase *root = ctx->root;
+
+    if (root->rxAwaitSig == 0)
+        return;
+
+    BOOL awaiting = (ULONG)(root->stackTicks - root->rxAwaitTick) < SB_RX_AWAIT_TICKS;
+    root->rxProfileStated = (ctx->rxWasBusy && !awaiting) ? NDRP_THROUGHPUT : NDRP_LATENCY;
+    sb_netdev_profile_sync(ctx);
+}
+
+void sb_netdev_profile_tick(struct SbStackCtx *ctx)
+{
+    if (ctx->root->rxAwaitSig == 0)
+        return; /* no netdev interface with the capability: ndi is not even ours */
+
+    ULONG frames = ctx->ndi.ndi_RxFrames;
+
+    ctx->rxWasBusy = (ULONG)(frames - ctx->rxFramesPrev) >= SB_RX_BUSY_FRAMES;
+    ctx->rxFramesPrev = frames;
+    sb_netdev_profile_decide(ctx);
+}
+
+void sb_netdev_profile_reply(struct SbStackCtx *ctx)
+{
+    if (!ctx->rxProfileInFlight || CheckIO((struct IORequest *)&ctx->rxProfileIO) == NULL)
+        return;
+    WaitIO((struct IORequest *)&ctx->rxProfileIO);
+    ctx->rxProfileInFlight = FALSE;
+    sb_netdev_profile_sync(ctx); /* the decision may have moved on meanwhile */
+}
+
+void sb_netdev_profile_drain(struct SbStackCtx *ctx)
+{
+    ctx->root->rxAwaitSig = 0; /* no more wake-ups from openers */
+    if (ctx->rxProfileInFlight)
+    {
+        AbortIO((struct IORequest *)&ctx->rxProfileIO);
+        WaitIO((struct IORequest *)&ctx->rxProfileIO);
+        ctx->rxProfileInFlight = FALSE;
+    }
+}
+
+/* START has succeeded. A driver without the capability is never sent the command. */
+static void sb_netdev_profile_start(struct SbStackCtx *ctx)
+{
+    struct SocketBase *root = ctx->root;
+
+    ctx->rxProfileInFlight = FALSE;
+    ctx->rxProfileSent = NDRP_UNSTATED; /* what the driver is on before the first command */
+    ctx->rxWasBusy = FALSE;
+    ctx->rxFramesPrev = ctx->ndi.ndi_RxFrames;
+    root->rxProfileStated = NDRP_LATENCY;
+    root->rxAwaitTick = root->stackTicks - SB_RX_AWAIT_TICKS;
+
+    if (!(ctx->ndi.ndi_Caps.ndc_Features & NDCF_RX_PROFILE) || ctx->rxAwaitSigOwned == 0)
+        return;
+
+    /* a second request on the unit devIO has open: same device, unit and reply port */
+    ctx->rxProfileIO = *ctx->devIO;
+    ctx->rxProfileIO.io_Message.mn_Length = sizeof(ctx->rxProfileIO);
+    root->rxAwaitSig = ctx->rxAwaitSigOwned;
+    sb_netdev_profile_sync(ctx);
+}
+
 LONG sb_netdev_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
                   LONG *aux)
 {
@@ -98,6 +222,7 @@ LONG sb_netdev_up(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
         return NETCTL_ERR_DEVICE;
     }
     ctx->started = TRUE;
+    sb_netdev_profile_start(ctx);
 
     sb_if_services(ctx, nif);
     return NETCTL_OK;
@@ -113,6 +238,7 @@ void sb_netdev_down(struct SbStackCtx *ctx)
         dhcp_release_and_stop(&ctx->ndi.ndi_Base.nib_Netif);
         netif_set_down(&ctx->ndi.ndi_Base.nib_Netif);
         netstack_unlock();
+        sb_netdev_profile_drain(ctx);
         sb_netdev_cmd(ctx->devIO, NETDEV_CMD_STOP, NULL, 0);
         ctx->started = FALSE;
     }
@@ -131,23 +257,9 @@ void sb_netdev_down(struct SbStackCtx *ctx)
     /* the device close itself belongs to sb_if_down (common to both backends) */
 }
 
-/* NIC-stats poll, asynchronous: the tick loop must never block on the driver
- * unit task (a DoIO here would stall lwIP timer servicing by the driver's
- * round-trip — worst exactly when the link is busy), and a netdev command must
- * never be issued under netstack_lock (the unit task takes that lock in its RX
- * path — deadlock). So the requests go out via SendIO and the replies are
- * harvested from devPort: GET_STATS, then GET_LINK, then one brief locked
- * publish into the root cache. */
-static void sb_netdev_send(struct IOStdReq *io, UWORD cmd, APTR data, ULONG len)
-{
-    KprintfT("[bsdsocket] %s: cmd 0x%04lx, len %lu\n", __func__, (ULONG)cmd, len);
-    io->io_Command = cmd;
-    io->io_Data = data;
-    io->io_Length = len;
-    io->io_Actual = 0;
-    SendIO((struct IORequest *)io);
-}
-
+/* NIC-stats poll: one cycle per second, asynchronous for the reasons given at
+ * sb_netdev_send. The replies are harvested from devPort — GET_STATS, then
+ * GET_LINK, then one brief locked publish into the root cache. */
 void sb_netdev_stats_kick(struct SbStackCtx *ctx)
 {
     if (!ctx->started || ctx->statsPhase != 0)

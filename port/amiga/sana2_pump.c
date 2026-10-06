@@ -60,6 +60,28 @@
  * the new process. */
 static struct Sana2If *s2if_pump_new;
 
+#ifdef PROFILE
+/* Reads harvested per pump wake: the driver's reply batching as the stack
+ * sees it. One per wake means each ReplyMsg woke the pump for a single
+ * frame — a task switch and a lock round trip per ACK, and GRO never holds
+ * two ACKs together; a burst's worth per wake means the replies reached the
+ * port together. Bounds fine around 1 and around the 64-frame RX batch. */
+#define S2_RX_PER_WAKE_BOUNDS 8
+static const u32 s2_rx_per_wake_bounds[S2_RX_PER_WAKE_BOUNDS] = {
+    1, 2, 4, 8, 16, 32, 64, 128,
+};
+static u32 s2_rx_per_wake_buckets[S2_RX_PER_WAKE_BOUNDS + 1];
+static struct perf_hist s2_rx_per_wake_hist = {
+    "nsprof", "s2_rx_per_wake", s2_rx_per_wake_bounds,
+    s2_rx_per_wake_buckets, S2_RX_PER_WAKE_BOUNDS,
+};
+
+void sana2if_pump_perf_report(void)
+{
+    perf_hist_report(&s2_rx_per_wake_hist);
+}
+#endif /* PROFILE */
+
 /* Pump-task state, stack-resident in s2if_pump_task, one pointer passed to
  * every helper. */
 struct S2Pump
@@ -88,6 +110,20 @@ struct S2Pump
     struct S2RxReq *s2p_RxDone;
     BOOL s2p_EvReplied;
 };
+
+/* A read's pbuf, its body longword-aligned: two bytes of pad ahead of the
+ * synthesized Ethernet header put the IP header (payload + 14) on a
+ * longword - the alignment the drivers' frame buffers have too, so the
+ * CopyToBuff callback moves longwords on both sides. lwIP reads the
+ * Ethernet header bytewise, and the header itself is written bytewise in
+ * s2if_rx_detach. */
+static inline struct pbuf *s2if_rx_pbuf(const struct S2Pump *pp)
+{
+    struct pbuf *pb = pbuf_alloc(PBUF_RAW, (u16_t)(pp->s2p_PbLen + 2), PBUF_RAM);
+    if (pb != NULL)
+        pbuf_remove_header(pb, 2);
+    return pb;
+}
 
 static void s2if_rx_arm(struct S2RxReq *r, struct pbuf *pb)
 {
@@ -182,8 +218,7 @@ static BOOL s2if_pump_arm_pbufs(struct S2Pump *pp)
         netstack_lock();
         for (; armed < stop; armed++)
         {
-            struct pbuf *pb =
-                pbuf_alloc(PBUF_RAW, (u16_t)pp->s2p_PbLen, PBUF_RAM);
+            struct pbuf *pb = s2if_rx_pbuf(pp);
             if (pb == NULL)
                 break;
             s2if_rx_arm(&pp->s2p_Reads[armed], pb);
@@ -307,7 +342,7 @@ static void s2if_pump_abort(struct S2Pump *pp)
     netstack_lock();
     ULONG writes = s2i->s2i_TxInFlight;
     struct S2TxReq *t = s2i->s2i_TxStorage;
-    for (ULONG i = 0; i < S2IF_TX_REQS; i++, t++)
+    for (ULONG i = 0; i < s2i->s2i_TxReqs; i++, t++)
     {
         if (t->stx_InFlight)
             AbortIO(&t->stx_Io.ios2_Req);
@@ -356,6 +391,7 @@ static void s2if_pump_harvest(struct S2Pump *pp)
     pp->s2p_RxDone = NULL;
     pp->s2p_EvReplied = FALSE;
     struct S2RxReq **rxTail = &pp->s2p_RxDone;
+    ULONG nRx = 0;
     struct Message *m;
     while ((m = GetMsg(pp->s2p_Port)) != NULL)
     {
@@ -376,6 +412,7 @@ static void s2if_pump_harvest(struct S2Pump *pp)
             r->srx_Next = NULL;
             *rxTail = r;
             rxTail = &r->srx_Next;
+            nRx++;
         }
         else /* CMD_WRITE / S2_BROADCAST / S2_MULTICAST */
         {
@@ -384,6 +421,8 @@ static void s2if_pump_harvest(struct S2Pump *pp)
             pp->s2p_TxDone = t;
         }
     }
+    if (nRx != 0)
+        PERF_HIST_ADD(&s2_rx_per_wake_hist, nRx);
 }
 
 /* TX completions + the link event: one short hold, then the off-lock
@@ -491,8 +530,7 @@ static ULONG s2if_pump_rx_requeue(struct S2Pump *pp, struct pbuf **deliver)
         }
         if (err == 0 && r->srx_Io.ios2_DataLength <= r->srx_Cap)
         {
-            struct pbuf *rep =
-                pbuf_alloc(PBUF_RAW, (u16_t)pp->s2p_PbLen, PBUF_RAM);
+            struct pbuf *rep = s2if_rx_pbuf(pp);
             if (rep == NULL)
             {
                 s2i->s2i_RxNoMem++; /* drop the frame, keep the read */

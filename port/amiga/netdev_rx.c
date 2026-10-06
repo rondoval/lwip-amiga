@@ -100,6 +100,8 @@ ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULONG count
     struct NetdevIf *ndi = stackctx;
     ULONG consumed = 0;
     ULONG since_yield = 0;
+
+    ndi->ndi_RxFrames += count;
     /* GRO rides on the RX csum offload: with lwIP's own TCP checksum check
      * active, a merged (rewritten) header would fail re-verification */
     BOOL gro = ndi->ndi_RxOffload;
@@ -145,7 +147,6 @@ ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULONG count
             if (drop[i])
             {
                 rxgro_flush_all(&ndi->ndi_Gro);
-                ndi->ndi_RxCsumBad++;
                 ndi->ndi_Ops->ndo_RxRelease(ndi->ndi_Drv, d->nrd_Cookie);
                 consumed++;
                 continue;
@@ -154,7 +155,6 @@ ULONG ndif_rx_input(APTR stackctx, const struct NetDevRxDesc *descs, ULONG count
             struct NdRxWrap *w = ndi->ndi_FreeWraps;
             if (w == NULL)
             {
-                ndi->ndi_RxNoWrap++;
                 rxgro_flush_all(&ndi->ndi_Gro); /* held frames are consumed: deliver */
                 netstack_unlock();
                 return consumed; /* backpressure: driver recycles the tail */
