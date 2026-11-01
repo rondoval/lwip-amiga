@@ -465,6 +465,17 @@ install(
     DESTINATION C
 )
 
+# Strip the shipped tools, like the library (-s above) and the other stack
+# components' tools: the symbol hunks are 2-3 KB per binary and unused at
+# runtime. sockbench (developer-only, not installed) keeps its symbols.
+foreach(tool
+        netdev-stats netinfo mdns
+        addnetinterface removenetinterface netshutdown
+        arp ping traceroute
+        getnetstatus shownetstatus netlogviewer netspeed)
+    target_link_options(${tool} PRIVATE -s)
+endforeach()
+
 # Sample interface config. Staged under Storage/NetInterfaces (the inactive
 # drawer, AmigaOS-style) so a dev-loop upload can never feed the
 # DEVS:NetInterfaces boot wildcard a stray file; the Installer copies it to
