@@ -1,3 +1,18 @@
+# Release notes — lwip-amiga 1.9
+
+Changes since v1.8. Ships `bsdsocket.library` 4.109.
+
+## Bug fixes / Improvements
+
+- **A client can reconnect from a source port it just used.** A server-side close
+  leaves the connection in TIME-WAIT for 2 minutes, and a new connection from
+  the same client port stalled for that time or timed out: connect() blocked
+  for 2 to 135 s, about one call in 300 with a Linux client. A new SYN above the
+  old connection's sequence numbers now reopens it at once (RFC 1122 4.2.2.13).
+  Frames with a VLAN tag keep the old behaviour.
+
+---
+
 # Release notes — lwip-amiga 1.8
 
 Changes since v1.6. Ships `bsdsocket.library` 4.108. Version 1.7 was never

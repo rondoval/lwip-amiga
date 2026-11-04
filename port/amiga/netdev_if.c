@@ -17,6 +17,7 @@
 #include "netdev_priv.h"
 #include "netstack.h"
 #include "netstack_diag.h"
+#include "tcp_tw_reopen.h"
 
 #define NDIF_MIN_WRAPS 64
 
@@ -218,7 +219,7 @@ LONG netdevif_create(struct NetdevIf *ndi, APTR drvCtx,
 
     netstack_lock();
     struct netif *added = netif_add_noaddr(&ndi->ndi_Base.nib_Netif, ndi,
-                                           ndif_netif_init, ethernet_input);
+                                           ndif_netif_init, tcp_tw_reopen_input);
     if (added != NULL)
     {
         netstack.ns_ActiveNetdev = ndi;
