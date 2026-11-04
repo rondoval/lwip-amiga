@@ -17,6 +17,7 @@
 #include "netstack.h"
 #include "netstack_diag.h"
 #include "sana2_priv.h"
+#include "tcp_tw_reopen.h"
 
 /* ------------------------------------------------------ copy callbacks --- */
 /* Driver-called, possibly from interrupt context per the SANA-II spec. */
@@ -166,7 +167,7 @@ LONG sana2if_create(struct Sana2If *s2i, struct Device *dev, struct Unit *unit,
 
     netstack_lock();
     struct netif *added = netif_add_noaddr(&s2i->s2i_Base.nib_Netif, s2i,
-                                           s2if_netif_init, ethernet_input);
+                                           s2if_netif_init, tcp_tw_reopen_input);
     if (added != NULL)
     {
         netstack.ns_ActiveSana2 = s2i;
