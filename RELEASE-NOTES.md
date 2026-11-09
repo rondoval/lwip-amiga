@@ -1,3 +1,28 @@
+# Release notes — lwip-amiga 1.9
+
+Changes since v1.8. Ships `bsdsocket.library` 4.109.
+
+Nothing to change in your configuration.
+
+---
+
+## Bug fixes / Improvements
+
+- **`TYPE=AUTO` uses the fast netdev interface of a driver that offers both.**
+  A driver that speaks netdev and SANA-II (genet.device 5.0) was run over
+  SANA-II, because it also calls itself a SANA-II device.
+
+---
+
+## For developers
+
+- The `TYPE=AUTO` probe decides by `NETDEV_CMD_ATTACH` in the
+  `NSCMD_DEVICEQUERY` command list, whatever device type the driver reports.
+  `netdev.h` now says so, and defines when a SANA-II opener holds a unit
+  against `NETDEV_CMD_ATTACH`.
+
+---
+
 # Release notes — lwip-amiga 1.8
 
 Changes since v1.6. Ships `bsdsocket.library` 4.108. Version 1.7 was never
@@ -41,6 +66,7 @@ A compatibility release. Nothing to change in your configuration.
 ---
 
 ## For developers
+
 
 - `IoctlSocket()` answers the read-only interface requests `SIOCGIFCONF`,
   `SIOCGIFFLAGS`, `SIOCGIFADDR`, `SIOCGIFDSTADDR`, `SIOCGIFBRDADDR`,

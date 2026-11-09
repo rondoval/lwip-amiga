@@ -11,7 +11,9 @@
 **     its size, io_Error returns 0 or an NDERR_/IOERR_ code. OUT fields are
 **     filled by the driver. Ops are serialized by the driver's unit task.
 **     A driver advertises the commands it implements via NSCMD_DEVICEQUERY;
-**     a dual-personality driver (SANA-II + netdev) lists both sets.
+**     a dual-personality driver (SANA-II + netdev) reports NSDEVTYPE_SANA2
+**     and lists both sets, so a stack decides by NETDEV_CMD_ATTACH in the
+**     list, never by the device type.
 **   - The DATA PATH is direct calls in both directions, exchanged once by
 **     NETDEV_CMD_ATTACH. Every entry carries an explicit context as its
 **     first argument (drivers are ROM-able and carry no writable data — the
@@ -28,7 +30,10 @@
 **       -> NETDEV_CMD_DETACH        (all buffers home, contexts die)
 **     CloseDevice()
 **     One attach per unit at a time; ATTACH fails with NDERR_BUSY while the
-**     unit is attached or has active legacy (SANA-II) openers.
+**     unit is attached or held by SANA-II: a SANA-II opener holds it from its
+**     S2_CONFIGINTERFACE or S2_ONLINE until it closes. Opening the device
+**     holds nothing (a stack may open with SANA-II buffer tags before it
+**     knows which ABI the driver speaks).
 **
 **  Buffer ownership — the founding rule (only the driver knows what its DMA
 **  engine reaches; the stack NEVER AllocMem()s packet memory):
