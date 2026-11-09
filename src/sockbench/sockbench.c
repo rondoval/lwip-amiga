@@ -68,6 +68,7 @@ struct Device *TimerBase;
 /* bsdsocket.library reports BSD errno numbering; this NDK's netinclude ships no
  * errno constants, and Roadshow's Errno() is independent of the C library's. */
 #define SB_EWOULDBLOCK 35
+#define SB_ENOBUFS 55
 
 #define BENCH_SINK_PORT 5001   /* peer discards what we send (tx test) */
 #define BENCH_SOURCE_PORT 5002 /* peer blasts at us (rx test) */
@@ -551,6 +552,7 @@ int main(int argc, char **argv)
     unsigned long long deadline = start + (unsigned long long)seconds * freq;
     unsigned long long now = start;
     LONG active = streams;
+    ULONG refusedSends = 0;
 
     /* Blocking mode: no readiness loop at all. send() returns only once the
      * whole buffer is queued, so the task sits inside sb_tcp_send across
@@ -616,13 +618,19 @@ int main(int argc, char **argv)
                     continue;
                 }
                 /* r<=0: EWOULDBLOCK means "nothing more right now" (retry on
-                 * the next readiness). A real error, or a TCP r==0 (EOF), ends
-                 * the stream; a UDP r==0 is just an empty datagram, so keep it. */
-                BOOL failed = (r < 0 && Errno() != SB_EWOULDBLOCK);
+                 * the next readiness), and so does a UDP ENOBUFS: a BSD stack
+                 * (Roadshow) drops the datagram while its interface queue is
+                 * full. A real error, or a TCP r==0 (EOF), ends the stream; a
+                 * UDP r==0 is just an empty datagram, so keep it. */
+                LONG error = (r < 0) ? Errno() : 0;
+                BOOL refused = (udp && error == SB_ENOBUFS);
+                if (refused)
+                    refusedSends++;
+                BOOL failed = (r < 0 && error != SB_EWOULDBLOCK && !refused);
                 if (failed || (r == 0 && !udp))
                 {
                     if (failed)
-                        printf("sockbench: stream %ld errno %ld\n", (long)i, (long)Errno());
+                        printf("sockbench: stream %ld errno %ld\n", (long)i, (long)error);
                     CloseSocket(sock[i]);
                     sock[i] = -1;
                     active--;
@@ -656,6 +664,9 @@ int main(int argc, char **argv)
     if (!rx)
         printf(udp ? "(udp tx counts datagrams the stack accepted; the peer's count shows loss)\n"
                    : "(tx counts bytes accepted into send buffers; ~256 KB/stream tail margin)\n");
+    if (refusedSends != 0)
+        printf("(the stack refused %lu datagrams with ENOBUFS: interface queue full)\n",
+               (unsigned long)refusedSends);
     else if (udp && mbps > 0 && ticks != 0)
     {
         /* the same Mb/s x10 arithmetic as bench_report, against the pace */
