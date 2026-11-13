@@ -18,11 +18,12 @@ Nothing to change in your configuration.
 
 - The `TYPE=AUTO` probe decides by `NETDEV_CMD_ATTACH` in the
   `NSCMD_DEVICEQUERY` command list, whatever device type the driver reports.
-- `netdev.h` defines the claim a driver that offers both interfaces keeps, and
-  that its SANA-II side refuses with `S2ERR_OUTOFSERVICE` while a netdev stack
-  holds the unit.
-  `netdev.h` now says so, and defines when a SANA-II opener holds a unit
-  against `NETDEV_CMD_ATTACH`.
+- `netdev.h` defines the claim a driver that offers both interfaces keeps:
+  when a SANA-II opener holds a unit against `NETDEV_CMD_ATTACH`, and that its
+  SANA-II side refuses with `S2ERR_OUTOFSERVICE` while a netdev stack holds the
+  unit. It also defines the open request: a plain `IOStdReq`, or an
+  `IOSana2Req` whose `ios2_BufferManagement` holds SANA-II tags or NULL and
+  stays as the driver leaves it until `CloseDevice()`.
 
 ---
 

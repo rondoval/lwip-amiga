@@ -35,7 +35,11 @@
 **     is attached, those fail with S2ERR_OUTOFSERVICE (not S2ERR_BAD_STATE,
 **     which SANA-II stacks read as "already done"). Opening the device
 **     holds nothing (a stack may open with SANA-II buffer tags before it
-**     knows which ABI the driver speaks).
+**     knows which ABI the driver speaks). The open request is a plain
+**     struct IOStdReq, or a struct IOSana2Req whose ios2_BufferManagement
+**     holds SANA-II buffer-management tags or NULL: a request of that size
+**     is a SANA-II open, the driver leaves its per-opener cookie in the
+**     field, and the field stays as it is until CloseDevice().
 **
 **  Buffer ownership — the founding rule (only the driver knows what its DMA
 **  engine reaches; the stack NEVER AllocMem()s packet memory):
