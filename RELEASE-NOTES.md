@@ -18,6 +18,9 @@ Nothing to change in your configuration.
 
 - The `TYPE=AUTO` probe decides by `NETDEV_CMD_ATTACH` in the
   `NSCMD_DEVICEQUERY` command list, whatever device type the driver reports.
+- `netdev.h` defines the claim a driver that offers both interfaces keeps, and
+  that its SANA-II side refuses with `S2ERR_OUTOFSERVICE` while a netdev stack
+  holds the unit.
   `netdev.h` now says so, and defines when a SANA-II opener holds a unit
   against `NETDEV_CMD_ATTACH`.
 

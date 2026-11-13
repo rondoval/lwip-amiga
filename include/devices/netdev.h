@@ -31,7 +31,9 @@
 **     CloseDevice()
 **     One attach per unit at a time; ATTACH fails with NDERR_BUSY while the
 **     unit is attached or held by SANA-II: a SANA-II opener holds it from its
-**     S2_CONFIGINTERFACE or S2_ONLINE until it closes. Opening the device
+**     S2_CONFIGINTERFACE or S2_ONLINE until it closes. While a netdev stack
+**     is attached, those fail with S2ERR_OUTOFSERVICE (not S2ERR_BAD_STATE,
+**     which SANA-II stacks read as "already done"). Opening the device
 **     holds nothing (a stack may open with SANA-II buffer tags before it
 **     knows which ABI the driver speaks).
 **
