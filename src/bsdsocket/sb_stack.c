@@ -122,16 +122,16 @@ static LONG sb_if_open(struct SbStackCtx *ctx, const struct NetCtlIfConfig *nif,
     return NETCTL_ERR_DEVICE;
 }
 
-/* AUTO driver-ABI probe over NSD. A netdev driver answers NSCMD_DEVICEQUERY
- * with NETDEV_CMD_ATTACH in its command list; a modern SANA-II driver
- * answers NSDEVTYPE_SANA2; a device without NSD support predates it and is
- * assumed SANA-II (every netdev driver implements NSD). A non-network NSD
- * device falls through to SANA-II, whose S2_DEVICEQUERY then fails with a
- * precise error — better than guessing here. */
+/* AUTO driver-ABI probe over NSD. The command list decides: a driver that
+ * lists NETDEV_CMD_ATTACH speaks netdev, whatever device type it reports — a
+ * dual-personality driver reports NSDEVTYPE_SANA2 and lists both sets.
+ * Everything else is SANA-II: a device without NSD support predates it
+ * (every netdev driver implements NSD), and a non-network NSD device fails
+ * S2_DEVICEQUERY with a precise error — better than guessing here. */
 static UWORD sb_if_probe_kind(struct SbStackCtx *ctx)
 {
     struct NSDeviceQueryResult nsd;
-    memset(&nsd, 0, sizeof(nsd));
+    memset(&nsd, 0, sizeof(nsd)); /* a driver that fills less leaves the list NULL */
 
     struct IOStdReq *io = ctx->devIO;
     io->io_Command = NSCMD_DEVICEQUERY;
@@ -141,8 +141,6 @@ static UWORD sb_if_probe_kind(struct SbStackCtx *ctx)
     DoIO((struct IORequest *)io);
 
     if (io->io_Error != 0)
-        return NIF_KIND_SANA2;
-    if (nsd.nsdqr_DeviceType == NSDEVTYPE_SANA2)
         return NIF_KIND_SANA2;
     if (nsd.nsdqr_SupportedCommands != NULL)
     {
