@@ -69,7 +69,9 @@ add_library(netstack STATIC
 
 target_compile_options(netstack PRIVATE -O3 ${LWIP_WARN})
 
-# Vendored upstream lwIP; we do not patch it.  At -O3 GCC unrolls the option
+# lwIP is our fork (rondoval/lwip, branch amiga-dev), which carries only
+# upstreamable patches (docs/TODO.md, "lwIP fork — carried patches"); a false
+# warning is silenced here rather than patched there.  At -O3 GCC unrolls the option
 # loops in dhcp_discover/select/renew/reboot but cannot bound options_out_len
 # (dhcp_create_msg hands it back through a pointer out-param), so it flags the
 # last unrolled write as landing exactly at the end of dhcp_msg.options.  The

@@ -13,11 +13,18 @@ Nothing to change in your configuration.
   SANA-II, because it also calls itself a SANA-II device.
 - **The commands in `C:` are about 33 KB smaller in all:** they no longer
   carry symbol tables that nothing reads. Contributed by TuKo1982.
+- **A client can reconnect at once from a port it has just used.** When the
+  Amiga had closed a connection first, a new connection from the same client
+  port stalled for up to 2 minutes or timed out: about one call in 300 from a
+  Linux client to a small command server. Contributed by TuKo1982.
 
 ---
 
 ## For developers
 
+- The lwIP fork has a new option, `LWIP_TCP_TW_REOPEN`, on in this build: a
+  plain SYN above the end of a connection in TIME-WAIT reopens it, as BSD and
+  Linux do, and the new connection starts above the old one's sequence numbers.
 - The `TYPE=AUTO` probe decides by `NETDEV_CMD_ATTACH` in the
   `NSCMD_DEVICEQUERY` command list, whatever device type the driver reports.
 - `netdev.h` defines the claim a driver that offers both interfaces keeps:
