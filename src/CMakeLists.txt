@@ -37,6 +37,11 @@ find_package(Emu68Common 2.3 CONFIG REQUIRED) # 2.3: prefs_open(), strfit()
 # targets created after this call — it must precede every target in this dir.
 emu68_debug_definitions()
 
+# Every program built here is linked with -s: its symbol hunks are 2-3 KB and
+# nothing reads them at runtime. Like the call above, this reaches only targets
+# created after it, so it precedes them all.
+add_link_options(-s)
+
 # --- netstack: lwIP core + Amiga port layer ---------------------------------
 # The stack proper as a static library: lwIP compiled with the
 # real port configuration (port/amiga/include/lwipopts.h) plus the port
@@ -142,7 +147,6 @@ target_link_options(bsdsocket_library
     PRIVATE
         -nostdlib
         -nostartfiles
-        -s
 )
 
 target_link_libraries(bsdsocket_library
@@ -464,17 +468,6 @@ install(
     FILES ${CMAKE_SOURCE_DIR}/dist/NetSpeed.info
     DESTINATION C
 )
-
-# Strip the shipped tools, like the library (-s above) and the other stack
-# components' tools: the symbol hunks are 2-3 KB per binary and unused at
-# runtime. sockbench (developer-only, not installed) keeps its symbols.
-foreach(tool
-        netdev-stats netinfo mdns
-        addnetinterface removenetinterface netshutdown
-        arp ping traceroute
-        getnetstatus shownetstatus netlogviewer netspeed)
-    target_link_options(${tool} PRIVATE -s)
-endforeach()
 
 # Sample interface config. Staged under Storage/NetInterfaces (the inactive
 # drawer, AmigaOS-style) so a dev-loop upload can never feed the

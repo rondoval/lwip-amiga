@@ -11,6 +11,8 @@ Nothing to change in your configuration.
 - **`TYPE=AUTO` uses the fast netdev interface of a driver that offers both.**
   A driver that speaks netdev and SANA-II (genet.device 5.0) was run over
   SANA-II, because it also calls itself a SANA-II device.
+- **The commands in `C:` are about 33 KB smaller in all:** they no longer
+  carry symbol tables that nothing reads. Contributed by TuKo1982.
 
 ---
 
