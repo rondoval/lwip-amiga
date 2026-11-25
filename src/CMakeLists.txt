@@ -65,16 +65,13 @@ add_library(netstack STATIC
     ${CMAKE_SOURCE_DIR}/port/amiga/sana2_if.c
     ${CMAKE_SOURCE_DIR}/port/amiga/sana2_tx.c
     ${CMAKE_SOURCE_DIR}/port/amiga/sana2_pump.c
-    ${CMAKE_SOURCE_DIR}/port/amiga/tcp_tw_reopen.c
 )
 
 target_compile_options(netstack PRIVATE -O3 ${LWIP_WARN})
 
-# Outside LTO: inside it this small file moved the whole image (see tcp_tw_reopen.h).
-set_source_files_properties(${CMAKE_SOURCE_DIR}/port/amiga/tcp_tw_reopen.c PROPERTIES
-    COMPILE_OPTIONS "-fno-lto")
-
-# Vendored upstream lwIP; we do not patch it.  At -O3 GCC unrolls the option
+# lwIP is our fork (rondoval/lwip, branch amiga-dev), which carries only
+# upstreamable patches (docs/TODO.md, "lwIP fork — carried patches"); a false
+# warning is silenced here rather than patched there.  At -O3 GCC unrolls the option
 # loops in dhcp_discover/select/renew/reboot but cannot bound options_out_len
 # (dhcp_create_msg hands it back through a pointer out-param), so it flags the
 # last unrolled write as landing exactly at the end of dhcp_msg.options.  The

@@ -204,6 +204,11 @@
  * and consume the RX mark; all policy (excision, SO_OOBINLINE, SIOCATMARK)
  * lives in the bsdsocket layer. */
 #define LWIP_TCP_URG                    1
+/* Reopen a connection from TIME-WAIT on a new SYN (fork addition), as BSD and
+ * Linux do. A server here that closes first leaves the connection in TIME-WAIT
+ * for 2 * TCP_MSL, and a client that comes back from the same port within that
+ * time (Linux reuses its ports within seconds) stalled until it expired. */
+#define LWIP_TCP_TW_REOPEN              1
 /* init.c's sanity check requires PBUF_POOL to cover TCP_WND, assuming RX
  * allocates from it. Our RX buffers are driver-owned custom pbufs — the
  * pool only serves loopback — so that premise doesn't hold here. */

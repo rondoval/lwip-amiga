@@ -1,8 +1,8 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-3-Clause
 # Build the TIME-WAIT reopen tests (host gcc + ASAN) against ../../lwip:
-#   twreopen_test        with the input filter
-#   twreopen_test_nohook without it: the reopen checks must fail (run it with "nohook")
+#   twreopen_test      with LWIP_TCP_TW_REOPEN, the lwIP fork's option
+#   twreopen_test_off  without it: the reopen checks must fail (run it with "off")
 set -e
 HERE=$(dirname "$(readlink -f "$0")")
 ROOT=$(readlink -f "$HERE/../..")
@@ -29,9 +29,8 @@ $HERE/twreopen_test.c
 
 FLAGS="-O1 -g -fsanitize=address,undefined -fno-sanitize=alignment -fno-omit-frame-pointer \
     -Wall -Wextra -Wno-unused-parameter \
-    -I$HERE -I$FUZZ/shim -I$ROOT/port/amiga/include -I$LWIP/src/include \
-    -DTCP_TW_REOPEN_NEXT=tw_test_next"
+    -I$HERE -I$FUZZ/shim -I$LWIP/src/include"
 
-gcc $FLAGS $SRCS "$ROOT/port/amiga/tcp_tw_reopen.c" -o "$HERE/twreopen_test"
-gcc $FLAGS -DTW_NO_FILTER $SRCS "$ROOT/port/amiga/tcp_tw_reopen.c" -o "$HERE/twreopen_test_nohook"
-echo "built: $HERE/twreopen_test $HERE/twreopen_test_nohook"
+gcc $FLAGS $SRCS -o "$HERE/twreopen_test"
+gcc $FLAGS -DLWIP_TCP_TW_REOPEN=0 $SRCS -o "$HERE/twreopen_test_off"
+echo "built: $HERE/twreopen_test $HERE/twreopen_test_off"

@@ -44,7 +44,10 @@
 #define LWIP_TCP_SACK_OUT               1
 #define TCP_LISTEN_BACKLOG              1
 
-/* --- the feature under test is outside lwIP: tcp_tw_reopen.c --- */
+/* --- the feature under test; build.sh also builds it off --- */
+#ifndef LWIP_TCP_TW_REOPEN
+#define LWIP_TCP_TW_REOPEN              1
+#endif
 #define LWIP_TCP_URG                    1
 
 #define LWIP_DEBUG                      1

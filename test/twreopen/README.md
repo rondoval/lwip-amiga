@@ -1,12 +1,13 @@
 # TIME-WAIT reopen tests
 
-Deterministic host tests (gcc + ASAN/UBSAN) of `port/amiga/tcp_tw_reopen.c`.
-Real frames enter through `tcp_tw_reopen_input()` and go on to `ip_input()`, so
-the filter and lwIP's `tcp_input()` both run; nothing in lwIP is patched.
+Deterministic host tests (gcc + ASAN/UBSAN) of `LWIP_TCP_TW_REOPEN`, the lwIP
+fork's reopen of a TIME-WAIT connection on a new SYN (`lwip/src/core/tcp_in.c`).
+Real packets enter through `ip_input()`, so lwIP's own checks and `tcp_input()`
+all run.
 
 ```
-./build.sh && ./twreopen_test && ./twreopen_test_nohook nohook
+./build.sh && ./twreopen_test && ./twreopen_test_off off
 ```
 
-`twreopen_test_nohook` is the same reopen part built without the filter: it must
+`twreopen_test_off` is the same reopen part built with the option off: it must
 report failures, which shows the tests see the problem.
