@@ -1,3 +1,41 @@
+# Release notes — lwip-amiga 1.9
+
+Changes since v1.8. Ships `bsdsocket.library` 4.109.
+
+Nothing to change in your configuration.
+
+---
+
+## Bug fixes / Improvements
+
+- **`TYPE=AUTO` uses the fast netdev interface of a driver that offers both.**
+  A driver that speaks netdev and SANA-II (genet.device 5.0) was run over
+  SANA-II, because it also calls itself a SANA-II device.
+- **The commands in `C:` are about 33 KB smaller in all:** they no longer
+  carry symbol tables that nothing reads. Contributed by TuKo1982.
+- **A client can reconnect at once from a port it has just used.** When the
+  Amiga had closed a connection first, a new connection from the same client
+  port stalled for up to 2 minutes or timed out: about one call in 300 from a
+  Linux client to a small command server. Contributed by TuKo1982.
+
+---
+
+## For developers
+
+- The lwIP fork has a new option, `LWIP_TCP_TW_REOPEN`, on in this build: a
+  plain SYN above the end of a connection in TIME-WAIT reopens it, as BSD and
+  Linux do, and the new connection starts above the old one's sequence numbers.
+- The `TYPE=AUTO` probe decides by `NETDEV_CMD_ATTACH` in the
+  `NSCMD_DEVICEQUERY` command list, whatever device type the driver reports.
+- `netdev.h` defines the claim a driver that offers both interfaces keeps:
+  when a SANA-II opener holds a unit against `NETDEV_CMD_ATTACH`, and that its
+  SANA-II side refuses with `S2ERR_OUTOFSERVICE` while a netdev stack holds the
+  unit. It also defines the open request: a plain `IOStdReq`, or an
+  `IOSana2Req` whose `ios2_BufferManagement` holds SANA-II tags or NULL and
+  stays as the driver leaves it until `CloseDevice()`.
+
+---
+
 # Release notes — lwip-amiga 1.8
 
 Changes since v1.6. Ships `bsdsocket.library` 4.108. Version 1.7 was never
@@ -41,6 +79,7 @@ A compatibility release. Nothing to change in your configuration.
 ---
 
 ## For developers
+
 
 - `IoctlSocket()` answers the read-only interface requests `SIOCGIFCONF`,
   `SIOCGIFFLAGS`, `SIOCGIFADDR`, `SIOCGIFDSTADDR`, `SIOCGIFBRDADDR`,

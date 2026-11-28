@@ -37,6 +37,11 @@ find_package(Emu68Common 2.3 CONFIG REQUIRED) # 2.3: prefs_open(), strfit()
 # targets created after this call — it must precede every target in this dir.
 emu68_debug_definitions()
 
+# Every program built here is linked with -s: its symbol hunks are 2-3 KB and
+# nothing reads them at runtime. Like the call above, this reaches only targets
+# created after it, so it precedes them all.
+add_link_options(-s)
+
 # --- netstack: lwIP core + Amiga port layer ---------------------------------
 # The stack proper as a static library: lwIP compiled with the
 # real port configuration (port/amiga/include/lwipopts.h) plus the port
@@ -64,7 +69,9 @@ add_library(netstack STATIC
 
 target_compile_options(netstack PRIVATE -O3 ${LWIP_WARN})
 
-# Vendored upstream lwIP; we do not patch it.  At -O3 GCC unrolls the option
+# lwIP is our fork (rondoval/lwip, branch amiga-dev), which carries only
+# upstreamable patches (docs/TODO.md, "lwIP fork — carried patches"); a false
+# warning is silenced here rather than patched there.  At -O3 GCC unrolls the option
 # loops in dhcp_discover/select/renew/reboot but cannot bound options_out_len
 # (dhcp_create_msg hands it back through a pointer out-param), so it flags the
 # last unrolled write as landing exactly at the end of dhcp_msg.options.  The
@@ -142,7 +149,6 @@ target_link_options(bsdsocket_library
     PRIVATE
         -nostdlib
         -nostartfiles
-        -s
 )
 
 target_link_libraries(bsdsocket_library
